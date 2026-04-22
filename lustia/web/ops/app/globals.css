@@ -1,0 +1,81 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Ops — Amber / Orange accent palette. High contrast for operational clarity.
+ * Design-system semantic tokens (DESIGN_SYSTEM.md) are mapped here.
+ * New tokens added below should be flagged for ui-ux-expert review.
+ *
+ * Token additions in this file (not in DESIGN_SYSTEM.md, flagged for ui-ux-expert):
+ *   - --ring: focus ring color (amber-600 equivalent)
+ */
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 20 14% 4%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 20 14% 4%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 20 14% 4%;
+
+    /* accent — Amber 600 */
+    --primary: 32 95% 44%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 38 100% 96%;
+    --secondary-foreground: 32 95% 30%;
+
+    --muted: 210 40% 96%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+
+    /* accent hover surfaces — Orange tint */
+    --accent: 38 100% 96%;
+    --accent-foreground: 32 95% 44%;
+
+    /* danger */
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+
+    /* Focus ring — amber */
+    --ring: 32 95% 44%;
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 20 14% 4%;
+    --foreground: 38 100% 96%;
+    --card: 20 14% 8%;
+    --card-foreground: 38 100% 96%;
+    --popover: 20 14% 8%;
+    --popover-foreground: 38 100% 96%;
+    --primary: 32 95% 54%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 20 14% 16%;
+    --secondary-foreground: 38 100% 96%;
+    --muted: 20 14% 16%;
+    --muted-foreground: 38 40% 64%;
+    --accent: 20 14% 16%;
+    --accent-foreground: 32 95% 54%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 38 100% 96%;
+    --border: 20 14% 20%;
+    --input: 20 14% 20%;
+    --ring: 32 95% 54%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}

@@ -1,0 +1,179 @@
+# Lustia — local development stack (Phase 1 + Phase 2)
+#
+# Brings up:
+#   postgres  → PostgreSQL 16 with init-db/ for first-boot role creation
+#   migrator  → golang-migrate, pinned, one-shot (runs migrations and exits 0)
+#   auth      → auth-service (Go + Gin), waits for migrator to complete
+#
+# Usage:
+#   cp .env.example .env                           # fill in the values
+#   ../deploy/secrets/ …                            # generate JWT keys (see README.md)
+#   docker compose up -d
+#   docker compose logs -f migrator                # watch migrations finish
+#   curl localhost:${AUTH_PORT}/readyz
+#
+# Secrets policy:
+#   • No literal secrets in this file.
+#   • Required secrets use ${VAR:?required} so `docker compose` fails fast if missing.
+#   • JWT private key is mounted from ./secrets/jwt_private.pem (read-only).
+#   • This file is portable: Linux, macOS, Windows+WSL2. No network_mode: host,
+#     no absolute host paths, no platform-specific volume syntax.
+
+name: lustia
+
+networks:
+  lustia:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: lustia_postgres_data
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: lustia-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      # Passed through to init-db/01-create-app-role.sh (not a Postgres var).
+      LUSTIA_APP_PASSWORD: ${LUSTIA_APP_PASSWORD:?LUSTIA_APP_PASSWORD is required}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Init scripts run only on an empty data directory (first boot).
+      # Remove the volume (`docker compose down -v`) to re-run them.
+      - ./init-db:/docker-entrypoint-initdb.d:ro
+    networks:
+      - lustia
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # golang-migrate — one-shot DDL runner
+  # Runs as the Postgres superuser (migration 1 creates the lustia_migrator role
+  # and the rest of the schema). For Phase 2 dev this is acceptable; for
+  # staging/prod, run migrations as the dedicated `lustia_migrator` role after
+  # the initial bootstrap. See OPERATIONS.md § DB migration strategy.
+  # ---------------------------------------------------------------------------
+  migrator:
+    image: migrate/migrate:v4.17.1
+    container_name: lustia-migrator
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+    volumes:
+      - ../migrations:/migrations:ro
+    networks:
+      - lustia
+    # Single-shot: apply all pending migrations and exit. Never restart on exit.
+    restart: "no"
+    command: ["-path=/migrations", "-database=$${DATABASE_URL}", "up"]
+
+  # ---------------------------------------------------------------------------
+  # Mailpit — local SMTP catcher + web UI for viewing dispatched emails.
+  # Replaces MailHog / MailCatcher — actively maintained Go implementation.
+  #   SMTP:   localhost:${MAILPIT_SMTP_PORT:-1025}
+  #   Web UI: http://localhost:${MAILPIT_UI_PORT:-8025}
+  # No authentication in dev; no persistence (inbox cleared on restart).
+  # ---------------------------------------------------------------------------
+  mailpit:
+    image: axllent/mailpit:v1.20
+    container_name: lustia-mailpit
+    restart: unless-stopped
+    ports:
+      - "${MAILPIT_SMTP_PORT:-1025}:1025" # SMTP inbound
+      - "${MAILPIT_UI_PORT:-8025}:8025"   # Web UI
+    environment:
+      MP_MAX_MESSAGES: "500"
+      MP_DATABASE: ""        # in-memory; clears on restart (dev-only)
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    networks:
+      - lustia
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8025/api/v1/info"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # auth-service
+  # ---------------------------------------------------------------------------
+  auth:
+    image: lustia-auth:dev
+    container_name: lustia-auth
+    build:
+      # Build context is the service directory. The service's go.mod contains a
+      # `replace` pointing at a local copy of common-configs OUTSIDE this tree.
+      # The Dockerfile ignores the replace and fetches common-configs from the
+      # public GitHub repo during `go mod download` (Option C — see
+      # OPERATIONS.md § Image build).
+      context: ../services/auth
+      dockerfile: Dockerfile
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+    environment:
+      GIN_MODE: ${GIN_MODE:-debug}
+      HTTP_PORT: ${AUTH_PORT:-8080}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      CONFIG_PATH: /app/config/app.yaml
+      APP_DISPLAY_NAME: ${APP_DISPLAY_NAME:-Lustia}
+      # DB — connect as lustia_app (RLS enforced).
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: lustia_app
+      DB_PASSWORD: ${LUSTIA_APP_PASSWORD:?LUSTIA_APP_PASSWORD is required}
+      # JWT — private key is mounted as a file (per SECURITY.md I-4).
+      JWT_PRIVATE_KEY_PATH: /app/secrets/jwt_private.pem
+      JWT_KID: ${JWT_KID:-primary}
+      # Bootstrap super admin (consumed per ADR 0003 — post-migration step).
+      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL:-admin@lustia.local}
+      SUPER_ADMIN_INITIAL_PASSWORD: ${SUPER_ADMIN_INITIAL_PASSWORD:?SUPER_ADMIN_INITIAL_PASSWORD is required}
+      # SMTP — points at Mailpit in dev; swap to real provider in staging/prod.
+      SMTP_ENABLED: ${SMTP_ENABLED:-true}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-Lustia <no-reply@lustia.local>}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_TIMEOUT_MS: ${SMTP_TIMEOUT_MS:-5000}
+      PASSWORD_RESET_URL_BASE: ${PASSWORD_RESET_URL_BASE:-http://localhost:3000/auth/reset}
+    ports:
+      - "${AUTH_PORT:-8080}:${AUTH_PORT:-8080}"
+    volumes:
+      - ../services/auth/config/app.yaml:/app/config/app.yaml:ro
+      - ./secrets/jwt_private.pem:/app/secrets/jwt_private.pem:ro
+    networks:
+      - lustia
+    restart: unless-stopped
+    # Healthcheck:
+    #   The final image is distroless (no shell, no curl, no wget). Rather
+    #   than embed a second binary in the image for dev-only, readiness is
+    #   validated by:
+    #     (a) `depends_on` gating on migrator `service_completed_successfully`,
+    #     (b) the container staying up (Docker reports `running`),
+    #     (c) the caller hitting /readyz directly from the host — the port is
+    #         published (see `ports:` above).
+    #   When we introduce a dev-flavoured image (distroless:debug-nonroot) or
+    #   ship a tiny `/healthprobe` sidecar, replace this with an HTTP check.
+    #   Tracked in OPERATIONS.md "Open items for devops" #6.

@@ -1,0 +1,53 @@
+# systemd unit for the Lustia docker-compose stack.
+#
+# Installation (on the VM, as root):
+#   sudo cp /srv/lustia/lustia/deploy/vm/lustia.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now lustia.service
+#
+# Assumes:
+#   - repo cloned at /srv/lustia/ (so compose file is at
+#     /srv/lustia/lustia/deploy/docker-compose.yml)
+#   - dedicated user "lustia" owns /srv/lustia and is in the "docker" group
+#   - `docker compose` (v2 plugin) is installed
+#
+# This unit does NOT `git pull`. Deploys are manual: ssh in, git pull,
+# docker compose up -d. The unit only ensures the stack survives reboots.
+
+[Unit]
+Description=Lustia docker-compose stack (auth + postgres + migrator + mailpit)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=lustia
+Group=lustia
+WorkingDirectory=/srv/lustia/lustia/deploy
+
+# --- startup ---
+# `up -d` is idempotent: no-op when already running.
+# --remove-orphans trims old containers from a previous compose file.
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+
+# --- shutdown ---
+# `down` triggers SIGTERM → graceful shutdown in auth-service (srv.Shutdown).
+# Timeout matches shutdownTimeout constant in cmd/auth/main.go (10s) + buffer.
+ExecStop=/usr/bin/docker compose down --timeout 15
+
+# --- reload on config change ---
+# `sudo systemctl reload lustia` reruns `up -d` — picks up any compose/env edits.
+ExecReload=/usr/bin/docker compose up -d --remove-orphans
+
+# --- safety ---
+# No privilege escalation. Never run the unit as root.
+NoNewPrivileges=true
+# Don't let compose write anywhere except the repo + /tmp.
+# ReadWritePaths=/srv/lustia /tmp        # uncomment after confirming no other write paths
+# Kill the process group if ExecStop overruns (belt + suspenders).
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

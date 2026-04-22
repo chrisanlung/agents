@@ -1,0 +1,622 @@
+{
+  "info": {
+    "_postman_id": "lustia-auth-phase2-adr0007",
+    "name": "Lustia Auth Service (Phase 2 + ADR 0007)",
+    "description": "End-to-end collection for the user-membership auth model (ADR 0007).\n\n## What changed vs the previous collection\n\n- `POST /auth/login` request body no longer has `tenant_slug`. Lookup is by email only.\n- Login response carries `scope: \"platform\" | \"tenant\" | \"user\"` and a `memberships` array. The caller's next step depends on the scope.\n- `POST /auth/select-tenant` is the new endpoint users hit when `scope=user` (multi-tenant).\n- JWT claims gain `scope` and `membership_id`.\n- `GET /auth/me` returns `active_membership_id` and `memberships[]`.\n- New error codes: `TENANT_NOT_SELECTED` (protected endpoint hit with scope=user), `CONFLICT_USER_ALREADY_IN_TENANT` (admin create user with existing membership).\n\n## Seed (after migrations 1–10)\n\n- **Super admin**: `admin@lustia.local` — password hash is a placeholder; you MUST run `hashpw` and UPDATE the row before the first login. See `cmd/hashpw/main.go`.\n- **Alice**: `alice@acme-spa.example` / `Staff2026!` — single active membership in `acme-spa` (auto-selects to scope=tenant).\n\n## How to use\n\n1. Import this JSON into Postman.\n2. Open the collection → **Variables** tab → set `super_password` to the rotated super-admin password.\n3. Run top-to-bottom: folder 1 → folder 2 → folder 3 → ... Later folders depend on variables set by earlier folders (tokens, IDs).\n4. Folder 6 (scope=user) requires a second membership for Alice. A setup comment in that folder explains the one-line psql to add it; rerun from folder 2 afterwards.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "host",     "value": "http://localhost:8080", "description": "auth-service base URL" },
+    { "key": "mailpit",  "value": "http://localhost:8025", "description": "Mailpit API base URL" },
+
+    { "key": "super_email",    "value": "admin@lustia.local" },
+    { "key": "super_password", "value": "REPLACE_WITH_ROTATED_PASSWORD", "description": "Set via `hashpw` utility + UPDATE migration 5 row; default hash in migration 5 is unusable." },
+
+    { "key": "staff_email",    "value": "alice@acme-spa.example" },
+    { "key": "staff_password", "value": "Staff2026!" },
+
+    { "key": "new_password", "value": "StaffRotated2026!" },
+
+    { "key": "super_access_token",  "value": "" },
+    { "key": "super_refresh_token", "value": "" },
+
+    { "key": "alice_access_token",  "value": "" },
+    { "key": "alice_refresh_token", "value": "" },
+    { "key": "alice_active_membership_id", "value": "" },
+    { "key": "alice_tenant_id", "value": "" },
+
+    { "key": "therapist_role_id", "value": "" },
+    { "key": "tenant_admin_role_id", "value": "" },
+
+    { "key": "bob_access_token",   "value": "" },
+    { "key": "bob_initial_password", "value": "" },
+
+    { "key": "reset_token", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0. Health & discovery",
+      "item": [
+        {
+          "name": "GET /readyz",
+          "request": { "method": "GET", "url": "{{host}}/readyz" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "pm.test('db reachable', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+          ]}}]
+        },
+        {
+          "name": "GET /healthz",
+          "request": { "method": "GET", "url": "{{host}}/healthz" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));"
+          ]}}]
+        },
+        {
+          "name": "GET JWKS",
+          "request": { "method": "GET", "url": "{{host}}/api/v1/auth/.well-known/jwks.json" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('RS256 primary key', () => { pm.expect(j.keys[0].alg).to.eql('RS256'); pm.expect(j.keys[0].kid).to.eql('primary'); });"
+          ]}}]
+        }
+      ]
+    },
+    {
+      "name": "1. Super admin login (scope=platform)",
+      "item": [
+        {
+          "name": "POST /auth/login — super admin (no tenant_slug)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{super_email}}\",\n  \"password\": \"{{super_password}}\"\n}" },
+            "url": "{{host}}/api/v1/auth/login"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('scope = platform', () => pm.expect(j.scope).to.eql('platform'));",
+            "pm.test('memberships empty', () => pm.expect(j.memberships).to.be.an('array').with.lengthOf(0));",
+            "pm.test('active_membership_id is null', () => pm.expect(j.active_membership_id).to.be.null);",
+            "pm.collectionVariables.set('super_access_token', j.access_token);",
+            "pm.collectionVariables.set('super_refresh_token', j.refresh_token);",
+            "",
+            "const pl = j.access_token.split('.')[1];",
+            "const claims = JSON.parse(atob(pl.replace(/-/g,'+').replace(/_/g,'/') + '=='.slice((pl.length + 2) % 4)));",
+            "pm.test('JWT scope=platform', () => pm.expect(claims.scope).to.eql('platform'));",
+            "pm.test('JWT tenant_id=__platform__', () => pm.expect(claims.tenant_id).to.eql('__platform__'));",
+            "pm.test('JWT roles includes super_admin', () => pm.expect(claims.roles).to.include('super_admin'));",
+            "pm.test('JWT membership_id is null', () => pm.expect(claims.membership_id == null).to.be.true);"
+          ]}}]
+        },
+        {
+          "name": "GET /auth/me — super admin",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{super_access_token}}" }],
+            "url": "{{host}}/api/v1/auth/me"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('super admin response has no tenant object', () => pm.expect(j.tenant).to.be.oneOf([null, undefined]));",
+            "pm.test('active_membership_id is null', () => pm.expect(j.active_membership_id == null).to.be.true);",
+            "pm.test('is_super_admin true', () => pm.expect(j.user.is_super_admin).to.be.true);",
+            "// Capture role IDs for later admin flows.",
+            "// Roles are loaded on /admin/roles below — keeping this for reference."
+          ]}}]
+        },
+        {
+          "name": "GET /admin/roles — cache role IDs",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{super_access_token}}" }],
+            "url": "{{host}}/api/v1/admin/roles"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('6 roles', () => pm.expect(j.data).to.have.lengthOf(6));",
+            "const therapist = j.data.find(r => r.name === 'therapist');",
+            "const tenantAdmin = j.data.find(r => r.name === 'tenant_admin');",
+            "if (therapist)   pm.collectionVariables.set('therapist_role_id',   therapist.id);",
+            "if (tenantAdmin) pm.collectionVariables.set('tenant_admin_role_id', tenantAdmin.id);"
+          ]}}]
+        },
+        {
+          "name": "POST /auth/refresh — super admin (rotation)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"refresh_token\": \"{{super_refresh_token}}\" }" },
+            "url": "{{host}}/api/v1/auth/refresh"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('scope preserved (platform)', () => pm.expect(j.scope).to.eql('platform'));",
+            "pm.collectionVariables.set('super_access_token',  j.access_token);",
+            "pm.collectionVariables.set('super_refresh_token', j.refresh_token);"
+          ]}}]
+        },
+        {
+          "name": "POST /auth/logout — super admin",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{super_access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{ \"refresh_token\": \"{{super_refresh_token}}\" }" },
+            "url": "{{host}}/api/v1/auth/logout"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 204', () => pm.response.to.have.status(204));"
+          ]}}]
+        }
+      ]
+    },
+    {
+      "name": "2. Single-membership login (Alice → scope=tenant, auto-select)",
+      "item": [
+        {
+          "name": "POST /auth/login — alice",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{staff_email}}\",\n  \"password\": \"{{staff_password}}\"\n}" },
+            "url": "{{host}}/api/v1/auth/login"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('scope=tenant (auto-selected single membership)', () => pm.expect(j.scope).to.eql('tenant'));",
+            "pm.test('memberships has exactly 1 entry', () => pm.expect(j.memberships).to.have.lengthOf(1));",
+            "pm.test('active_membership_id is non-null', () => pm.expect(j.active_membership_id).to.not.be.null);",
+            "pm.collectionVariables.set('alice_access_token',  j.access_token);",
+            "pm.collectionVariables.set('alice_refresh_token', j.refresh_token);",
+            "pm.collectionVariables.set('alice_active_membership_id', j.active_membership_id);",
+            "pm.collectionVariables.set('alice_tenant_id', j.memberships[0].tenant_id);",
+            "",
+            "const pl = j.access_token.split('.')[1];",
+            "const claims = JSON.parse(atob(pl.replace(/-/g,'+').replace(/_/g,'/') + '=='.slice((pl.length + 2) % 4)));",
+            "pm.test('JWT scope=tenant', () => pm.expect(claims.scope).to.eql('tenant'));",
+            "pm.test('JWT tenant_id is a UUID', () => pm.expect(claims.tenant_id).to.match(/^[0-9a-f-]{36}$/));",
+            "pm.test('JWT membership_id set', () => pm.expect(claims.membership_id).to.match(/^[0-9a-f-]{36}$/));",
+            "pm.test('JWT roles includes tenant_admin', () => pm.expect(claims.roles).to.include('tenant_admin'));"
+          ]}}]
+        },
+        {
+          "name": "GET /auth/me — alice",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{alice_access_token}}" }],
+            "url": "{{host}}/api/v1/auth/me"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('tenant is acme-spa', () => pm.expect(j.tenant.slug).to.eql('acme-spa'));",
+            "pm.test('active_membership_id set', () => pm.expect(j.active_membership_id).to.match(/^[0-9a-f-]{36}$/));",
+            "pm.test('memberships has 1', () => pm.expect(j.memberships).to.have.lengthOf(1));"
+          ]}}]
+        },
+        {
+          "name": "GET /admin/users — RLS-scoped to acme-spa",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{alice_access_token}}" }],
+            "url": "{{host}}/api/v1/admin/users"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('only acme-spa users', () => j.data.forEach(u => pm.expect(u.email).to.include('acme-spa')));"
+          ]}}]
+        },
+        {
+          "name": "POST /auth/select-tenant — re-select same tenant (rotates tokens)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{alice_access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{ \"tenant_id\": \"{{alice_tenant_id}}\" }" },
+            "url": "{{host}}/api/v1/auth/select-tenant"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('scope=tenant', () => pm.expect(j.scope).to.eql('tenant'));",
+            "pm.test('new access_token issued', () => pm.expect(j.access_token).to.not.be.empty);",
+            "pm.test('new refresh_token rotated', () => pm.expect(j.refresh_token).to.not.eql(pm.collectionVariables.get('alice_refresh_token')));",
+            "pm.collectionVariables.set('alice_access_token',  j.access_token);",
+            "pm.collectionVariables.set('alice_refresh_token', j.refresh_token);"
+          ]}}]
+        },
+        {
+          "name": "POST /auth/select-tenant — reject unrelated tenant → 403 FORBIDDEN",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{alice_access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{ \"tenant_id\": \"00000000-0000-0000-0000-000000000000\" }" },
+            "url": "{{host}}/api/v1/auth/select-tenant"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 403', () => pm.response.to.have.status(403));",
+            "pm.test('FORBIDDEN code', () => pm.expect(pm.response.json().error.code).to.eql('FORBIDDEN'));"
+          ]}}]
+        }
+      ]
+    },
+    {
+      "name": "3. Forgot / reset password",
+      "item": [
+        {
+          "name": "POST /auth/password/forgot — no tenant_slug anymore",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"email\": \"{{staff_email}}\" }" },
+            "url": "{{host}}/api/v1/auth/password/forgot"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 204', () => pm.response.to.have.status(204));"
+          ]}}]
+        },
+        {
+          "name": "Fetch reset token from Mailpit",
+          "request": { "method": "GET", "url": "{{mailpit}}/api/v1/messages" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('has at least one message', () => pm.expect(j.total).to.be.at.least(1));",
+            "const latest = j.messages[0];",
+            "pm.sendRequest(`${pm.collectionVariables.get('mailpit')}/api/v1/message/${latest.ID}`, (err, res) => {",
+            "  if (err) return;",
+            "  const body = res.json();",
+            "  const m = body.Text.match(/\\?token=([A-Za-z0-9_-]+)/);",
+            "  if (m) pm.collectionVariables.set('reset_token', m[1]);",
+            "});"
+          ]}}]
+        },
+        {
+          "name": "POST /auth/password/reset — consume token",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"token\": \"{{reset_token}}\",\n  \"new_password\": \"{{new_password}}\"\n}" },
+            "url": "{{host}}/api/v1/auth/password/reset"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 204', () => pm.response.to.have.status(204));"
+          ]}}]
+        },
+        {
+          "name": "Login with OLD password → INVALID_CREDENTIALS",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"email\": \"{{staff_email}}\", \"password\": \"{{staff_password}}\" }" },
+            "url": "{{host}}/api/v1/auth/login"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 401', () => pm.response.to.have.status(401));",
+            "pm.test('INVALID_CREDENTIALS', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_CREDENTIALS'));"
+          ]}}]
+        },
+        {
+          "name": "Login with NEW password → restore alice token",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"email\": \"{{staff_email}}\", \"password\": \"{{new_password}}\" }" },
+            "url": "{{host}}/api/v1/auth/login"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.collectionVariables.set('alice_access_token',  j.access_token);",
+            "pm.collectionVariables.set('alice_refresh_token', j.refresh_token);",
+            "// Idempotency: the collection's staff_password now reflects the new one so re-runs still work.",
+            "pm.collectionVariables.set('staff_password', pm.collectionVariables.get('new_password'));"
+          ]}}]
+        }
+      ]
+    },
+    {
+      "name": "4. Change own password (self-service)",
+      "item": [
+        {
+          "name": "POST /auth/me/password — alice rotates",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{alice_access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"old_password\": \"{{staff_password}}\",\n  \"new_password\": \"StaffAgain2026!\"\n}" },
+            "url": "{{host}}/api/v1/auth/me/password"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 204', () => pm.response.to.have.status(204));",
+            "pm.collectionVariables.set('staff_password', 'StaffAgain2026!');"
+          ]}}]
+        }
+      ]
+    },
+    {
+      "name": "5. Admin: create user — new + invite-existing paths",
+      "item": [
+        {
+          "name": "POST /admin/users — CREATE NEW (Bob, therapist)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{alice_access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"bob@acme-spa.example\",\n  \"full_name\": \"Bob Therapist\",\n  \"phone\": \"+628120000000\",\n  \"role_ids\": [\"{{therapist_role_id}}\"],\n  \"branch_ids\": [],\n  \"initial_password\": \"BobInitial2026!\"\n}" },
+            "url": "{{host}}/api/v1/admin/users"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 201', () => pm.response.to.have.status(201));",
+            "const j = pm.response.json();",
+            "pm.test('created_user=true', () => pm.expect(j.created_user).to.be.true);",
+            "pm.test('created_membership=true', () => pm.expect(j.created_membership).to.be.true);",
+            "pm.test('therapist role assigned', () => pm.expect(j.user.roles).to.include('therapist'));",
+            "if (j.initial_password) pm.collectionVariables.set('bob_initial_password', j.initial_password);",
+            "else pm.collectionVariables.set('bob_initial_password', 'BobInitial2026!');"
+          ]}}]
+        },
+        {
+          "name": "POST /admin/users — RE-CREATE BOB → 409 CONFLICT_USER_ALREADY_IN_TENANT",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{alice_access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"bob@acme-spa.example\",\n  \"full_name\": \"Bob Duplicate\",\n  \"role_ids\": [\"{{therapist_role_id}}\"],\n  \"branch_ids\": []\n}" },
+            "url": "{{host}}/api/v1/admin/users"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 409', () => pm.response.to.have.status(409));",
+            "pm.test('CONFLICT_USER_ALREADY_IN_TENANT', () => pm.expect(pm.response.json().error.code).to.eql('CONFLICT_USER_ALREADY_IN_TENANT'));"
+          ]}}]
+        },
+        {
+          "name": "POST /auth/login — Bob (must_change_password=true)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"bob@acme-spa.example\",\n  \"password\": \"{{bob_initial_password}}\"\n}" },
+            "url": "{{host}}/api/v1/auth/login"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('scope=tenant (single membership)', () => pm.expect(j.scope).to.eql('tenant'));",
+            "pm.collectionVariables.set('bob_access_token', j.access_token);",
+            "",
+            "const pl = j.access_token.split('.')[1];",
+            "const claims = JSON.parse(atob(pl.replace(/-/g,'+').replace(/_/g,'/') + '=='.slice((pl.length + 2) % 4)));",
+            "pm.test('must_change_password=true on first login', () => pm.expect(claims.must_change_password).to.be.true);"
+          ]}}]
+        },
+        {
+          "name": "Bob → /admin/users → 403 PASSWORD_CHANGE_REQUIRED",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{bob_access_token}}" }],
+            "url": "{{host}}/api/v1/admin/users"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 403', () => pm.response.to.have.status(403));",
+            "pm.test('PASSWORD_CHANGE_REQUIRED', () => pm.expect(pm.response.json().error.code).to.eql('PASSWORD_CHANGE_REQUIRED'));"
+          ]}}]
+        },
+        {
+          "name": "Bob → GET /auth/me (allowed during gate)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{bob_access_token}}" }],
+            "url": "{{host}}/api/v1/auth/me"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));"
+          ]}}]
+        },
+        {
+          "name": "Bob rotates password",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{bob_access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"old_password\": \"{{bob_initial_password}}\",\n  \"new_password\": \"BobRotated2026!\"\n}" },
+            "url": "{{host}}/api/v1/auth/me/password"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 204', () => pm.response.to.have.status(204));"
+          ]}}]
+        },
+        {
+          "name": "Bob re-login — must_change_password cleared",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"bob@acme-spa.example\",\n  \"password\": \"BobRotated2026!\"\n}" },
+            "url": "{{host}}/api/v1/auth/login"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.collectionVariables.set('bob_access_token', j.access_token);",
+            "const pl = j.access_token.split('.')[1];",
+            "const claims = JSON.parse(atob(pl.replace(/-/g,'+').replace(/_/g,'/') + '=='.slice((pl.length + 2) % 4)));",
+            "pm.test('flag cleared', () => pm.expect(claims.must_change_password).to.not.be.true);"
+          ]}}]
+        },
+        {
+          "name": "Bob (therapist) → /admin/users → 403 INSUFFICIENT_PERMISSION",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{bob_access_token}}" }],
+            "url": "{{host}}/api/v1/admin/users"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 403', () => pm.response.to.have.status(403));",
+            "pm.test('INSUFFICIENT_PERMISSION', () => pm.expect(pm.response.json().error.code).to.eql('INSUFFICIENT_PERMISSION'));"
+          ]}}]
+        }
+      ]
+    },
+    {
+      "name": "6. Multi-tenant flow (scope=user → select-tenant)",
+      "description": "This folder exercises the scope=user branch, which only fires when a user has 2+ active memberships. Alice has one by default (from migration 10). To exercise this branch, run the 'Setup: grant Alice a 2nd membership' request below — it uses the super admin token to insert a second membership + role via the admin endpoints. Then re-login as Alice from folder 2 → expect scope=user → then POST /auth/select-tenant.",
+      "item": [
+        {
+          "name": "Setup: create 'beauty-clinic' tenant + add Alice as tenant_admin (out of band)",
+          "description": "Phase 2 does not expose an admin-create-tenant endpoint (that lands in Phase 3). For now, run this SQL in psql to add a second membership for Alice:\n\nINSERT INTO tenant (id, name, slug, status, plan, contact_name, contact_email, metadata, created_at, updated_at)\nVALUES ('d0000000-0000-0000-0001-000000000002', 'Beauty Clinic', 'beauty-clinic', 'active', 'starter', 'Alice Smith', 'contact@beauty-clinic.example', '{}'::jsonb, now(), now())\nON CONFLICT (id) DO NOTHING;\n\nINSERT INTO membership (id, user_id, tenant_id, status, joined_at, metadata, created_at, updated_at)\nVALUES ('d0000000-0000-0000-0003-000000000002', 'd0000000-0000-0000-0002-000000000001', 'd0000000-0000-0000-0001-000000000002', 'active', now(), '{}'::jsonb, now(), now())\nON CONFLICT (id) DO NOTHING;\n\nINSERT INTO user_role (membership_id, role_id, assigned_at)\nVALUES ('d0000000-0000-0000-0003-000000000002', 'b0000000-0000-0000-0000-000000000002', now())\nON CONFLICT DO NOTHING;\n\nThen re-run requests 6.2 and 6.3 below.",
+          "request": { "method": "GET", "url": "{{host}}/readyz" }
+        },
+        {
+          "name": "POST /auth/login — alice (AFTER 2nd membership added → scope=user)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"email\": \"{{staff_email}}\", \"password\": \"{{staff_password}}\" }" },
+            "url": "{{host}}/api/v1/auth/login"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "// NOTE: Skips with a warning if Alice still has 1 membership (setup SQL not run yet).",
+            "if (j.scope === 'tenant') {",
+            "  console.warn('Alice has only 1 membership — run the setup SQL in request 6.1 and retry this folder.');",
+            "  return;",
+            "}",
+            "pm.test('scope=user (multi-tenant)', () => pm.expect(j.scope).to.eql('user'));",
+            "pm.test('active_membership_id null', () => pm.expect(j.active_membership_id).to.be.null);",
+            "pm.test('memberships has 2+', () => pm.expect(j.memberships.length).to.be.at.least(2));",
+            "pm.collectionVariables.set('alice_access_token', j.access_token);",
+            "pm.collectionVariables.set('alice_refresh_token', j.refresh_token);",
+            "pm.collectionVariables.set('alice_tenant_id', j.memberships[1].tenant_id);",
+            "",
+            "const pl = j.access_token.split('.')[1];",
+            "const claims = JSON.parse(atob(pl.replace(/-/g,'+').replace(/_/g,'/') + '=='.slice((pl.length + 2) % 4)));",
+            "pm.test('JWT scope=user', () => pm.expect(claims.scope).to.eql('user'));",
+            "pm.test('JWT tenant_id empty', () => pm.expect(claims.tenant_id || '').to.be.oneOf(['', null]));",
+            "pm.test('JWT roles empty', () => pm.expect(claims.roles || []).to.have.lengthOf(0));"
+          ]}}]
+        },
+        {
+          "name": "GET /admin/users while scope=user → 403 TENANT_NOT_SELECTED",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{alice_access_token}}" }],
+            "url": "{{host}}/api/v1/admin/users"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const pl = pm.collectionVariables.get('alice_access_token').split('.')[1];",
+            "const claims = JSON.parse(atob(pl.replace(/-/g,'+').replace(/_/g,'/') + '=='.slice((pl.length + 2) % 4)));",
+            "if (claims.scope !== 'user') { console.warn('Skip — Alice is not in scope=user; run setup SQL first.'); return; }",
+            "pm.test('status 403', () => pm.response.to.have.status(403));",
+            "pm.test('TENANT_NOT_SELECTED', () => pm.expect(pm.response.json().error.code).to.eql('TENANT_NOT_SELECTED'));"
+          ]}}]
+        },
+        {
+          "name": "POST /auth/select-tenant — pick beauty-clinic → scope=tenant",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{alice_access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{ \"tenant_id\": \"{{alice_tenant_id}}\" }" },
+            "url": "{{host}}/api/v1/auth/select-tenant"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 200', () => pm.response.to.have.status(200));",
+            "const j = pm.response.json();",
+            "pm.test('scope=tenant', () => pm.expect(j.scope).to.eql('tenant'));",
+            "pm.test('active_membership_id set', () => pm.expect(j.active_membership_id).to.not.be.null);",
+            "pm.collectionVariables.set('alice_access_token',  j.access_token);",
+            "pm.collectionVariables.set('alice_refresh_token', j.refresh_token);"
+          ]}}]
+        }
+      ]
+    },
+    {
+      "name": "7. Error paths",
+      "item": [
+        {
+          "name": "Wrong password → 401 INVALID_CREDENTIALS",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"email\": \"{{staff_email}}\", \"password\": \"WrongPassword\" }" },
+            "url": "{{host}}/api/v1/auth/login"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 401', () => pm.response.to.have.status(401));",
+            "pm.test('INVALID_CREDENTIALS', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_CREDENTIALS'));"
+          ]}}]
+        },
+        {
+          "name": "Unknown email → 401 INVALID_CREDENTIALS (anti-enum)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"email\": \"nobody@nowhere.example\", \"password\": \"whatever\" }" },
+            "url": "{{host}}/api/v1/auth/login"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 401', () => pm.response.to.have.status(401));",
+            "pm.test('INVALID_CREDENTIALS', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_CREDENTIALS'));"
+          ]}}]
+        },
+        {
+          "name": "No bearer → 401 UNAUTHENTICATED",
+          "request": { "method": "GET", "url": "{{host}}/api/v1/auth/me" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 401', () => pm.response.to.have.status(401));",
+            "pm.test('UNAUTHENTICATED', () => pm.expect(pm.response.json().error.code).to.eql('UNAUTHENTICATED'));"
+          ]}}]
+        },
+        {
+          "name": "Tampered JWT → 401 TOKEN_INVALID",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{alice_access_token}}TAMPER" }],
+            "url": "{{host}}/api/v1/auth/me"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 401', () => pm.response.to.have.status(401));",
+            "pm.test('TOKEN_INVALID', () => pm.expect(pm.response.json().error.code).to.eql('TOKEN_INVALID'));"
+          ]}}]
+        },
+        {
+          "name": "Forgot unknown email → still 204 (anti-enum)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{ \"email\": \"ghost@nowhere.example\" }" },
+            "url": "{{host}}/api/v1/auth/password/forgot"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('status 204 regardless', () => pm.response.to.have.status(204));"
+          ]}}]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,290 @@
+# ============================================================================
+# Lustia auth-service — manual test book
+#
+# Prerequisites:
+#   - auth-service running on :8080 (source run-local.sh && go run ./cmd/auth)
+#   - Mailpit running on :1025 SMTP + :8025 UI
+#   - Postgres running on :5432, all 8 migrations applied
+#   - Two seeded users:
+#       admin@lustia.local  / ResetViaEmail789!   (super admin, __platform__)
+#       alice@acme-spa.example / Staff2026!       (tenant_admin @ acme-spa)
+#
+# How to run:
+#   - VSCode / Kiro / Cursor with REST Client extension → "Send Request" above
+#     each block
+#   - JetBrains IDEs → green ▶ in the gutter
+#   - Without an IDE:  grab a block, paste as `curl` (syntax is close)
+#
+# Variables marked {{...}} are auto-filled by earlier requests in the same file.
+# ============================================================================
+
+@host = http://localhost:8080
+@mailpit = http://localhost:8025
+
+
+### ------------------------------------------------------------------
+### 0. Health / discovery
+### ------------------------------------------------------------------
+
+### readyz
+GET {{host}}/readyz
+
+### healthz
+GET {{host}}/healthz
+
+### JWKS (public key — verify RS256 JWTs offline)
+GET {{host}}/api/v1/auth/.well-known/jwks.json
+
+
+### ------------------------------------------------------------------
+### 1. SUPER ADMIN flow  (tenant_slug = "__platform__")
+### ------------------------------------------------------------------
+
+### @name login_super
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "admin@lustia.local",
+  "password": "ResetViaEmail789!",
+  "tenant_slug": "__platform__"
+}
+
+###
+@super_token = {{login_super.response.body.access_token}}
+@super_refresh = {{login_super.response.body.refresh_token}}
+
+### /auth/me (super admin — tenant_id is null)
+GET {{host}}/api/v1/auth/me
+Authorization: Bearer {{super_token}}
+
+### /admin/users — super admin sees all tenants
+GET {{host}}/api/v1/admin/users
+Authorization: Bearer {{super_token}}
+
+### /admin/roles — should return 6 seeded roles
+GET {{host}}/api/v1/admin/roles
+Authorization: Bearer {{super_token}}
+
+### refresh the super-admin token (rotation; old refresh is revoked)
+### @name refresh_super
+POST {{host}}/api/v1/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "{{super_refresh}}"
+}
+
+### logout (invalidates refresh token server-side)
+POST {{host}}/api/v1/auth/logout
+Authorization: Bearer {{super_token}}
+Content-Type: application/json
+
+{
+  "refresh_token": "{{super_refresh}}"
+}
+
+
+### ------------------------------------------------------------------
+### 2. TENANT STAFF flow  (alice @ acme-spa)
+### ------------------------------------------------------------------
+
+### @name login_alice
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "alice@acme-spa.example",
+  "password": "Staff2026!",
+  "tenant_slug": "acme-spa"
+}
+
+###
+@alice_token = {{login_alice.response.body.access_token}}
+@alice_refresh = {{login_alice.response.body.refresh_token}}
+
+### /auth/me as alice — shows acme-spa tenant info
+GET {{host}}/api/v1/auth/me
+Authorization: Bearer {{alice_token}}
+
+### /admin/users as alice — RLS-scoped: only sees users in acme-spa (1 row)
+GET {{host}}/api/v1/admin/users
+Authorization: Bearer {{alice_token}}
+
+### /admin/roles as alice — roles are platform reference data, all 6 visible
+GET {{host}}/api/v1/admin/roles
+Authorization: Bearer {{alice_token}}
+
+### IDOR probe — alice attempts to load the super admin by UUID → must 404
+GET {{host}}/api/v1/admin/users/a0000000-0000-0000-0000-000000000001
+Authorization: Bearer {{alice_token}}
+
+### refresh alice's token
+### @name refresh_alice
+POST {{host}}/api/v1/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "{{alice_refresh}}"
+}
+
+###
+@alice_token2 = {{refresh_alice.response.body.access_token}}
+
+### use the NEW token — works
+GET {{host}}/api/v1/auth/me
+Authorization: Bearer {{alice_token2}}
+
+### use the OLD refresh token — must be REFRESH_REVOKED (single-use rotation)
+POST {{host}}/api/v1/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "{{alice_refresh}}"
+}
+
+
+### ------------------------------------------------------------------
+### 3. FORGOT / RESET PASSWORD  (checks mail via Mailpit)
+### ------------------------------------------------------------------
+
+### forgot password — always 204, anti-enumeration
+POST {{host}}/api/v1/auth/password/forgot
+Content-Type: application/json
+
+{
+  "email": "alice@acme-spa.example",
+  "tenant_slug": "acme-spa"
+}
+
+### Open the Mailpit UI in a browser to see the message:
+###   http://localhost:8025
+### → click the top message → copy the token from "?token=..." in the body.
+
+### Or hit the API to list messages + extract token:
+GET {{mailpit}}/api/v1/messages
+
+### Replace the token below with the one you copied from Mailpit:
+### ⚠ tokens are single-use + expire in 60 minutes.
+POST {{host}}/api/v1/auth/password/reset
+Content-Type: application/json
+
+{
+  "token": "PASTE_TOKEN_FROM_MAILPIT_HERE",
+  "new_password": "StaffRotated2026!"
+}
+
+### try the OLD password → must 401 INVALID_CREDENTIALS
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "alice@acme-spa.example",
+  "password": "Staff2026!",
+  "tenant_slug": "acme-spa"
+}
+
+### ... and the NEW password works
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "alice@acme-spa.example",
+  "password": "StaffRotated2026!",
+  "tenant_slug": "acme-spa"
+}
+
+
+### ------------------------------------------------------------------
+### 4. CHANGE OWN PASSWORD  (self-service, requires JWT)
+### ------------------------------------------------------------------
+### Must use the latest alice token ({{alice_token2}} from block 2,
+### OR log in again and capture a fresh one above).
+
+POST {{host}}/api/v1/auth/me/password
+Authorization: Bearer {{alice_token2}}
+Content-Type: application/json
+
+{
+  "old_password": "StaffRotated2026!",
+  "new_password": "StaffAgain2026!"
+}
+
+
+### ------------------------------------------------------------------
+### 5. ADMIN: create a user inside acme-spa  (alice is tenant_admin)
+### ------------------------------------------------------------------
+
+### Need the tenant_admin role UUID once — fetch the role list:
+GET {{host}}/api/v1/admin/roles
+Authorization: Bearer {{alice_token}}
+
+### Then create a therapist-role user (paste tenant_admin or therapist role_id
+### from the list above into role_ids):
+POST {{host}}/api/v1/admin/users
+Authorization: Bearer {{alice_token}}
+Content-Type: application/json
+
+{
+  "email": "bob@acme-spa.example",
+  "full_name": "Bob Therapist",
+  "phone": "+628120000000",
+  "role_ids": ["PASTE_THERAPIST_ROLE_UUID_HERE"],
+  "branch_ids": [],
+  "initial_password": "BobInitial2026!"
+}
+
+### list users — should see alice + bob
+GET {{host}}/api/v1/admin/users
+Authorization: Bearer {{alice_token}}
+
+### login as bob — note must_change_password=true on admin-created users
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "bob@acme-spa.example",
+  "password": "BobInitial2026!",
+  "tenant_slug": "acme-spa"
+}
+
+### bob cannot hit /admin/users — he's a therapist, no user.read permission
+### (replace with the access_token from his login response)
+GET {{host}}/api/v1/admin/users
+Authorization: Bearer PASTE_BOBS_TOKEN_HERE
+
+
+### ------------------------------------------------------------------
+### 6. ERROR PATHS  (verify sanity)
+### ------------------------------------------------------------------
+
+### wrong password → 401 INVALID_CREDENTIALS
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "alice@acme-spa.example",
+  "password": "WrongPassword",
+  "tenant_slug": "acme-spa"
+}
+
+### unknown tenant → 401 INVALID_CREDENTIALS (not TENANT_NOT_FOUND — anti-enum)
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "alice@acme-spa.example",
+  "password": "anything",
+  "tenant_slug": "nonexistent"
+}
+
+### no bearer token → 401 UNAUTHENTICATED
+GET {{host}}/api/v1/auth/me
+
+### malformed bearer → 401 UNAUTHENTICATED
+GET {{host}}/api/v1/auth/me
+Authorization: NotBearer foo
+
+### tampered token (flip a char) → 401 TOKEN_INVALID
+GET {{host}}/api/v1/auth/me
+Authorization: Bearer {{alice_token}}X

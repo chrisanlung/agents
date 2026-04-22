@@ -7,7 +7,7 @@ This file is read automatically by Claude Code on every session. It is the singl
 | Agent | Role | Owns | Must read before acting |
 | --- | --- | --- | --- |
 | `db-designer` | Data architect | `docs/DATA_MODEL.md` (ERD, tables, constraints) | `docs/PRD.md`, `docs/API_CONTRACT.md` |
-| `go-expert` | Backend engineer (Gin + GORM, Clean Architecture + SOLID) | `docs/API_CONTRACT.md` (endpoints, DTOs) + `/backend/` code | `docs/PRD.md`, `docs/DATA_MODEL.md`, `docs/SECURITY.md` |
+| `go-expert` | Backend engineer (Gin + GORM, layered architecture + SOLID) | `docs/API_CONTRACT.md` (endpoints, DTOs) + `/backend/` code | `docs/PRD.md`, `docs/DATA_MODEL.md`, `docs/SECURITY.md` |
 | `nextjs-expert` | Web frontend engineer | `/web/` code | `docs/PRD.md`, `docs/API_CONTRACT.md`, `docs/DESIGN_SYSTEM.md` |
 | `flutter-expert` | Mobile engineer | `/mobile/` code | `docs/PRD.md`, `docs/API_CONTRACT.md`, `docs/DESIGN_SYSTEM.md` |
 | `ui-ux-expert` | Designer | `docs/DESIGN_SYSTEM.md` (tokens, components, flows) | `docs/PRD.md` |

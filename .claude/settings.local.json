@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p F:/Projects/GO/common-configs)",
+      "Bash(rsync -a --exclude='.git' --exclude='.idea' --exclude='internalportal' --exclude='go.sum' --exclude='CLAUDE.md' --exclude='README.md' ./ F:/Projects/GO/common-configs/)"
+    ]
+  }
+}

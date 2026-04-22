@@ -1,61 +1,428 @@
-# Operations
+# Operations — Lustia
 
-_Owned by `devops-expert`. Covers how the app is built, shipped, and run._
+_Owned by `devops-expert`. Every change that touches Docker images, compose,
+CI, deployment, or runtime infra updates this file in the same turn as the
+diff._
 
-## Runtime topology
-_One line per service: name, replicas, resources, what it talks to._
+_Last updated: 2026-04-18 — Phase 1 + Phase 2 (devops-expert)._
 
-## Environments
-| Env | URL | Deploys from | Approval | Data |
-| --- | --- | --- | --- | --- |
-| dev (local) |  | laptop |  | seed |
-| staging |  | `main` on merge | auto |  |
-| production |  | tagged release | manual | real |
+---
 
-## Build & release
+## 1. Runtime topology (dev-local)
 
-### Image build
-- Base image:
-- Final image:
-- Signed with:
+Phase 1+2 runs as **four containers** on one Docker network, composed from
+`lustia/deploy/docker-compose.yml`:
 
-### CI pipeline (GitHub Actions)
-_Stage order: lint → test → build → scan → push → deploy._
+| Name       | Image                          | Role                                                             | Depends on                                  |
+| ---------- | ------------------------------ | ---------------------------------------------------------------- | ------------------------------------------- |
+| `postgres` | `postgres:16-alpine`           | Single cluster, single database (`lustia`). Hosts `lustia_app` and `lustia_migrator` roles; enforces RLS for `lustia_app` traffic. Named volume `lustia_postgres_data`. First-boot init scripts in `deploy/init-db/` create the `lustia_app` role. | —                                           |
+| `migrator` | `migrate/migrate:v4.17.1`      | One-shot. Runs `/migrations` forward (`up`) and exits 0. Pinned image tag. Restart policy `no`. For Phase 2 dev, runs as the Postgres superuser (the dedicated `lustia_migrator` role is itself created inside migration 000001). | `postgres` healthy                          |
+| `mailpit`  | `axllent/mailpit:v1.20`        | Local SMTP catcher + web UI. Accepts any credentials; no persistence (inbox cleared on restart). Exposes SMTP on `${MAILPIT_SMTP_PORT:-1025}` and UI on `${MAILPIT_UI_PORT:-8025}`. Swap to a real provider (AWS SES, SendGrid, Postmark) for staging/prod by pointing `SMTP_HOST`/credentials elsewhere. | —                                           |
+| `auth`    | `lustia-auth:dev` (built local) | Gin + GORM Go service. Listens on `${AUTH_PORT}`. Connects as `lustia_app`. Loads JWT private key from a mounted PEM file. Dispatches password-reset emails via SMTP (Mailpit in dev). | `migrator` completed successfully; `postgres` healthy; `mailpit` healthy |
 
-### Release strategy
-- Default:
-- DB migration strategy:
+Shape: health endpoints (`/healthz`, `/readyz`), structured logs, graceful
+shutdown, background refresh-token cleanup goroutine. Resource limits are
+intentionally not set in the dev compose file — the host picks defaults.
 
-### Rollback
-_How to roll back in under 5 minutes._
+```
+  ┌──────────────┐          ┌─────────────┐
+  │   postgres   │          │   mailpit   │  UI :8025, SMTP :1025 (published)
+  └──────┬───────┘          └──────┬──────┘
+         │                         │
+    ┌────┴────────┐                │
+    │             │                │
+┌───▼──────┐  ┌───▼──────────┐     │
+│ migrator │  │     auth     │◄────┘  auth sends password-reset mail via SMTP
+└──────────┘  └──────────────┘        :${AUTH_PORT} published
+     (exits 0)
+```
 
-## Secrets inventory
-| Secret | Where stored | Consumer | Rotation |
+Open `http://localhost:8025` during development to view any email the
+auth-service dispatched. The forgot-password flow delivers a real message to
+Mailpit; clicking the link (local frontend not yet running) verifies the
+`?token=` payload round-trips correctly.
+
+---
+
+## 2. Environments
+
+| Env         | URL  | Host    | Deploys from                            | Approval | Data                        |
+| ----------- | ---- | ------- | --------------------------------------- | -------- | --------------------------- |
+| `dev-local` | —    | laptop  | `docker compose up -d` in `lustia/deploy/` | —        | seeded from migrations only |
+| `dev-vm`    | TBD  | 1× VM   | `git pull` + `docker compose up -d` on the VM (systemd for reboot survival) | manual (operator on VM) | seeded + operator-generated |
+| `staging`   | TBD  | deferred | deferred                                | deferred | deferred                    |
+| `prod`      | TBD  | deferred | deferred                                | deferred | deferred                    |
+
+`dev-local` and `dev-vm` both run the same `docker-compose.yml`. The only
+difference is where `.env` lives, how the stack survives reboots, and the
+network exposure. See [`../lustia/deploy/vm/README.md`](../lustia/deploy/vm/README.md)
+for the VM setup + ongoing-operations runbook.
+
+`staging` and `prod` are deferred to the phase that introduces a real
+deployment target (see ADR 0006 for the graduation path).
+
+### 2.1 Secret handling per environment
+
+Tracks ADR 0006 two-step path for VM deployments:
+
+| Env | Secret at rest | Secret in memory | Access |
 | --- | --- | --- | --- |
+| `dev-local` | `.env` on laptop (gitignored); PEM in `deploy/secrets/` | env vars in container | whoever has the laptop |
+| `dev-vm` (Step 1) | `.env` at `/srv/lustia/lustia/deploy/.env`, mode `0600`, owner `lustia` | env vars in container | SSH-authorized users on the VM |
+| `dev-vm` / `staging` (Step 2) | SOPS-encrypted `.env.{env}.enc` committed to git; age key at `~/.config/sops/age/keys.txt` on the VM | env vars (decrypted at deploy time, written to tmpfs) | SSH + holder of the age recipient key |
+| `staging` / `prod` (Step 3) | Cloud secret manager (AWS SM / Vault) | env vars or mounted file, injected by External Secrets Operator / CSI driver | IAM / Vault ACL per environment |
 
-## Observability
-- Logs:
-- Metrics:
-- Traces:
-- Errors:
-- Dashboards:
-- Alerts:
+**Migration triggers** (second operator, real user data, multi-VM, k8s move) are
+in ADR 0006 §"Migration triggers".
 
-## Runbooks
-- [ ] Service unhealthy
-- [ ] Database unreachable
-- [ ] Bad deploy rollback
-- [ ] Cert expiring
+---
 
-## Backups & DR
-- What is backed up:
-- Retention:
-- Last tested restore:
-- RTO / RPO:
+## 3. Image build
 
-## Cost
-- Tags enforced: `app`, `env`, `owner`, `cost-center`
-- Budgets + alerts:
+### 3.1 auth-service image
 
-## Open questions
--
+Multi-stage, defined in `lustia/services/auth/Dockerfile`.
+
+- Build stage: `golang:1.24-alpine`. `CGO_ENABLED=0`, `GOFLAGS=-trimpath`,
+  `-ldflags="-s -w"`. Static binary. `go mod verify` runs before compile.
+- Runtime stage: `gcr.io/distroless/static-debian12:nonroot`. No shell, no
+  package manager, uid 65532. `USER nonroot:nonroot` is explicit. No
+  healthcheck in the Dockerfile — the image has no probe binary, so the
+  compose-level check and the caller hitting `/readyz` fill that role.
+- The service listens on `${HTTP_PORT}` (default 8080). `EXPOSE 8080` is
+  documentation only; the compose file publishes the actual port.
+
+### 3.2 Pinned third-party images
+
+| Image         | Version          | Why pinned                                             |
+| ------------- | ---------------- | ------------------------------------------------------ |
+| `postgres`    | `16-alpine`      | PostgreSQL 16 is the project minimum per PRD § 6.      |
+| `migrate/migrate` | `v4.17.1`    | Pin migration tooling exactly to avoid silent CLI drift. |
+| `golang`      | `1.24-alpine`    | Matches the `go 1.24` directive in `go.mod`.           |
+| `gcr.io/distroless/static-debian12` | `nonroot` | Base for the final image (floating tag — acceptable for dev; see open items). |
+
+Image-digest pinning (`@sha256:…`) for all base images is tracked as an open
+item once the CI pipeline lands (see § 11).
+
+### 3.3 Build-context decision (common-configs replace)
+
+The auth-service `go.mod` has
+
+```go
+replace github.com/chrisanlung/common-configs => ../../../../../GO/common-configs
+```
+
+pointing OUTSIDE the `lustia/` tree to `F:/Projects/GO/common-configs`.
+Docker cannot reach outside its build context. Three options were considered:
+
+- **Option A — include both trees in the build context.** Requires setting
+  the compose `build.context` above both `lustia/` and `GO/common-configs/`.
+  These two directories are siblings under `F:/Projects/` but `lustia/` is
+  already nested below `lusthing/`, and `common-configs/` is under
+  `GO/`. There is no single ancestor that is also a reasonable source root.
+  Rejected.
+
+- **Option B — relative symlink trickery.** A symlink inside
+  `services/auth/` pointing at the external tree would need to resolve
+  inside the Docker build context. Docker follows symlinks that stay within
+  the context and rejects ones that escape. Rejected on portability grounds
+  (symlinks on Windows require admin or developer mode).
+
+- **Option C — do NOT use the local `replace` for Docker builds.** The
+  Dockerfile runs `go mod download` with the build context at
+  `services/auth/`. The `replace` line is present in `go.mod` but its target
+  path does not exist inside the container; `go mod download` then falls back
+  to the module proxy and fetches `common-configs` from the public GitHub
+  repo. Local `go build` on the host continues to honour the replace for
+  fast iteration. **Accepted.**
+
+Consequences:
+
+- Developers editing `common-configs/` who want the change in an image must
+  push to GitHub first (any commit; `go mod tidy` pins to a
+  `v0.0.0-<date>-<sha>` pseudo-version). Host-side `go build` sees the change
+  immediately without a push.
+- `go.sum` must contain a real entry for `common-configs` (not the
+  zero-value the replace would otherwise allow). Flag for `go-expert`:
+  run `go mod tidy` against the remote repo once the service is wired up,
+  commit `go.sum`. If a fetch fails in CI with "no matching versions", that's
+  the fix.
+- Revisit when `common-configs` has tagged releases (`v1.0.0+`). At that
+  point the replace can be removed entirely and both host + image resolve
+  identically.
+
+---
+
+## 4. CI pipeline (shape)
+
+`.github/workflows/` files are not in scope for Phase 2 — the actual YAML is
+tracked as open item #4 below. The pipeline shape every job must implement is:
+
+| Job                   | Purpose                                                                                   |
+| --------------------- | ----------------------------------------------------------------------------------------- |
+| `lint`                | `golangci-lint run ./...` against each service module. Fails on any warning.              |
+| `test`                | `go test -race ./...` per service. Race detector mandatory.                              |
+| `govulncheck`         | `govulncheck ./...` — blocks on any known CVE in the module graph (SECURITY § 8).        |
+| `mod-verify`          | `go mod verify` + `go mod tidy -diff` (no uncommitted tidy changes allowed).              |
+| `build`               | `docker build services/auth/` and tag with the commit SHA. Image is pushed only on main.  |
+| `migrations-up-test`  | Spin up `postgres:16-alpine`, run migrations `up`, run `down 1`, run `up` again. All steps must return 0. |
+
+Requirements for each workflow file (SECURITY § 8):
+
+- Pin every `uses: actions/…` line to a full commit SHA, not a tag.
+- `permissions: contents: read` as the workflow default; escalate per-job
+  only when a job needs to write (publish, release).
+- OIDC federation from GitHub Actions into the cloud provider when
+  staging/prod lands — no long-lived access keys.
+
+Open item: create the actual `.github/workflows/*.yml` in Phase 10 (or when
+this repo is promoted to a CI-watched remote).
+
+---
+
+## 5. Release strategy
+
+Deferred. The auth-service Docker image is deployable to any container
+runtime (k8s, ECS, Cloud Run, Fly.io). Choice of runtime and release
+cadence is made at the point staging is provisioned.
+
+When the decision lands, update this section with:
+
+- Tagging convention (semver vs commit-SHA vs date-based).
+- Canary / blue-green / rolling strategy.
+- Approval gates.
+
+---
+
+## 6. DB migration strategy
+
+- **Forward-only in staging/prod.** Every change is a new migration file;
+  no edits to applied migrations.
+- **Backward (reversible) in dev.** Every `up.sql` has a matching
+  `down.sql`. To walk back locally:
+  ```bash
+  docker compose run --rm migrator \
+      -path=/migrations \
+      -database="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable" \
+      down 1
+  ```
+- **Role separation.** For Phase 2 dev, the migrator runs as the Postgres
+  superuser (migration 000001 itself creates `lustia_migrator` and sets it
+  `BYPASSRLS`). For staging/prod, run migrations as the dedicated
+  `lustia_migrator` role once it exists — this is an open item.
+- **Application traffic never uses the migrator role.** `lustia_app` is the
+  only role the auth-service (and every later service) uses.
+
+---
+
+## 7. Rollback
+
+### 7.1 auth-service
+
+- **Code path:** redeploy the previous image tag. The Docker image is the
+  only build artifact; there is no in-place in-container patching.
+- **State:** refresh tokens live in the DB (`refresh_token` table), so user
+  sessions survive an auth-service redeploy. Access tokens are stateless
+  JWTs — no impact.
+- **JWT keys:** the `kid` is stable unless explicitly rotated. Rolling back
+  to a previous image with the same key material is safe. Rolling back
+  across a key-rotation boundary requires the JWKS to still advertise the
+  older key (see SECURITY § 9.2).
+
+### 7.2 Migrations
+
+If a migration has already landed in staging/prod, **do not** edit the
+applied `up.sql`. Write a new forward migration that corrects the issue. The
+`down.sql` is intended for dev; applying `down` in production is an
+exceptional operation that requires a runbook review.
+
+---
+
+## 8. Secrets inventory
+
+| Secret                                    | Location (dev-local)                             | Consumer                         | Rotation (cadence)                  |
+| ----------------------------------------- | ------------------------------------------------ | -------------------------------- | ----------------------------------- |
+| Postgres superuser password               | `deploy/.env` → `POSTGRES_PASSWORD`              | `postgres`, `migrator` containers | Semi-annually (placeholder — prod)  |
+| `lustia_app` password                     | `deploy/.env` → `LUSTIA_APP_PASSWORD`            | `auth` container, init-db script | Semi-annually; immediately on compromise |
+| JWT RS256 private key                     | `deploy/secrets/jwt_private.pem` (dev only)      | `auth` container                 | Annually; immediately on compromise |
+| Super-admin bootstrap email               | `deploy/.env` → `SUPER_ADMIN_EMAIL`              | post-migration SQL step          | Replace before staging (one-time)   |
+| Super-admin initial password              | `deploy/.env` → `SUPER_ADMIN_INITIAL_PASSWORD`   | post-migration SQL step          | On first login (forced — see flag below) |
+
+**Dev rules** (enforced here; staging/prod has its own inventory):
+
+- `.env` is gitignored; only `.env.example` is committed.
+- PEM key material is gitignored; `deploy/secrets/.gitkeep` preserves the
+  directory.
+- Startup log prints only the `kid` (SHA-256 thumbprint of the public key),
+  never the key material (SECURITY § I-4).
+
+**Staging/prod** secrets management is deferred to a secret manager — see
+open item #3.
+
+---
+
+## 9. Observability
+
+Phase 2 baseline — every item below exists today; depth is deferred.
+
+- **Logs:** structured JSON via `common-configs/log`. Every line carries
+  `timestamp`, `trace_id`, `request_id`. Redaction rules in
+  SECURITY § 7.2 are enforced by review plus the `TestNoSensitiveFieldsInLogs`
+  regression test (qa-expert).
+- **Metrics:** not exported in Phase 2. Add a `/metrics` Prometheus endpoint
+  as part of open item #6.
+- **Traces:** OTel SDK is wired into `common-configs` and accepts a
+  configurable endpoint. No collector is running in `docker-compose.yml` yet;
+  the service exports traces only when the endpoint env var is set.
+- **Health probes:** `/healthz` (liveness — process is up) and `/readyz`
+  (readiness — can reach the DB). Both are served at the root. Compose relies
+  on process liveness + the `depends_on` chain; host-side consumers should
+  call `/readyz` directly (the port is published).
+
+---
+
+## 10. Runbooks
+
+### 10.1 Service fails `/readyz`
+
+**Symptom:** `curl localhost:${AUTH_PORT}/readyz` returns 503 with body
+`{"status":"db_unreachable"}` (or `db_unavailable`).
+
+1. `docker compose ps` — is `postgres` up and healthy? If not, jump to the
+   migration runbook below.
+2. `docker compose logs postgres --tail=50` — look for "database system is
+   ready to accept connections". If Postgres is still initializing (first
+   boot can take 10–20s), wait and retry.
+3. `docker compose exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c '\du'`
+   — does `lustia_app` exist and have `LOGIN`? If missing, `init-db`
+   failed; inspect `docker compose logs postgres | grep init-db`. Fix: repair
+   the script, `docker compose down -v` (destroys data), `up` again.
+4. `docker compose logs auth --tail=100` — look for a DB dial error. The
+   error message will quote the connection string (with password elided).
+   Mismatch between `LUSTIA_APP_PASSWORD` in `.env` and what init-db set is
+   the most common cause.
+5. If all else looks right, `docker compose restart auth`. Persistent
+   failures after a restart: escalate — likely a code bug in the repository
+   layer, not infra.
+
+### 10.2 Migration failed mid-way
+
+**Symptom:** `migrator` exits non-zero; `auth` stays unstarted because
+`depends_on: service_completed_successfully` blocks.
+
+1. `docker compose logs migrator` — note the version that failed and the
+   SQL error. Migration tooling marks the failed version as `dirty` in the
+   `schema_migrations` table.
+2. Inspect the DB:
+   ```bash
+   docker compose exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+       -c 'SELECT * FROM schema_migrations;'
+   ```
+3. Fix the SQL in the offending `.up.sql`. If the migration partially
+   applied, you may need to clean up manually or force:
+   ```bash
+   docker compose run --rm migrator \
+       -path=/migrations \
+       -database="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable" \
+       force <last_good_version>
+   ```
+4. Re-run `up`:
+   ```bash
+   docker compose up migrator
+   ```
+5. Once `migrator` exits 0, `docker compose up -d auth`.
+
+### 10.3 Bootstrap super-admin locked out / forgot initial password
+
+**Symptom:** nobody knows the super-admin password; `POST /auth/login`
+returns `INVALID_CREDENTIALS`; no other account can reset it.
+
+Per ADR 0003, the super-admin hash is replaceable by any operator with DB
+access. Phase 2 does not yet enforce `must_change_password`, so the password
+remains whatever was set by the last post-migration UPDATE.
+
+1. Generate a new Argon2id hash (parameters: t=3, m=64 MiB, p=2 —
+   SECURITY § 2.1). Any Go one-shot works; avoid public online tools for
+   any environment that has seen real user data.
+2. Apply it:
+   ```bash
+   docker compose exec -T postgres psql \
+       -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+       -c "UPDATE \"user\" \
+           SET password_hash = '<new_argon2id_hash>', \
+               failed_login_count = 0, \
+               locked_until = NULL \
+           WHERE id = 'a0000000-0000-0000-0000-000000000001';"
+   ```
+3. Log in with the new password. Immediately change it via
+   `PUT /api/v1/auth/me/password`.
+4. Write a `security.super_admin_password_reset` row to `audit_log` with
+   the operator's identifier and reason. (Phase 2 does this via the login
+   flow's standard audit writes; for an out-of-band reset, insert manually.)
+
+---
+
+## 11. Backups & DR
+
+N/A for `dev-local`. Volume `lustia_postgres_data` is disposable by design;
+`docker compose down -v` wipes it. All state is re-createable from
+migrations plus the bootstrap runbook.
+
+Staging/prod backup strategy (PITR, retention, tested restores) is
+deferred — see open item #3 (the secret manager work and backups are the
+same milestone).
+
+---
+
+## 12. Cost
+
+N/A for `dev-local`. Cost tagging (`app`, `env`, `owner`, `cost-center`),
+budget alerts, and per-env cost views land with staging.
+
+---
+
+## 13. Open items for devops (prioritized)
+
+1. **Move the rate limiter to Redis.** Today the auth-service uses an
+   in-memory `x/time/rate`-style bucket (`services/auth/infra/ratelimit_memory.go`).
+   This only works correctly with one instance of the service. Before any
+   horizontal scaling, add `redis:7-alpine` to the compose stack and
+   replace the limiter implementation with a Redis-backed sliding-window
+   script. SECURITY § 11 item 7.
+
+2. **JWT key rotation story.** Today a single `kid` ("primary") is signed
+   with one private key loaded from disk. JWKS surfaces one key.
+   Implement: multi-key JWKS (keep old public key for 20 minutes after
+   rotation per SECURITY § 9.2), a rotation runbook, and a configuration
+   schema that lists `{kid, private_key_path, public_key_path}` tuples.
+
+3. **Secret manager for staging/prod.** Evaluate Vault vs. cloud-native
+   (AWS Secrets Manager / GCP Secret Manager / Azure Key Vault) and pick
+   one. JWT private key, DB passwords, and bootstrap super-admin password
+   all move to it. SECURITY § 5.2.
+
+4. **CI actions pinned + `govulncheck`.** Create
+   `.github/workflows/ci.yml` implementing the job shape described in § 4.
+   Every `uses:` pinned to a commit SHA. `govulncheck` blocks on Critical
+   and High findings.
+
+5. **Dockerfile build-context revisit.** Once `common-configs` has tagged
+   releases (`v1.0.0+`), remove the `replace` from `services/auth/go.mod`
+   entirely. Host and image then resolve identically. Until then the
+   Option C approach (§ 3.3) stands.
+
+6. **Telemetry collector + dashboards.** Add `otel/opentelemetry-collector`
+   to the compose stack with an exporter to a dev backend (Jaeger or
+   Grafana Tempo). Wire auth-service OTel traces and metrics through it.
+   Expose `/metrics` from the service for Prometheus scrape.
+
+Secondary items (not blocking dev-local, but flagged elsewhere):
+
+- Refresh-token cleanup job ownership decision (in-service goroutine exists
+  today; may move to a scheduled job). SECURITY § 11 item 6.
+- `audit_log` table partitioning before production launch.
+  SECURITY § 9.3 + DATA_MODEL open question 5.
+- `must_change_password` column + enforcement so the bootstrap super-admin
+  password can't be left weak indefinitely. SECURITY review log, Critical.
+- Migration role separation in staging/prod — migrator should stop using
+  the Postgres superuser once `lustia_migrator` exists (§ 6).

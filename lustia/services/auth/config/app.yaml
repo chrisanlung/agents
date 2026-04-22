@@ -1,0 +1,54 @@
+# auth-service config.
+#
+# Values are expanded with os.ExpandEnv by common-configs — that's STDLIB,
+# which supports ${VAR} and $VAR only. Shell-style ${VAR:default} DOES NOT
+# WORK — the ":default" becomes part of the variable name and resolves to
+# empty. Callers (run-local.sh, docker-compose.yml) MUST set every var below.
+
+app:
+  name: lustia-auth
+  mode: ${GIN_MODE}
+
+transport:
+  server:
+    rest:
+      port:
+        http: ${HTTP_PORT}
+
+log:
+  level: ${LOG_LEVEL}
+  file:
+    enabled: false
+
+database:
+  primary:
+    driver: postgresql
+    address: "${DB_HOST}:${DB_PORT}"
+    database: ${DB_NAME}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+    skipDefaultTransaction: false
+    ignoreRecordNotFoundError: true
+    conn:
+      maxIdle: 5
+      maxOpen: 25
+      maxLifeTime: 300000
+
+# Email / SMTP
+# ------------
+# auth-service reads SMTP_* env vars directly in main.go; this section is
+# documentation until common-configs grows a YAML-driven mail loader.
+smtp:
+  enabled: ${SMTP_ENABLED}
+  host: ${SMTP_HOST}
+  port: ${SMTP_PORT}
+  username: ${SMTP_USERNAME}
+  password: ${SMTP_PASSWORD}
+  from: "${SMTP_FROM}"
+  startTls: ${SMTP_STARTTLS}
+  timeoutMs: ${SMTP_TIMEOUT_MS}
+
+# Display + links
+app_links:
+  displayName: ${APP_DISPLAY_NAME}
+  passwordResetUrlBase: "${PASSWORD_RESET_URL_BASE}"
