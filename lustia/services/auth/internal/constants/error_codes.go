@@ -30,4 +30,11 @@ const (
 	CodeRegistrationNotPending       = "REGISTRATION_NOT_PENDING"
 	CodeInvalidStatusTransition      = "INVALID_STATUS_TRANSITION"
 	CodeBranchLimitReached           = "BRANCH_LIMIT_REACHED"
+
+	// Phase 4 — Master Operational Data (ADR 0009 §11.1).
+	CodeTherapistNotFound          = "THERAPIST_NOT_FOUND"
+	CodeServiceNotFound            = "SERVICE_NOT_FOUND"
+	CodeTherapistHasActiveBookings = "THERAPIST_HAS_ACTIVE_BOOKINGS"
+	CodeAvailabilityOverlap        = "AVAILABILITY_OVERLAP"
+	CodeCrossBranchForbidden       = "CROSS_BRANCH_FORBIDDEN"
 )

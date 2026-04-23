@@ -501,3 +501,233 @@ type PermissionDetail struct {
 	Code        string
 	Description string
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4 — Master Operational Data (ADR 0009).
+// ---------------------------------------------------------------------------
+
+// TherapistDetail is the read-only projection of a Therapist row.
+type TherapistDetail struct {
+	ID          string
+	TenantID    string
+	BranchID    string
+	UserID      *string
+	FullName    string
+	Gender      *string
+	Phone       *string
+	Email       *string
+	Bio         *string
+	PhotoURL    *string
+	Specialties []string
+	IsActive    bool
+	JoinedAt    *string // RFC3339 or nil
+	CreatedAt   string
+	UpdatedAt   string
+}
+
+// TherapistDetailWithServices extends TherapistDetail with the service mapping
+// list. Returned by GET /tenant/therapists/:id (§11.4.3).
+type TherapistDetailWithServices struct {
+	TherapistDetail
+	Services []TherapistServiceItem
+}
+
+// TherapistServiceItem is a single entry in the services array on a therapist
+// detail or mapping response.
+type TherapistServiceItem struct {
+	ServiceID       string
+	Name            string
+	Category        *string
+	DurationMinutes int
+	PriceIDR        int64
+	IsActive        bool
+	AssignedAt      string // RFC3339
+}
+
+// ServiceDetail is the read-only projection of a ServiceCatalog row.
+type ServiceDetail struct {
+	ID              string
+	TenantID        string
+	Name            string
+	Description     *string
+	Category        *string
+	DurationMinutes int
+	PriceIDR        int64
+	Currency        string
+	IsActive        bool
+	CreatedAt       string
+	UpdatedAt       string
+}
+
+// ServiceDetailWithTherapists extends ServiceDetail with active therapist
+// mappings. Returned by GET /tenant/services/:id (§11.5.3, flag #6).
+type ServiceDetailWithTherapists struct {
+	ServiceDetail
+	Therapists []ServiceTherapistItem
+}
+
+// ServiceTherapistItem is a single entry in the therapists array on a service
+// detail response. Only active mappings are included (§11.3 flag #6).
+type ServiceTherapistItem struct {
+	TherapistID string
+	FullName    string
+	BranchID    string
+	BranchName  string
+	IsActive    bool
+}
+
+// AvailabilityWindow is a single weekly recurrence window.
+type AvailabilityWindow struct {
+	ID    string
+	DOW   int    // 0=Sunday … 6=Saturday
+	Start string // HH:MM
+	End   string // HH:MM
+}
+
+// TherapistMappingOutput is the response for GET/PUT /therapists/:id/services.
+type TherapistMappingOutput struct {
+	TherapistID string
+	Services    []TherapistServiceItem
+}
+
+// AvailabilityOutput is the response for GET/PUT /therapists/:id/availability.
+type AvailabilityOutput struct {
+	TherapistID string
+	Windows     []AvailabilityWindow
+}
+
+// ---------- Input types ----------
+
+// CreateTherapistInput carries data for creating a new therapist.
+type CreateTherapistInput struct {
+	CallerUserID   string
+	CallerTenantID string
+	CallerBranches []string // from JWT branches claim
+	IsAdmin        bool     // true when caller is tenant_admin (no cross-branch check)
+	BranchID       string
+	FullName       string
+	Gender         *string
+	Phone          *string
+	Email          *string
+	Bio            *string
+	PhotoURL       *string
+	JoinedAt       *string // YYYY-MM-DD date string
+	UserID         *string
+}
+
+// UpdateTherapistInput carries partial-update fields for a therapist.
+type UpdateTherapistInput struct {
+	TherapistID    string
+	CallerUserID   string
+	CallerTenantID string
+	CallerBranches []string
+	IsAdmin        bool
+	FullName       *string
+	Gender         *string
+	Phone          *string
+	Email          *string
+	Bio            *string
+	PhotoURL       *string
+	JoinedAt       *string
+	UserID         *string
+}
+
+// ChangeTherapistStatusInput carries the activate/deactivate request.
+type ChangeTherapistStatusInput struct {
+	TherapistID    string
+	CallerUserID   string
+	CallerTenantID string
+	CallerBranches []string
+	IsAdmin        bool
+	IsActive       bool
+}
+
+// ListTherapistsInput carries filter + pagination for the therapist list.
+type ListTherapistsInput struct {
+	CallerTenantID string
+	CallerBranches []string // restricts results for branch_admin
+	IsAdmin        bool
+	BranchID       *string
+	IsActive       *bool // nil = active only
+	Cursor         string
+	Limit          int
+}
+
+// ListTherapistsOutput carries a page of therapists.
+type ListTherapistsOutput struct {
+	Therapists []TherapistDetail
+	NextCursor string
+}
+
+// CreateServiceInput carries data for creating a new service.
+type CreateServiceInput struct {
+	CallerUserID    string
+	CallerTenantID  string
+	Name            string
+	Description     *string
+	Category        *string
+	DurationMinutes int
+	PriceIDR        int64
+}
+
+// UpdateServiceInput carries partial-update fields for a service.
+type UpdateServiceInput struct {
+	ServiceID       string
+	CallerUserID    string
+	CallerTenantID  string
+	Name            *string
+	Description     *string
+	Category        *string
+	DurationMinutes *int
+	PriceIDR        *int64
+}
+
+// ChangeServiceStatusInput carries the activate/deactivate request for a service.
+type ChangeServiceStatusInput struct {
+	ServiceID      string
+	CallerUserID   string
+	CallerTenantID string
+	IsActive       bool
+}
+
+// ListServicesInput carries filter + pagination for the service list.
+type ListServicesInput struct {
+	CallerTenantID string
+	IsActive       *bool   // nil = active only
+	Category       *string // case-sensitive filter
+	Cursor         string
+	Limit          int
+}
+
+// ListServicesOutput carries a page of services.
+type ListServicesOutput struct {
+	Services   []ServiceDetail
+	NextCursor string
+}
+
+// ReconcileMappingInput carries the full-replace request for therapist services.
+type ReconcileMappingInput struct {
+	TherapistID    string
+	CallerUserID   string
+	CallerTenantID string
+	CallerBranches []string
+	IsAdmin        bool
+	ServiceIDs     []string
+}
+
+// ReplaceAvailabilityWindow is a single window in the PUT availability payload.
+type ReplaceAvailabilityWindow struct {
+	DOW   int    // 0–6
+	Start string // HH:MM
+	End   string // HH:MM
+}
+
+// ReplaceAvailabilityInput carries the full-replace availability request.
+type ReplaceAvailabilityInput struct {
+	TherapistID    string
+	CallerUserID   string
+	CallerTenantID string
+	CallerBranches []string
+	IsAdmin        bool
+	Windows        []ReplaceAvailabilityWindow
+}

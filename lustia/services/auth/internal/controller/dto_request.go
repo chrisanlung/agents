@@ -178,3 +178,95 @@ type ListBranchesQuery struct {
 	Cursor string `form:"cursor"`
 	Limit  int    `form:"limit" binding:"omitempty,min=1,max=200"`
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4 — Master Operational Data (ADR 0009).
+// ---------------------------------------------------------------------------
+
+// CreateTherapistRequest is the JSON body for POST /tenant/therapists.
+type CreateTherapistRequest struct {
+	BranchID  string  `json:"branch_id"  binding:"required,uuid"`
+	FullName  string  `json:"full_name"  binding:"required,min=1,max=200"`
+	Gender    *string `json:"gender"     binding:"omitempty,oneof=male female other"`
+	Phone     *string `json:"phone"      binding:"omitempty,max=30"`
+	Email     *string `json:"email"      binding:"omitempty,email,max=320"`
+	Bio       *string `json:"bio"        binding:"omitempty,max=500"`
+	PhotoURL  *string `json:"photo_url"  binding:"omitempty,url,max=2048"`
+	JoinedAt  *string `json:"joined_at"  binding:"omitempty"`
+	UserID    *string `json:"user_id"    binding:"omitempty,uuid"`
+}
+
+// UpdateTherapistRequest is the JSON body for PATCH /tenant/therapists/:id.
+// All fields are optional — only provided fields are updated.
+type UpdateTherapistRequest struct {
+	FullName  *string `json:"full_name"  binding:"omitempty,min=1,max=200"`
+	Gender    *string `json:"gender"     binding:"omitempty,oneof=male female other"`
+	Phone     *string `json:"phone"      binding:"omitempty,max=30"`
+	Email     *string `json:"email"      binding:"omitempty,email,max=320"`
+	Bio       *string `json:"bio"        binding:"omitempty,max=500"`
+	PhotoURL  *string `json:"photo_url"  binding:"omitempty,url,max=2048"`
+	JoinedAt  *string `json:"joined_at"  binding:"omitempty"`
+	UserID    *string `json:"user_id"    binding:"omitempty,uuid"`
+}
+
+// ChangeTherapistStatusRequest is the JSON body for PATCH /tenant/therapists/:id/status.
+type ChangeTherapistStatusRequest struct {
+	IsActive *bool `json:"is_active" binding:"required"`
+}
+
+// ListTherapistsQuery are query params for GET /tenant/therapists.
+type ListTherapistsQuery struct {
+	BranchID string `form:"branch_id" binding:"omitempty,uuid"`
+	IsActive *bool  `form:"is_active"`
+	Cursor   string `form:"cursor"`
+	Limit    int    `form:"limit" binding:"omitempty,min=1,max=200"`
+}
+
+// CreateServiceRequest is the JSON body for POST /tenant/services.
+type CreateServiceRequest struct {
+	Name            string  `json:"name"             binding:"required,min=1,max=200"`
+	Description     *string `json:"description"      binding:"omitempty,max=1000"`
+	Category        *string `json:"category"         binding:"omitempty,max=100"`
+	DurationMinutes int     `json:"duration_minutes" binding:"required,min=1,max=1440"`
+	PriceIDR        int64   `json:"price_idr"        binding:"min=0"`
+}
+
+// UpdateServiceRequest is the JSON body for PATCH /tenant/services/:id.
+// All fields are optional — only provided fields are updated.
+type UpdateServiceRequest struct {
+	Name            *string `json:"name"             binding:"omitempty,min=1,max=200"`
+	Description     *string `json:"description"      binding:"omitempty,max=1000"`
+	Category        *string `json:"category"         binding:"omitempty,max=100"`
+	DurationMinutes *int    `json:"duration_minutes" binding:"omitempty,min=1,max=1440"`
+	PriceIDR        *int64  `json:"price_idr"        binding:"omitempty,min=0"`
+}
+
+// ChangeServiceStatusRequest is the JSON body for PATCH /tenant/services/:id/status.
+type ChangeServiceStatusRequest struct {
+	IsActive *bool `json:"is_active" binding:"required"`
+}
+
+// ListServicesQuery are query params for GET /tenant/services.
+type ListServicesQuery struct {
+	IsActive *bool   `form:"is_active"`
+	Category *string `form:"category"`
+	Cursor   string  `form:"cursor"`
+	Limit    int     `form:"limit" binding:"omitempty,min=1,max=200"`
+}
+
+// PutTherapistServicesRequest is the JSON body for PUT /tenant/therapists/:id/services.
+type PutTherapistServicesRequest struct {
+	ServiceIDs []string `json:"service_ids" binding:"required,max=200,dive,uuid"`
+}
+
+// AvailabilityWindowRequest is a single window in the PUT availability payload.
+type AvailabilityWindowRequest struct {
+	DOW   int    `json:"dow"   binding:"min=0,max=6"`
+	Start string `json:"start" binding:"required"`
+	End   string `json:"end"   binding:"required"`
+}
+
+// PutAvailabilityRequest is the JSON body for PUT /tenant/therapists/:id/availability.
+type PutAvailabilityRequest struct {
+	Windows []AvailabilityWindowRequest `json:"windows" binding:"required"`
+}

@@ -96,6 +96,23 @@ func RespondDomainError(c *gin.Context, err error) {
 	case errors.Is(err, constants.ErrRegistrationNotFound):
 		RespondError(c, http.StatusNotFound, constants.CodeNotFound, "registration not found")
 
+	// Phase 4 — Master Operational Data (ADR 0009 §11.1).
+	case errors.Is(err, constants.ErrTherapistNotFound):
+		RespondError(c, http.StatusNotFound, constants.CodeTherapistNotFound, "therapist not found")
+	case errors.Is(err, constants.ErrServiceNotFound):
+		RespondError(c, http.StatusNotFound, constants.CodeServiceNotFound, "service not found")
+	case errors.Is(err, constants.ErrTherapistHasActiveBookings):
+		RespondError(c, http.StatusConflict, constants.CodeTherapistHasActiveBookings, "therapist has active bookings and cannot be deleted")
+	case errors.Is(err, constants.ErrAvailabilityOverlap):
+		RespondError(c, http.StatusConflict, constants.CodeAvailabilityOverlap, "availability windows overlap on the same day")
+	case errors.Is(err, constants.ErrCrossBranchForbidden):
+		RespondError(c, http.StatusForbidden, constants.CodeCrossBranchForbidden, "cross-branch access is not permitted for branch_admin callers")
+
+	// Generic service-layer validation error — 400 VALIDATION with the
+	// service's message so the caller sees what went wrong.
+	case errors.Is(err, constants.ErrInvalidInput):
+		RespondError(c, http.StatusBadRequest, constants.CodeValidation, err.Error())
+
 	default:
 		RespondError(c, http.StatusInternalServerError, constants.CodeInternal, "an internal error occurred")
 	}

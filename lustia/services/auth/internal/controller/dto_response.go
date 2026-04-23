@@ -252,6 +252,110 @@ type OnboardingStateResponse struct {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 4 — Master Operational Data (ADR 0009).
+// ---------------------------------------------------------------------------
+
+// TherapistServiceItemResponse is a single entry in the services array on a
+// therapist detail or mapping response.
+type TherapistServiceItemResponse struct {
+	ServiceID       string  `json:"service_id"`
+	Name            string  `json:"name"`
+	Category        *string `json:"category,omitempty"`
+	DurationMinutes int     `json:"duration_minutes"`
+	PriceIDR        int64   `json:"price_idr"`
+	IsActive        bool    `json:"is_active"`
+	AssignedAt      string  `json:"assigned_at"`
+}
+
+// TherapistResponse is the public projection of a therapist row (§11.4 shared shape).
+type TherapistResponse struct {
+	ID          string                         `json:"id"`
+	TenantID    string                         `json:"tenant_id"`
+	BranchID    string                         `json:"branch_id"`
+	UserID      *string                        `json:"user_id"`
+	FullName    string                         `json:"full_name"`
+	Gender      *string                        `json:"gender"`
+	Bio         *string                        `json:"bio"`
+	PhotoURL    *string                        `json:"photo_url"`
+	Specialties []string                       `json:"specialties"`
+	IsActive    bool                           `json:"is_active"`
+	JoinedAt    *string                        `json:"joined_at"`
+	CreatedAt   string                         `json:"created_at"`
+	UpdatedAt   string                         `json:"updated_at"`
+}
+
+// TherapistDetailResponse extends TherapistResponse with the services array
+// for GET /tenant/therapists/:id.
+type TherapistDetailResponse struct {
+	TherapistResponse
+	Services []TherapistServiceItemResponse `json:"services"`
+}
+
+// ListTherapistsResponse carries a page of therapists.
+type ListTherapistsResponse struct {
+	Data       []TherapistResponse `json:"data"`
+	NextCursor string              `json:"next_cursor,omitempty"`
+}
+
+// ServiceResponse is the public projection of a service row (§11.5 shared shape).
+type ServiceResponse struct {
+	ID              string  `json:"id"`
+	TenantID        string  `json:"tenant_id"`
+	Name            string  `json:"name"`
+	Description     *string `json:"description"`
+	Category        *string `json:"category"`
+	DurationMinutes int     `json:"duration_minutes"`
+	PriceIDR        int64   `json:"price_idr"`
+	Currency        string  `json:"currency"`
+	IsActive        bool    `json:"is_active"`
+	CreatedAt       string  `json:"created_at"`
+	UpdatedAt       string  `json:"updated_at"`
+}
+
+// ServiceTherapistItemResponse is a single entry in the therapists array on a
+// service detail response.
+type ServiceTherapistItemResponse struct {
+	TherapistID string `json:"therapist_id"`
+	FullName    string `json:"full_name"`
+	BranchID    string `json:"branch_id"`
+	BranchName  string `json:"branch_name"`
+	IsActive    bool   `json:"is_active"`
+}
+
+// ServiceDetailResponse extends ServiceResponse with the therapists array for
+// GET /tenant/services/:id.
+type ServiceDetailResponse struct {
+	ServiceResponse
+	Therapists []ServiceTherapistItemResponse `json:"therapists"`
+}
+
+// ListServicesResponse carries a page of services.
+type ListServicesResponse struct {
+	Data       []ServiceResponse `json:"data"`
+	NextCursor string            `json:"next_cursor,omitempty"`
+}
+
+// TherapistMappingResponse is the response for GET/PUT /therapists/:id/services.
+type TherapistMappingResponse struct {
+	TherapistID string                         `json:"therapist_id"`
+	Services    []TherapistServiceItemResponse `json:"services"`
+}
+
+// AvailabilityWindowResponse is a single window in the availability response.
+type AvailabilityWindowResponse struct {
+	ID    string `json:"id"`
+	DOW   int    `json:"dow"`
+	Start string `json:"start"`
+	End   string `json:"end"`
+}
+
+// AvailabilityResponse is the response for GET/PUT /therapists/:id/availability.
+type AvailabilityResponse struct {
+	TherapistID string                       `json:"therapist_id"`
+	Windows     []AvailabilityWindowResponse `json:"windows"`
+}
+
+// ---------------------------------------------------------------------------
 // Mapping helpers
 // ---------------------------------------------------------------------------
 

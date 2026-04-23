@@ -105,6 +105,12 @@ func main() {
 	branchRepo := repository.NewBranchRepository(gormDB)
 	registrationRepo := repository.NewRegistrationRepository(gormDB)
 
+	// Phase 4 repositories.
+	therapistRepo := repository.NewTherapistRepository(gormDB)
+	serviceCatalogRepo := repository.NewServiceCatalogRepository(gormDB)
+	therapistServiceRepo := repository.NewTherapistServiceRepository(gormDB)
+	therapistAvailabilityRepo := repository.NewTherapistAvailabilityRepository(gormDB)
+
 	// -------------------------------------------------------------------------
 	// Services (ADR 0007 wiring — all three services now take MembershipRepository)
 	// -------------------------------------------------------------------------
@@ -157,6 +163,22 @@ func main() {
 		branchRepo, tenantRepo, userRepo, auditRepo, clock,
 	)
 
+	// Phase 4 services (ADR 0009).
+	therapistSvc := service.NewTherapistSvc(
+		therapistRepo, therapistServiceRepo, serviceCatalogRepo,
+		branchRepo, auditRepo, clock, txManager,
+	)
+	catalogSvc := service.NewCatalogService(
+		serviceCatalogRepo, therapistServiceRepo, therapistRepo,
+		branchRepo, auditRepo, clock,
+	)
+	availabilitySvc := service.NewAvailabilitySvc(
+		therapistAvailabilityRepo, therapistRepo, auditRepo, clock,
+	)
+	mappingSvc := service.NewMappingService(
+		therapistRepo, serviceCatalogRepo, therapistServiceRepo, auditRepo, txManager,
+	)
+
 	// -------------------------------------------------------------------------
 	// Controllers
 	// -------------------------------------------------------------------------
@@ -173,6 +195,12 @@ func main() {
 	registrationCtrl := controller.NewRegistrationController(registrationSvc)
 	tenantCtrl := controller.NewTenantController(tenantSvc)
 	branchCtrl := controller.NewBranchController(branchSvc)
+
+	// Phase 4 controllers (ADR 0009).
+	therapistCtrl := controller.NewTherapistController(therapistSvc)
+	serviceCtrl := controller.NewServiceController(catalogSvc)
+	availabilityCtrl := controller.NewAvailabilityController(availabilitySvc)
+	therapistMappingCtrl := controller.NewTherapistMappingController(mappingSvc, therapistSvc)
 
 	// -------------------------------------------------------------------------
 	// Gin engine + routes
@@ -204,6 +232,11 @@ func main() {
 		Registration:       registrationCtrl,
 		Tenant:             tenantCtrl,
 		Branch:             branchCtrl,
+		// Phase 4 — Master Operational Data (ADR 0009).
+		Therapist:        therapistCtrl,
+		Service:          serviceCtrl,
+		Availability:     availabilityCtrl,
+		TherapistMapping: therapistMappingCtrl,
 	})
 
 	// -------------------------------------------------------------------------

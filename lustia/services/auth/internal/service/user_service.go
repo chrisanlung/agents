@@ -120,6 +120,7 @@ func (s *UserService) createMembership(ctx context.Context, userID string, in Cr
 		TenantID:  in.CallerTenantID,
 		Status:    model.MembershipStatusActive,
 		JoinedAt:  now,
+		Metadata:  []byte("{}"), // membership.metadata is NOT NULL jsonb
 		CreatedAt: now,
 		UpdatedAt: now,
 		CreatedBy: &callerID,
@@ -182,14 +183,27 @@ func (s *UserService) createNewUserWithMembership(ctx context.Context, in Create
 		TenantID:  in.CallerTenantID,
 		Status:    model.MembershipStatusActive,
 		JoinedAt:  now,
+		Metadata:  []byte("{}"), // membership.metadata is NOT NULL jsonb
 		CreatedAt: now,
 		UpdatedAt: now,
 		CreatedBy: &callerID,
 	}
 
 	if err := s.tx.WithTx(ctx, func(txCtx context.Context) error {
+		// User INSERT requires app.current_tenant='__platform__' per the
+		// user_write RLS policy (migration 000004). Tenant admins call this
+		// path too (POST /admin/users), so temporarily elevate to platform
+		// for the user INSERT, then restore the caller's tenant context so
+		// membership/role writes pass their tenant-scoped RLS policies.
+		prevTenant := in.CallerTenantID
+		if err := s.tx.SetTenantContext(txCtx, constants.PlatformTenantSentinel, in.CallerUserID); err != nil {
+			return fmt.Errorf("elevate context for user insert: %w", err)
+		}
 		if err := s.users.Save(txCtx, newUser); err != nil {
 			return fmt.Errorf("save user: %w", err)
+		}
+		if err := s.tx.SetTenantContext(txCtx, prevTenant, in.CallerUserID); err != nil {
+			return fmt.Errorf("restore tenant context after user insert: %w", err)
 		}
 		if err := s.memberships.Save(txCtx, membership); err != nil {
 			return fmt.Errorf("save membership: %w", err)

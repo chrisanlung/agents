@@ -1089,3 +1089,260 @@ PostgreSQL's native `INET` type stores IPv4 and IPv6 addresses efficiently and e
 8. **`password_reset` table — RLS decision.** Currently no RLS on `password_reset` because tokens are fetched by hash before tenant context is established. This is intentional but should be confirmed with `security-expert` — specifically whether a token hash lookup could be exploited to enumerate users across tenants.
 
 9. **Global email uniqueness:** ✅ Resolved 2026-04-21 — ADR 0007 mandates `UNIQUE (email) WHERE deleted_at IS NULL` on the `"user"` table (index `user_email_uidx`), replacing the previous per-tenant uniqueness model. One email address = one login identity across the entire platform. Implemented in migration 000009.
+
+---
+
+## Phase 4 — Master Operational Data
+
+_Added 2026-04-22 — ADR 0009 (migration 000013). Tables `therapist`, `service`, `therapist_service`, and `therapist_availability` were structurally created in migration 000003 and RLS-enabled in migration 000004. Migration 000013 extends them with the columns required for Phase 4 operational semantics: `therapist.branch_id`, `service.category`, and `therapist_service.is_active`._
+
+---
+
+### Phase 4 — ERD Snippet
+
+The four Phase 4 tables and their relationships to `tenant`, `branch`, and `user`:
+
+```mermaid
+erDiagram
+    tenant {
+        UUID id PK
+    }
+    branch {
+        UUID id PK
+        UUID tenant_id FK
+    }
+    user {
+        UUID id PK
+    }
+    therapist {
+        UUID id PK
+        UUID tenant_id FK
+        UUID branch_id FK
+        UUID user_id FK
+        TEXT full_name
+        TEXT gender
+        TEXT bio
+        TEXT photo_url
+        JSONB specialties
+        BOOLEAN is_active
+        TIMESTAMPTZ deleted_at
+    }
+    service {
+        UUID id PK
+        UUID tenant_id FK
+        UUID branch_id FK
+        TEXT code
+        TEXT name
+        TEXT description
+        TEXT category
+        INT duration_minutes
+        NUMERIC price
+        CHAR currency
+        BOOLEAN is_active
+        TIMESTAMPTZ deleted_at
+    }
+    therapist_service {
+        UUID therapist_id FK
+        UUID service_id FK
+        BOOLEAN is_active
+    }
+    therapist_availability {
+        UUID id PK
+        UUID tenant_id FK
+        UUID therapist_id FK
+        UUID branch_id FK
+        SMALLINT day_of_week
+        TIME start_time
+        TIME end_time
+        DATE effective_from
+        DATE effective_until
+    }
+
+    tenant ||--o{ therapist : "employs"
+    tenant ||--o{ service : "offers"
+    branch ||--o{ therapist : "hosts"
+    branch ||--o{ therapist_availability : "schedules at"
+    user o|--o{ therapist : "optional portal login"
+    therapist }o--o{ service : "therapist_service"
+    therapist ||--o{ therapist_availability : "has schedule"
+```
+
+**Relationship notes:**
+- `service.branch_id` is nullable — NULL means the service is tenant-wide (the normal Phase 4 case). A non-null value would indicate a branch-specific override (reserved for future phases).
+- `therapist.user_id` is nullable — a therapist without a portal account has no `user` row. When set, it links to the global `user` table; same-tenant enforcement is at the service layer (see Q3 resolution below).
+- `therapist_service` is a true business entity, not just a junction: it carries `is_active` to model temporary suspension of an offering without destroying the mapping.
+
+---
+
+### Phase 4 — Open Question Resolutions (ADR 0009)
+
+**Q1 — Availability granularity:** TIME columns with minute precision.
+
+Decision: use `TIME` (PostgreSQL `time without time zone`) for `start_time` and `end_time`. This gives 1-minute granularity. The tradeoff considered was TIME vs a SMALLINT slot enum (e.g. 15-minute slots numbered 0–95). TIME wins because:
+
+1. It imposes no artificial rounding at the DB layer — if a tenant wants 10:00–11:45 that is representable without change.
+2. The weekly availability editor UI rounds to 15- or 30-minute steps in the application; the DB does not need to enforce that rounding, making it easier to relax later.
+3. The GiST exclusion constraint already normalises the TIME values to a TSRANGE over a fixed date (2000-01-01) for overlap detection — slot enums would require bespoke range arithmetic there anyway.
+
+UX implication for `go-expert` and `nextjs-expert`: the API should accept `"HH:MM"` strings and validate they fall on the desired step boundary (e.g. multiples of 15 minutes) in the service layer. The DB stores whatever valid TIME value the service layer sends; the constraint only rejects overlaps and end <= start.
+
+**Q2 — Service duration:** fixed single `duration_minutes INT NOT NULL CHECK (duration_minutes > 0 AND duration_minutes <= 1440)`.
+
+Decision: confirmed as per ADR 0009 default. A single integer is sufficient for Phase 4. Variable ranges (e.g. "60–90 minutes depending on therapist pace") are a Phase 5+ enhancement. The booking engine will use `scheduled_end = scheduled_start + duration_minutes * interval '1 minute'` to compute the end time; no schema change will be needed when that logic is added.
+
+**Q3 — `therapist.user_id` — same-tenant constraint:** service-layer enforcement only.
+
+Decision: enforce same-tenant membership at the service layer; no DB constraint. Rationale:
+
+1. A DB constraint would require either a trigger that JOINs `therapist` → `tenant` and `user` → `membership` → `tenant`, or a generated column trick. Both approaches are fragile across future schema changes and are hard to debug under RLS.
+2. The service layer already validates that `user_id` refers to a user with an active membership in the creating session's tenant before inserting the `therapist` row. This is the same pattern used for `booking.customer_id` and other cross-table consistency checks.
+3. A violation (linking a therapist to a user from a different tenant) cannot occur through the normal API because RLS ensures the session can only see users in its own tenant. The risk exists only if a bug bypasses the service layer — mitigated by integration tests.
+
+The open question from migration 000003 ("a DB trigger can be added if needed") remains deferred. If cross-tenant contamination incidents occur in production, add a trigger in a new migration. This is tracked in §8 Open Question #2 (unchanged).
+
+**Q4 — Soft-delete semantics / therapist deletion cascade (ADR 0009 §3 item 4):** soft-delete only; hard delete is blocked.
+
+Decision: `therapist.deleted_at` follows the project's soft-delete pattern. The service layer must:
+- Block hard DELETE on `therapist` entirely (the `lustia_app` DB role has no DELETE grant on `therapist`; existing grants are SELECT/INSERT/UPDATE from migration 000004).
+- Set `deleted_at = now()` and `is_active = false` atomically on "delete".
+- Reject deletion if the therapist has any future bookings with a non-terminal status (`confirmed`, `checked_in`, `in_progress`) — return `409 CONFLICT` to the caller (go-expert scope; Phase 5 once bookings exist).
+- `therapist_service` rows cascade DELETE when `therapist` is hard-deleted (FK `ON DELETE CASCADE`) but since hard delete is blocked at the app layer, CASCADE never fires in practice. The FK cascade is a safety net.
+- `therapist_availability` rows also have `ON DELETE CASCADE` on `therapist_id` — same reasoning applies.
+
+---
+
+### Phase 4 — Table Additions
+
+#### therapist (extended — migration 000013)
+
+New column added to the table created in migration 000003:
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `branch_id` | `UUID` | NOT NULL (after migration 000013), FK → `branch(id)` RESTRICT | Branch assignment. Added migration 000013. |
+
+**New indexes (migration 000013):**
+- `therapist_branch_id_idx`: `(branch_id)` — FK lookup.
+- `therapist_tenant_branch_active_idx`: `(tenant_id, branch_id)` WHERE `is_active = true AND deleted_at IS NULL` — Phase 5 booking engine's primary "available therapists at branch X" scan.
+
+**Why NOT CASCADE on the `branch_id` FK:** if a branch is deleted, its therapists should not be silently deleted — that would be data loss. RESTRICT forces the operator to reassign or deactivate therapists before deleting a branch. This matches the existing pattern on `branch_id` FKs across the schema.
+
+---
+
+#### service (extended — migration 000013)
+
+New column added to the table created in migration 000003:
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `category` | `TEXT` | NULL, length ≤ 100 | Grouping label (e.g. "Pijat", "Refleksi"). Added migration 000013. |
+
+**Why tenant-scoped (branch_id NULL by default):** ADR 0009 §2.1 explicitly states services are shared across branches. A wellness company typically runs the same service catalog at every branch; per-branch pricing or per-branch service availability is a Phase 5+ feature. The existing nullable `branch_id` column (migration 000003) supports the future branch-specific-override use case without a schema change.
+
+**Why `category` is free-form TEXT, not an enum:** the category taxonomy is operator-defined and will vary between tenants (a spa has different categories from a physiotherapy clinic). Constraining to an enum would require a `CREATE TYPE` per tenant or a shared enum that would need `ALTER TYPE … ADD VALUE` for every new category any tenant ever wants. Free-form TEXT with a service-layer lookup table (if needed) is the right approach for tenant-defined taxonomies.
+
+**New index (migration 000013):**
+- `service_tenant_category_active_idx`: `(tenant_id, category)` WHERE `is_active = true AND deleted_at IS NULL` — the primary service-catalog list query pattern.
+
+---
+
+#### therapist_service (extended — migration 000013)
+
+New column added to the table created in migration 000003:
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `is_active` | `BOOLEAN` | NOT NULL, DEFAULT true | When false: therapist temporarily does not offer this service. Added migration 000013. |
+
+**Full Phase 4 column set:**
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `therapist_id` | `UUID` | PK part, FK → `therapist(id)` CASCADE | |
+| `service_id` | `UUID` | PK part, FK → `service(id)` CASCADE | |
+| `is_active` | `BOOLEAN` | NOT NULL, DEFAULT true | Per-therapist offering flag. |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT now() | |
+| `created_by` | `UUID` | NULL, FK → `"user"(id)` SET NULL | |
+
+**FK cascade behavior:** both FKs use `ON DELETE CASCADE`. Rationale: if a therapist is deleted (soft-delete blocked at app layer, but if hard-delete ever occurred) or a service is deleted, the mapping row is meaningless and should go. Leaving orphaned mapping rows with dangling UUIDs would require NULL-able FKs, complicating the model.
+
+**What happens to `therapist_service` rows when the therapist or service is soft-deleted:** the mapping row is NOT automatically modified. The application must filter `WHERE therapist.deleted_at IS NULL AND service.deleted_at IS NULL` when listing active offerings. Alternatively, set `therapist_service.is_active = false` as part of the soft-delete transaction — this is the recommended approach for clarity in the booking engine query.
+
+**New index (migration 000013):**
+- `therapist_service_active_idx`: `(therapist_id)` WHERE `is_active = true` — Phase 5 booking engine reads "active services for this therapist".
+
+---
+
+#### therapist_availability (no structural change in migration 000013)
+
+Full schema already specified in migration 000003. Documented here for completeness:
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | `UUID` | PK | |
+| `tenant_id` | `UUID` | NOT NULL, FK → `tenant(id)` RESTRICT | RLS anchor |
+| `therapist_id` | `UUID` | NOT NULL, FK → `therapist(id)` CASCADE | Cascade: when therapist is hard-deleted, schedules go with them |
+| `branch_id` | `UUID` | NOT NULL, FK → `branch(id)` RESTRICT | Denormalised for query performance; must match therapist.branch_id at service layer |
+| `day_of_week` | `SMALLINT` | NOT NULL, CHECK 0–6 | 0 = Sunday (ISO convention) |
+| `start_time` | `TIME` | NOT NULL | Minute precision (Q1 resolution) |
+| `end_time` | `TIME` | NOT NULL, CHECK > start_time | |
+| `effective_from` | `DATE` | NOT NULL, DEFAULT CURRENT_DATE | Recurring from this date |
+| `effective_until` | `DATE` | NULL | NULL = indefinite. Date-specific exceptions (holidays, time-off) are Phase 5+ |
+| _audit columns_ | | | `created_at`, `updated_at`, `created_by`, `updated_by` |
+
+**Constraints:**
+- `CONSTRAINT chk_availability_times CHECK (end_time > start_time)`
+- `CONSTRAINT chk_availability_dates CHECK (effective_until IS NULL OR effective_until >= effective_from)`
+- `EXCLUDE USING gist (therapist_id WITH =, branch_id WITH =, day_of_week WITH =, tsrange(('2000-01-01'::date + start_time)::timestamp, ('2000-01-01'::date + end_time)::timestamp) WITH &&)` — overlap prevention
+
+**Why one row per day-of-week window, not one row per therapist:** each row represents a contiguous time block on a given weekday. A therapist with a split shift (09:00–12:00 and 14:00–18:00 on Monday) has two rows. The GiST exclusion constraint prevents accidental overlap. The Phase 5 booking engine queries "rows WHERE therapist_id = X AND day_of_week = DOW(slot) AND start_time <= slot_time AND end_time >= slot_time + duration" — a single-row-per-window model maps cleanly to this predicate.
+
+**Why `branch_id` is denormalised on availability:** the primary Phase 5 query is "find available therapists at branch B for service S at time T". Including `branch_id` on the availability table avoids a JOIN to `therapist` on every availability scan. The cost is that `branch_id` must be kept in sync with `therapist.branch_id` (enforced at the service layer when creating/updating availability).
+
+**Indexes (from migration 000003):**
+- `therapist_avail_tenant_id_idx`: `(tenant_id)`
+- `therapist_avail_therapist_id_idx`: `(therapist_id)`
+- `therapist_avail_branch_id_idx`: `(branch_id)`
+- `therapist_avail_day_idx`: `(therapist_id, day_of_week)` — the booking engine's hot path: "what windows does therapist X have on day D?"
+
+---
+
+### Phase 4 — Design Decision Log
+
+**PK strategy — UUID v4 for all four tables:** follows the project convention established in migration 000001 (`gen_random_uuid()`). `therapist`, `service`, and `therapist_availability` use UUID PKs. `therapist_service` uses a composite PK `(therapist_id, service_id)` — this is the natural key for a junction table and enforces the uniqueness constraint at no extra index cost.
+
+**Why composite PK on `therapist_service` and not a surrogate UUID PK:** the pair `(therapist_id, service_id)` is the natural identity of a mapping row. A surrogate UUID would allow accidental duplicate mappings (same therapist-service pair twice) unless a separate UNIQUE constraint was added. Composite PK serves both purposes — identity and uniqueness — in one constraint.
+
+**`therapist_service.is_active` vs a separate `therapist_service_suspension` table:** a boolean flag is sufficient for Phase 4's "temporarily not offered" requirement. A separate event/history table would be needed only if audit of activation/deactivation history is required — that is Phase 5+ scope.
+
+**`service` is tenant-scoped, not branch-scoped:** confirmed from ADR 0009 §2.1. The existing `branch_id NULL` column on `service` (migration 000003) models this correctly. Phase 4 services always have `branch_id = NULL`. The column is retained for future branch-specific pricing/catalog overrides.
+
+**`therapist` is branch-scoped:** confirmed from ADR 0009 §2.1. A human working at two branches has two `therapist` rows, optionally linked by the same `user_id`. This denormalisation is intentional: it keeps availability, booking, and RLS queries simple — every therapist row fully identifies where the work happens without requiring a join to a separate branch-assignment table.
+
+**Dev seed migration (000014) creates a branch:** migration 000010 seeds the acme-spa tenant and Alice's membership but no branch. Migration 000014 creates "Cabang Utama" (`f0000000-0000-0000-0001-000000000001`) as a prerequisite for the therapist rows, which require `branch_id NOT NULL` after migration 000013.
+
+---
+
+### Phase 4 — Open Questions / Cross-Agent Flags
+
+#### For `go-expert`
+
+1. **`therapist.branch_id` — cross-branch isolation:** the service layer must enforce that a `branch_admin` can only create/update therapists and availability windows for branches in their own `user_branch` assignment. This is a post-permission filter, not a DB constraint. Flag for the `availability_service.go` and `therapist_service.go` implementations.
+
+2. **`therapist_service` full-replace semantics:** ADR 0009 §2.2 proposes `PUT /api/v1/tenant/therapists/:id/services` as a full replace. The implementation should: (a) set `is_active = false` on removed mappings rather than deleting them (preserve history), OR (b) delete removed rows. Decision for `go-expert` — note that delete means losing the `created_at`/`created_by` audit trail. Recommendation: soft-deactivation (`is_active = false`) on remove; hard delete is acceptable given the schema has no history table for mappings.
+
+3. **`availability.write` permission granularity:** ADR 0009 §2.2 uses a single `availability.write` permission covering both create and update. Migration 000005 seeded `availability.create` and `availability.update` as separate codes. The API contract should specify which code the `PUT /availability` (full-replace) endpoint checks — recommend `availability.create` + `availability.update` both required, or a single `availability.write` alias. Update the permission matrix in this doc when resolved.
+
+4. **`service.category` — filter on list endpoint:** the `GET /api/v1/tenant/services` endpoint should support `?category=` query parameter. This is a string filter, not a validated enum. Document in `API_CONTRACT.md`.
+
+5. **`therapist.branch_id` NOT NULL enforcement timing:** migration 000013 adds the column as NULL and then conditionally promotes it to NOT NULL in a DO block. On a production DB where rows were inserted before this migration (should not happen per CLEAN invariant, but guard exists), the NOT NULL promotion will silently skip. Go-expert should verify that no production data paths insert therapist rows without `branch_id` between migrations 000003 and 000013.
+
+#### For `security-expert`
+
+6. **Cross-branch RLS gap on `therapist_availability`:** `therapist_availability` has a `tenant_id` RLS policy (tenant isolation). A `branch_admin` at Branch A can currently SELECT availability for Branch B within the same tenant, because the RLS policy does not filter by `branch_id`. Cross-branch visibility within a tenant may be acceptable (a `tenant_admin` needs it), but a `branch_admin` should only mutate availability for their assigned branches. This is a service-layer authorization check, not a DB-level RLS check — confirm the threat model accepts this and document in `SECURITY.md`.
+
+7. **`therapist_service` cross-tenant invariant:** both `therapist_id` and `service_id` must belong to the same tenant. RLS on `therapist_service` sub-selects through `therapist.tenant_id` only. A crafted INSERT with a `service_id` from a different tenant is blocked by the session's RLS scope (the service row would not be visible), but this relies on RLS being set consistently. Confirm with `security-expert` whether a trigger cross-check is warranted.
+
+#### For `qa-expert`
+
+8. **Integration test: cross-branch isolation regression:** create two branches under the same tenant. Create a therapist at Branch A. Attempt to read/mutate that therapist's availability as a `branch_admin` authenticated to Branch B. Assert 403. This is the critical Phase 4 security regression test — see ADR 0009 §2.7.

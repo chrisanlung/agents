@@ -230,3 +230,96 @@ type EmailMessage struct {
 	TextBody string
 	HTMLBody string // optional
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4 — Master Operational Data (ADR 0009).
+// ---------------------------------------------------------------------------
+
+// TherapistRepository is the interface for therapist persistence.
+type TherapistRepository interface {
+	// Save inserts a new therapist row.
+	Save(ctx context.Context, t *model.Therapist) error
+	// FindByID returns a non-deleted therapist by primary key.
+	// Returns ErrTherapistNotFound when no matching row exists.
+	FindByID(ctx context.Context, id string) (*model.Therapist, error)
+	// FindByTenant returns a cursor-paginated list of non-deleted therapists
+	// for the given tenant, applying optional filters.
+	FindByTenant(ctx context.Context, tenantID string, filter TherapistFilter) ([]*model.Therapist, string, error)
+	// Update writes the mutable profile columns of an existing therapist row.
+	Update(ctx context.Context, t *model.Therapist) error
+	// UpdateStatus sets is_active for a therapist row.
+	UpdateStatus(ctx context.Context, id string, isActive bool) error
+	// SoftDelete sets deleted_at and is_active=false on the therapist row.
+	SoftDelete(ctx context.Context, id string) error
+}
+
+// TherapistFilter carries optional filters for the therapist list query.
+type TherapistFilter struct {
+	BranchID  *string
+	IsActive  *bool  // nil = active only
+	BranchIDs []string // when non-empty, restricts to these branch IDs (branch_admin scope)
+	Cursor    string
+	Limit     int
+}
+
+// ServiceCatalogRepository is the interface for service-catalog persistence.
+type ServiceCatalogRepository interface {
+	// Save inserts a new service row.
+	Save(ctx context.Context, s *model.ServiceCatalog) error
+	// FindByID returns a non-deleted service by primary key.
+	// Returns ErrServiceNotFound when no matching row exists.
+	FindByID(ctx context.Context, id string) (*model.ServiceCatalog, error)
+	// FindByTenant returns a cursor-paginated list of non-deleted services for
+	// the given tenant, applying optional filters.
+	FindByTenant(ctx context.Context, tenantID string, filter ServiceFilter) ([]*model.ServiceCatalog, string, error)
+	// Update writes the mutable columns of an existing service row.
+	Update(ctx context.Context, s *model.ServiceCatalog) error
+	// UpdateStatus sets is_active for a service row.
+	UpdateStatus(ctx context.Context, id string, isActive bool) error
+	// SoftDelete sets deleted_at and is_active=false on the service row.
+	SoftDelete(ctx context.Context, id string) error
+	// FindByIDs returns all non-deleted services whose IDs appear in ids,
+	// scoped to the given tenant.
+	FindByIDs(ctx context.Context, tenantID string, ids []string) ([]*model.ServiceCatalog, error)
+}
+
+// ServiceFilter carries optional filters for the service list query.
+type ServiceFilter struct {
+	IsActive *bool  // nil = active only
+	Category *string
+	Cursor   string
+	Limit    int
+}
+
+// TherapistServiceRepository is the interface for the therapist ↔ service
+// mapping table.
+type TherapistServiceRepository interface {
+	// FindByTherapistID returns all mapping rows for a therapist (active + inactive),
+	// excluding mappings to soft-deleted services.
+	FindByTherapistID(ctx context.Context, therapistID string) ([]*model.TherapistService, error)
+	// FindByServiceID returns all active mapping rows for a service,
+	// excluding soft-deleted therapists.
+	FindByServiceID(ctx context.Context, serviceID string) ([]*model.TherapistService, error)
+	// ReconcileForTherapist performs the diff-and-set operation described in
+	// ADR 0009 §Flag #2:
+	//   - IDs in desiredIDs with no row → INSERT is_active=true
+	//   - IDs in desiredIDs with is_active=false row → UPDATE is_active=true
+	//   - IDs with is_active=true row not in desiredIDs → UPDATE is_active=false
+	// All three operations run within the caller's transaction context.
+	ReconcileForTherapist(ctx context.Context, tenantID, therapistID, callerUserID string, desiredIDs []string) error
+	// DeactivateAllForTherapist sets is_active=false on every mapping row for
+	// the given therapist. Used during therapist soft-delete cascade.
+	DeactivateAllForTherapist(ctx context.Context, therapistID string) error
+}
+
+// TherapistAvailabilityRepository is the interface for per-therapist weekly
+// schedule persistence.
+type TherapistAvailabilityRepository interface {
+	// FindByTherapistID returns all availability rows for a therapist, ordered
+	// by day_of_week ASC, start_time ASC.
+	FindByTherapistID(ctx context.Context, therapistID string) ([]*model.TherapistAvailability, error)
+	// ReplaceAllForTherapist atomically deletes all existing rows for the
+	// therapist and inserts the new set within a single transaction.
+	// Passing an empty slice clears all availability.
+	ReplaceAllForTherapist(ctx context.Context, therapistID string, rows []*model.TherapistAvailability) error
+}

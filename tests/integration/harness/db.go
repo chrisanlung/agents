@@ -78,3 +78,27 @@ func QueryRows[T any](query string, scanFn func(*sql.Rows) (T, error), args ...a
 	}
 	return results, rows.Err()
 }
+
+// TxWithTenant opens a transaction, sets the app.current_tenant GUC to
+// tenantID, executes fn, and commits. Pass "__platform__" to bypass RLS
+// entirely (super-admin queries). The caller must not commit or rollback
+// inside fn — TxWithTenant handles that.
+func TxWithTenant(tenantID string, fn func(tx *sql.Tx) error) error {
+	db, err := DB()
+	if err != nil {
+		return fmt.Errorf("db connection: %w", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	if _, err := tx.Exec("SET LOCAL app.current_tenant = '" + tenantID + "'"); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("set tenant GUC: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}

@@ -118,6 +118,68 @@ These 8 paths must all be green before Phase 3 is signed off. Each maps to one o
 
 ---
 
+### T9 — Therapist CRUD
+
+**Rationale:** Full therapist lifecycle — create, read, update, status toggle, soft-delete, and cross-tenant isolation on the create call.
+
+**Tests:** `TestTherapistCRUD`
+
+**Status: FAIL — BUG-P4-A (see §4)**
+
+---
+
+### T10 — Service CRUD
+
+**Rationale:** Full service lifecycle — create, category-filtered list, deactivate/filter/reactivate, update, soft-delete.
+
+**Tests:** `TestServiceCRUD`
+
+**Status: FAIL — BUG-P4-B (see §4)**
+
+---
+
+### T11 — Therapist ↔ Service mapping
+
+**Rationale:** Critical flow per ADR 0009 §2.7. Verifies soft-reconcile: PUT partial deactivates without deleting rows, re-PUT re-activates without inserting new rows. DB-level row-count assertion confirms no phantom INSERTs.
+
+**Tests:** `TestTherapistServiceMapping`
+
+**Status: FAIL — blocked by BUG-P4-A (therapist create fails; mapping test setup cannot proceed)**
+
+---
+
+### T12 — Availability PUT
+
+**Rationale:** Critical flow per ADR 0009 §2.7. Validates all service-layer rules: overlap detection (409), end ≤ start (400), invalid dow (400), non-5-minute boundary (400). Also confirms full-replace semantics (empty PUT clears, 3-window PUT survives subsequent validation failures unchanged).
+
+**Tests:** `TestAvailabilityPut`
+
+**Status: FAIL — blocked by BUG-P4-A (therapist create fails; availability test setup cannot proceed)**
+
+---
+
+### T13 — Cross-branch isolation
+
+**Rationale:** Critical flow per ADR 0009 §2.7. Two sub-tests: (A) cross-tenant 404 isolation when Alice mutates a different tenant's therapist; (B) cross-branch 403 CROSS_BRANCH_FORBIDDEN when a branch_admin at branch A tries to mutate therapists at branch B.
+
+**Tests:** `TestCrossBranchIsolation`
+
+**Status: FAIL — blocked by BUG-P4-A (therapist create in second/third tenant fails)**
+
+---
+
+### T14 — Seed data integrity
+
+**Rationale:** Sanity check that migration 14 produced exactly the expected rows for acme-spa, and that those rows are correctly visible via the API to Alice (tenant isolation + RLS verification).
+
+**Tests:** `TestSeedDataIntegrity`
+
+**DB assertions Status: PASS** — migration 14 counts correct (3 services, 2 therapists, 5 mappings, 6 availability windows).
+
+**API assertions Status: FAIL — BUG-P4-A** — GET /tenant/therapists/:id returns 500 INTERNAL for seeded therapist IDs.
+
+---
+
 ## 3. Release Readiness Checklist — Phase 3
 
 - [x] T1 — Registration happy path: PASS
@@ -135,6 +197,22 @@ These 8 paths must all be green before Phase 3 is signed off. Each maps to one o
 - [ ] Migrations 1–12 tested on a clean Postgres 17 instance (docker compose up from scratch)
 - [ ] `docs/OPERATIONS.md` runbook updated with Phase 3 env vars (`TENANT_ADMIN_LOGIN_URL`, `SMTP_ENABLED`, `SMTP_HOST`, `SMTP_PORT`)
 - [ ] Integration tests added to CI pipeline (`.github/workflows/`)
+
+---
+
+## 3b. Release Readiness Checklist — Phase 4
+
+- [ ] BUG-P4-A resolved — `therapist.specialties` NOT NULL violation on INSERT (blocks T9–T13)
+- [ ] BUG-P4-B resolved — `service.code` NOT NULL + `price_idr` column name mismatch (blocks T10)
+- [ ] T9 `TestTherapistCRUD`: PASS
+- [ ] T10 `TestServiceCRUD`: PASS
+- [ ] T11 `TestTherapistServiceMapping`: PASS
+- [ ] T12 `TestAvailabilityPut`: PASS
+- [ ] T13 `TestCrossBranchIsolation`: PASS
+- [ ] T14 `TestSeedDataIntegrity` (DB + API halves): PASS
+- [ ] All Phase 3 tests still green after Phase 4 migration
+- [ ] `go test -race ./...` passes in auth-service CI
+- [ ] Migrations 1–14 tested on a clean Postgres 17 instance
 
 ---
 
@@ -173,6 +251,46 @@ These 8 paths must all be green before Phase 3 is signed off. Each maps to one o
 **Impact:** Deactivated tenant's admin can still authenticate and hold valid (though tenant-context-free) tokens. Combined with BUG-T7-A, this means the token chain continues indefinitely.
 
 **Fix direction:** In the `Login` use-case, after loading memberships, check if all memberships are in non-active status (`suspended`, `left`, `invited`). If the user has zero active memberships AND is not a super admin, return `401 ACCOUNT_INACTIVE`. Alternatively, `scope=user` tokens could be configured to expire faster or be blocked on any protected endpoint other than `/auth/select-tenant`.
+
+---
+
+### BUG-P4-A — `therapist` INSERT fails: `specialties` NOT NULL violation
+
+**Severity:** S1 (blocks all Phase 4 write paths — no therapist can be created)
+
+**File:line:** `lustia/services/auth/internal/model/therapist.go` — `Therapist` struct, `Specialties` field.
+
+**Symptom:** Every `POST /api/v1/tenant/therapists` returns `500 INTERNAL`. The DB error is:
+```
+null value in column "specialties" of relation "therapist" violates not-null constraint
+```
+
+**Root cause:** The `Specialties` field is declared as `*string` (Go nil pointer). When `nil`, GORM sends an explicit SQL `NULL` for the column, which violates `specialties jsonb NOT NULL DEFAULT '[]'::jsonb`. The DB default only fires when the column is omitted from the INSERT, but GORM includes all struct fields.
+
+**Fix direction:** Two options, either sufficient:
+1. Change `Specialties *string` → `string` with `gorm:"column:specialties;default:'[]'"` and initialise to `"[]"` before INSERT in the service layer.
+2. Keep `*string` but add `gorm:"column:specialties;default:'[]'"` and ensure the service sets it to `"[]"` (not nil) on new records.
+
+**Affected endpoints:** `POST /tenant/therapists`, `GET /tenant/therapists/:id` (500 on read too — serialisation fails for seeded rows because the jsonb value can't scan into `*string` cleanly), `PUT /tenant/therapists/:id/services`, `PUT /tenant/therapists/:id/availability`, `DELETE /tenant/therapists/:id`.
+
+---
+
+### BUG-P4-B — `service` INSERT fails: `code` NOT NULL + `price_idr` column mismatch
+
+**Severity:** S1 (blocks all Phase 4 service write paths — no service can be created)
+
+**File:line:** `lustia/services/auth/internal/model/service_catalog.go` — `ServiceCatalog` struct.
+
+**Symptom:** Every `POST /api/v1/tenant/services` returns `500 INTERNAL`. Two separate DB-level errors:
+
+1. `gorm:"column:price_idr"` — GORM maps to column `price_idr` but the DB column is `price`. GORM will either error with "column price_idr does not exist" or silently omit the price.
+2. No `Code` field in the model — the DB column `code text NOT NULL` has no default and is not nullable. GORM omits the column from the INSERT, producing a NOT NULL violation.
+
+**Root cause:** Schema drift between `internal/model/service_catalog.go` and the actual `service` table DDL. The DB has `price numeric(12,2)` and `code text NOT NULL`; the model has `PriceIDR int64 gorm:"column:price_idr"` and no `Code` field.
+
+**Fix direction:**
+1. Rename the GORM column tag: `gorm:"column:price;not null"`. The field name can stay `PriceIDR` for Go-side clarity.
+2. Add a `Code string` field: `gorm:"column:code;not null"`. The service layer must generate a slug-like code (e.g. from `uuid.New().String()[:8]` or the service name) before calling `Save`.
 
 ---
 

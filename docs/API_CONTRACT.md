@@ -2,7 +2,7 @@
 
 _Owned by `go-expert`. Consumed by `nextjs-expert` and `flutter-expert`. Changes require frontend sign-off._
 
-_Last updated: 2026-04-22 (Phase 3 — Tenant Onboarding & Branch Setup)_
+_Last updated: 2026-04-22 (Phase 4 — Master Operational Data)_
 
 ---
 
@@ -872,3 +872,789 @@ Used by the frontend dashboard redirect: if `has_branches = false` and caller is
 - `password_reset` table has no RLS — flagged to `security-expert`.
 - JWKS key rotation (multiple keys, `kid` selection) — flagged to `devops-expert`.
 - In-memory rate limiter needs Redis migration — flagged to `devops-expert`.
+
+---
+
+## 11. Phase 4 — Master Operational Data
+
+_Added 2026-04-22. Owned by `go-expert`. Implements ADR 0009 and migration 000013._
+
+---
+
+### 11.1 New Error Codes (Phase 4)
+
+The following codes must be added to `constants/error_codes.go` during implementation. All other errors use existing codes from §5.
+
+| Code | HTTP Status | Meaning |
+|---|---|---|
+| `THERAPIST_NOT_FOUND` | 404 | Therapist does not exist, is soft-deleted, or belongs to a different tenant |
+| `SERVICE_NOT_FOUND` | 404 | Service does not exist, is soft-deleted, or belongs to a different tenant |
+| `THERAPIST_HAS_ACTIVE_BOOKINGS` | 409 | Soft-delete attempted on a therapist with future non-terminal bookings (enforced in Phase 5; service layer must check once bookings table is populated) |
+| `AVAILABILITY_OVERLAP` | 409 | A submitted availability window overlaps an existing window for the same therapist on the same day |
+| `CROSS_BRANCH_FORBIDDEN` | 403 | `branch_admin` attempted to create or mutate a therapist or availability window outside their assigned branch |
+
+---
+
+### 11.2 Permission Matrix (Phase 4)
+
+All Phase 4 endpoints require `scope=tenant` in the JWT. Permissions were seeded in migration 000005 and guard-inserted in migration 000013.
+
+| Permission | Granted to |
+|---|---|
+| `therapist.read` | `super_admin`, `tenant_admin`, `branch_admin`, `customer` |
+| `therapist.create` | `super_admin`, `tenant_admin`, `branch_admin` |
+| `therapist.update` | `super_admin`, `tenant_admin`, `branch_admin` |
+| `therapist.delete` | `super_admin`, `tenant_admin`, `branch_admin` |
+| `service.read` | `super_admin`, `tenant_admin`, `branch_admin`, `therapist`, `customer` |
+| `service.create` | `super_admin`, `tenant_admin`, `branch_admin` |
+| `service.update` | `super_admin`, `tenant_admin`, `branch_admin` |
+| `service.delete` | `super_admin`, `tenant_admin`, `branch_admin` |
+| `availability.read` | `super_admin`, `tenant_admin`, `branch_admin`, `therapist` |
+| `availability.create` | `super_admin`, `tenant_admin`, `branch_admin`, `therapist` |
+| `availability.update` | `super_admin`, `tenant_admin`, `branch_admin`, `therapist` |
+| `availability.delete` | `super_admin`, `tenant_admin`, `branch_admin`, `therapist` |
+
+**Cross-branch authorization rule (cross-agent flag #1):** having `therapist.create`, `therapist.update`, `therapist.delete`, `availability.create`, or `availability.update` in the JWT is necessary but not sufficient for a `branch_admin`. The service layer MUST additionally verify that the target therapist's `branch_id` appears in the caller's `branches` JWT claim. If it does not, return `403 CROSS_BRANCH_FORBIDDEN`. A `tenant_admin` is not subject to this check (they manage all branches).
+
+---
+
+### 11.3 Cross-Agent Flag Resolutions
+
+This section documents how each flag raised in the design phase is resolved in this contract.
+
+**Flag #1 — Cross-branch authorization on availability write:** documented in §11.2. Service layer enforces `branches` claim check before any write on `therapist`, `therapist_service`, or `therapist_availability`. Returns `403 CROSS_BRANCH_FORBIDDEN`.
+
+**Flag #2 — `PUT /therapists/:id/services` soft vs hard update:** the body contains the desired full list of `service_ids`. The backend computes the diff: rows in the new list that do not yet exist are inserted with `is_active = true`; existing rows whose `service_id` appears in the new list are set to `is_active = true` (re-activates previously deactivated mappings); existing rows whose `service_id` is absent from the new list are set to `is_active = false` (soft-deactivation, preserving the audit trail of `created_at`, `created_by`). No mapping rows are hard-deleted. This is documented explicitly in endpoint §11.6.2.
+
+**Flag #3 — `GET /services?category=`:** the `category` query parameter is a case-sensitive string filter against `service.category`. No enum validation — free-form per the schema design. Documented in §11.5.1.
+
+**Flag #4 — `availability.write` permission granularity:** the `PUT /availability` endpoint performs a full replace, which is both a create and an update operation (deletes old rows, inserts new ones). Since migration 000005 seeded `availability.create` and `availability.update` as separate codes (not a combined `availability.write`), the endpoint requires **both `availability.create` AND `availability.update`** in the caller's JWT claims. A caller with only one of the two is rejected with `403 INSUFFICIENT_PERMISSION`. Both codes are already granted together to `tenant_admin`, `branch_admin`, and `therapist`, so this has no practical UX impact.
+
+**Flag #5 — Availability payload shape:** the flat shape `[{dow: 1, start: "09:00", end: "12:00"}, {dow: 1, start: "14:00", end: "17:00"}, ...]` is used. Rationale: it maps 1:1 to `therapist_availability` rows (one row per window), needs no client-side restructuring before a phase 5 booking query, and is simpler to validate with `go-playground/validator` slice tags. The per-day-grouped shape `[{dow, windows: [...]}]` is cleaner for the editor's internal model but requires an unwrap step on both server and client; the flat shape avoids that extra transformation at no readability cost for a contract of this size.
+
+**Flag #6 — `therapist_service.is_active` in service detail response:** `GET /tenant/services/:id` returns only active mappings (`is_active = true`) in the `therapists` array. Inactive mappings are omitted from this read path. Rationale: the service detail view is a catalog/booking reference; showing deactivated mappings would require UI logic to filter or explain them. The therapist detail page (endpoint §11.4.3) returns all mappings with their `is_active` flag, which is where mapping management occurs.
+
+**Flag #7 — Soft-delete vs deactivate semantics:**
+- `PATCH /:id/status` with `{"is_active": false}` — **deactivate.** Sets `is_active = false`. Row remains visible in list queries when `is_active=all`. Can be reversed via `PATCH /:id/status` with `{"is_active": true}`.
+- `DELETE /:id` — **soft-delete.** Sets `deleted_at = now()` AND `is_active = false` atomically. Row is excluded from all list queries regardless of `is_active` filter. Cannot be reactivated through the normal API. For therapist soft-delete, the service layer also sets `is_active = false` on all `therapist_service` rows for the same therapist in the same transaction.
+
+---
+
+### 11.4 Therapist Endpoints
+
+All endpoints in this group require `Authorization: Bearer <access_token>` with `scope=tenant`.
+
+**Shared response shape — TherapistResponse:**
+
+```json
+{
+  "id": "uuid",
+  "tenant_id": "uuid",
+  "branch_id": "uuid",
+  "user_id": "uuid",
+  "full_name": "Siti Rahma",
+  "gender": "female",
+  "bio": "Berpengalaman 5 tahun dalam pijat relaksasi.",
+  "photo_url": null,
+  "specialties": [],
+  "is_active": true,
+  "joined_at": "2026-01-15T00:00:00Z",
+  "created_at": "2026-04-22T10:00:00Z",
+  "updated_at": "2026-04-22T10:00:00Z"
+}
+```
+
+`user_id`, `gender`, `bio`, `photo_url` are `null` when not set. `specialties` is always an array (empty or populated). `joined_at` is the value stored in `therapist.joined_at`; it may differ from `created_at` if the admin back-fills an existing therapist's start date.
+
+---
+
+#### 11.4.1 `POST /api/v1/tenant/therapists`
+
+Creates a new therapist profile scoped to a branch within the caller's tenant.
+
+**Required permission:** `therapist.create`
+
+**Cross-branch rule:** a `branch_admin` may only create therapists for branches in their JWT `branches` claim. A `tenant_admin` may specify any branch within the tenant.
+
+**Request**
+
+```json
+{
+  "branch_id": "uuid",
+  "full_name": "Siti Rahma",
+  "gender": "female",
+  "phone": "+628123456789",
+  "email": "siti@example.com",
+  "bio": "Berpengalaman 5 tahun dalam pijat relaksasi.",
+  "photo_url": null,
+  "joined_at": "2026-01-15",
+  "user_id": null
+}
+```
+
+| Field | Type | Validation |
+|---|---|---|
+| `branch_id` | string | required, uuid — must belong to caller's tenant |
+| `full_name` | string | required, min=1, max=200 |
+| `gender` | string | optional, oneof=`male female other` |
+| `phone` | string | optional, max=30 |
+| `email` | string | optional, valid email, max=320 |
+| `bio` | string | optional, max=500 |
+| `photo_url` | string | optional, valid URL, max=2048 |
+| `joined_at` | string | optional, RFC 3339 date (`YYYY-MM-DD`) |
+| `user_id` | string | optional, uuid — must be an active member of the same tenant if provided |
+
+**Response `201 Created`** — TherapistResponse (see §11.4 shared shape)
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Binding/format failure |
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `therapist.create` |
+| 403 | `CROSS_BRANCH_FORBIDDEN` | `branch_admin` specified a `branch_id` not in their JWT `branches` claim |
+| 404 | `NOT_FOUND` | `branch_id` does not exist in this tenant |
+| 404 | `NOT_FOUND` | `user_id` provided but user is not an active member of this tenant |
+
+**Side-effects:** none beyond the INSERT. Audit log event `therapist.created` is appended.
+
+---
+
+#### 11.4.2 `GET /api/v1/tenant/therapists`
+
+Lists therapists within the caller's tenant. Cursor-paginated.
+
+**Required permission:** `therapist.read`
+
+**Query parameters**
+
+| Param | Type | Description |
+|---|---|---|
+| `branch_id` | uuid | Filter to a single branch. A `branch_admin` always sees only their assigned branches regardless of this filter. |
+| `is_active` | bool | `true` (default) / `false` / absent = active only. Pass `is_active=false` to list deactivated therapists. Soft-deleted rows (`deleted_at IS NOT NULL`) are never returned. |
+| `cursor` | string | Opaque cursor from previous response |
+| `limit` | int | 1–200, default 50 |
+
+**Default sort:** `full_name ASC`, then `created_at ASC` as tiebreaker.
+
+**Response `200 OK`**
+
+```json
+{
+  "data": [ { ...TherapistResponse } ],
+  "next_cursor": "opaque-cursor-string"
+}
+```
+
+`next_cursor` absent on last page.
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `therapist.read` |
+
+---
+
+#### 11.4.3 `GET /api/v1/tenant/therapists/:id`
+
+Returns a single therapist with their current service mappings (all mappings, both active and inactive, so the Layanan tab can render the full picture with per-row `is_active` state).
+
+**Required permission:** `therapist.read`
+
+**Response `200 OK`**
+
+```json
+{
+  "id": "uuid",
+  "tenant_id": "uuid",
+  "branch_id": "uuid",
+  "user_id": null,
+  "full_name": "Siti Rahma",
+  "gender": "female",
+  "bio": "...",
+  "photo_url": null,
+  "specialties": [],
+  "is_active": true,
+  "joined_at": "2026-01-15T00:00:00Z",
+  "created_at": "2026-04-22T10:00:00Z",
+  "updated_at": "2026-04-22T10:00:00Z",
+  "services": [
+    {
+      "service_id": "uuid",
+      "name": "Pijat Relaksasi 60 Menit",
+      "category": "Pijat",
+      "duration_minutes": 60,
+      "price_idr": 150000,
+      "is_active": true
+    }
+  ]
+}
+```
+
+`services` is always an array (empty if no mappings exist). Each entry reflects the current `therapist_service.is_active` flag. Soft-deleted services are excluded from this array even if a mapping row exists.
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `therapist.read` |
+| 404 | `THERAPIST_NOT_FOUND` | Therapist does not exist, is soft-deleted, or belongs to a different tenant |
+
+---
+
+#### 11.4.4 `PATCH /api/v1/tenant/therapists/:id`
+
+Updates profile fields. Partial update — only provided fields are changed.
+
+**Required permission:** `therapist.update`
+
+**Cross-branch rule:** a `branch_admin` may only update therapists whose `branch_id` appears in their JWT `branches` claim.
+
+**Request**
+
+```json
+{
+  "full_name": "Siti Rahmawati",
+  "gender": "female",
+  "phone": "+628129999999",
+  "email": "siti.new@example.com",
+  "bio": "Updated bio.",
+  "photo_url": "https://storage.example/siti.jpg",
+  "joined_at": "2026-01-01",
+  "user_id": "uuid"
+}
+```
+
+| Field | Type | Validation |
+|---|---|---|
+| `full_name` | string | optional, min=1, max=200 |
+| `gender` | string | optional, oneof=`male female other` |
+| `phone` | string | optional, max=30 |
+| `email` | string | optional, valid email, max=320 |
+| `bio` | string | optional, max=500 |
+| `photo_url` | string | optional, valid URL, max=2048 |
+| `joined_at` | string | optional, RFC 3339 date (`YYYY-MM-DD`) |
+| `user_id` | string | optional, uuid — must be an active member of the same tenant if non-null |
+
+`branch_id` is not patchable — branch assignment is immutable after creation.
+
+**Response `200 OK`** — updated TherapistResponse (without `services` array; use `GET /:id` to reload services)
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Binding/format failure |
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `therapist.update` |
+| 403 | `CROSS_BRANCH_FORBIDDEN` | `branch_admin` targeting a therapist outside their branch |
+| 404 | `THERAPIST_NOT_FOUND` | Therapist not found |
+| 404 | `NOT_FOUND` | `user_id` provided but user is not an active member of this tenant |
+
+---
+
+#### 11.4.5 `PATCH /api/v1/tenant/therapists/:id/status`
+
+Activates or deactivates a therapist without soft-deleting the row. See §11.3 flag #7 for the semantic distinction.
+
+**Required permission:** `therapist.update`
+
+**Cross-branch rule:** same as §11.4.4.
+
+**Request**
+
+```json
+{ "is_active": false }
+```
+
+| Field | Type | Validation |
+|---|---|---|
+| `is_active` | bool | required |
+
+**Response `200 OK`** — updated TherapistResponse (without `services` array)
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Missing or non-boolean `is_active` |
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `therapist.update` |
+| 403 | `CROSS_BRANCH_FORBIDDEN` | Branch mismatch for `branch_admin` |
+| 404 | `THERAPIST_NOT_FOUND` | Therapist not found |
+
+**Side-effects:** none beyond the UPDATE. Audit log event `therapist.deactivated` or `therapist.activated`.
+
+---
+
+#### 11.4.6 `DELETE /api/v1/tenant/therapists/:id`
+
+Soft-deletes a therapist. Sets `deleted_at = now()` and `is_active = false` atomically. Also sets `is_active = false` on all `therapist_service` rows for this therapist in the same transaction.
+
+**Required permission:** `therapist.delete`
+
+**Cross-branch rule:** same as §11.4.4.
+
+**Response `204 No Content`**
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `therapist.delete` |
+| 403 | `CROSS_BRANCH_FORBIDDEN` | Branch mismatch for `branch_admin` |
+| 404 | `THERAPIST_NOT_FOUND` | Therapist not found |
+| 409 | `THERAPIST_HAS_ACTIVE_BOOKINGS` | Therapist has future non-terminal bookings (enforced once bookings exist in Phase 5; returns 409 rather than silently allowing the delete) |
+
+**Side-effects:** audit log event `therapist.deleted`. Cascade deactivation of `therapist_service` mappings is logged as part of the same event's metadata.
+
+---
+
+### 11.5 Service Endpoints
+
+All endpoints in this group require `Authorization: Bearer <access_token>` with `scope=tenant`. Services are tenant-scoped — no `branch_id` filter applies.
+
+**Shared response shape — ServiceResponse:**
+
+```json
+{
+  "id": "uuid",
+  "tenant_id": "uuid",
+  "name": "Pijat Relaksasi 60 Menit",
+  "description": "Pijat seluruh tubuh untuk relaksasi mendalam.",
+  "category": "Pijat",
+  "duration_minutes": 60,
+  "price_idr": 150000,
+  "currency": "IDR",
+  "is_active": true,
+  "created_at": "2026-04-22T10:00:00Z",
+  "updated_at": "2026-04-22T10:00:00Z"
+}
+```
+
+`description` and `category` are `null` when not set. `currency` is always present; Phase 4 only creates `IDR` services.
+
+---
+
+#### 11.5.1 `POST /api/v1/tenant/services`
+
+Creates a new service in the caller's tenant.
+
+**Required permission:** `service.create`
+
+**Request**
+
+```json
+{
+  "name": "Pijat Relaksasi 60 Menit",
+  "description": "Pijat seluruh tubuh untuk relaksasi mendalam.",
+  "category": "Pijat",
+  "duration_minutes": 60,
+  "price_idr": 150000
+}
+```
+
+| Field | Type | Validation |
+|---|---|---|
+| `name` | string | required, min=1, max=200 |
+| `description` | string | optional, max=1000 |
+| `category` | string | optional, max=100 — free-form, no enum constraint |
+| `duration_minutes` | int | required, min=1, max=1440 |
+| `price_idr` | int | required, min=0 — stored in IDR, no decimal |
+
+**Response `201 Created`** — ServiceResponse
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Binding/format failure |
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `service.create` |
+
+**Side-effects:** audit log event `service.created`.
+
+---
+
+#### 11.5.2 `GET /api/v1/tenant/services`
+
+Lists services within the caller's tenant. Cursor-paginated.
+
+**Required permission:** `service.read`
+
+**Query parameters**
+
+| Param | Type | Description |
+|---|---|---|
+| `is_active` | bool | `true` (default) / `false` / absent = active only. Soft-deleted rows never returned. |
+| `category` | string | Case-sensitive string filter against `service.category`. No validation — free-form. |
+| `cursor` | string | Opaque cursor from previous response |
+| `limit` | int | 1–200, default 50 |
+
+**Default sort:** `name ASC`, then `created_at ASC` as tiebreaker.
+
+**Response `200 OK`**
+
+```json
+{
+  "data": [ { ...ServiceResponse } ],
+  "next_cursor": "opaque-cursor-string"
+}
+```
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `service.read` |
+
+---
+
+#### 11.5.3 `GET /api/v1/tenant/services/:id`
+
+Returns a single service with the list of therapists who have an **active** mapping to it (`therapist_service.is_active = true`). Inactive mappings are omitted — this endpoint is a catalog/booking reference view (cross-agent flag #6).
+
+**Required permission:** `service.read`
+
+**Response `200 OK`**
+
+```json
+{
+  "id": "uuid",
+  "tenant_id": "uuid",
+  "name": "Pijat Relaksasi 60 Menit",
+  "description": "...",
+  "category": "Pijat",
+  "duration_minutes": 60,
+  "price_idr": 150000,
+  "currency": "IDR",
+  "is_active": true,
+  "created_at": "2026-04-22T10:00:00Z",
+  "updated_at": "2026-04-22T10:00:00Z",
+  "therapists": [
+    {
+      "therapist_id": "uuid",
+      "full_name": "Siti Rahma",
+      "branch_id": "uuid",
+      "branch_name": "Cabang Utama",
+      "is_active": true
+    }
+  ]
+}
+```
+
+`therapists` is always an array (empty if no active mappings). Soft-deleted therapists are excluded even if an active mapping row exists.
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `service.read` |
+| 404 | `SERVICE_NOT_FOUND` | Service not found or soft-deleted |
+
+---
+
+#### 11.5.4 `PATCH /api/v1/tenant/services/:id`
+
+Updates service fields. Partial update — only provided fields are changed.
+
+**Required permission:** `service.update`
+
+**Request**
+
+```json
+{
+  "name": "Pijat Relaksasi Premium 60 Menit",
+  "description": "Updated description.",
+  "category": "Pijat Premium",
+  "duration_minutes": 75,
+  "price_idr": 200000
+}
+```
+
+| Field | Type | Validation |
+|---|---|---|
+| `name` | string | optional, min=1, max=200 |
+| `description` | string | optional, max=1000 |
+| `category` | string | optional, max=100 |
+| `duration_minutes` | int | optional, min=1, max=1440 |
+| `price_idr` | int | optional, min=0 |
+
+**Response `200 OK`** — updated ServiceResponse (without `therapists` array)
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Binding/format failure |
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `service.update` |
+| 404 | `SERVICE_NOT_FOUND` | Service not found |
+
+---
+
+#### 11.5.5 `PATCH /api/v1/tenant/services/:id/status`
+
+Activates or deactivates a service. See §11.3 flag #7 for semantics.
+
+**Required permission:** `service.update`
+
+**Request**
+
+```json
+{ "is_active": false }
+```
+
+| Field | Type | Validation |
+|---|---|---|
+| `is_active` | bool | required |
+
+**Response `200 OK`** — updated ServiceResponse (without `therapists` array)
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Missing or non-boolean `is_active` |
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `service.update` |
+| 404 | `SERVICE_NOT_FOUND` | Service not found |
+
+---
+
+#### 11.5.6 `DELETE /api/v1/tenant/services/:id`
+
+Soft-deletes a service. Sets `deleted_at = now()` and `is_active = false` atomically. Does **not** automatically modify `therapist_service` rows — the Phase 5 booking engine filters `WHERE service.deleted_at IS NULL`, so orphaned active mapping rows are harmless. The service layer SHOULD set `therapist_service.is_active = false` in the same transaction for clarity, but this is an implementation detail, not a client-visible behavior.
+
+**Required permission:** `service.delete`
+
+**Response `204 No Content`**
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `service.delete` |
+| 404 | `SERVICE_NOT_FOUND` | Service not found |
+
+**Side-effects:** audit log event `service.deleted`.
+
+---
+
+### 11.6 Therapist ↔ Service Mapping Endpoints
+
+---
+
+#### 11.6.1 `GET /api/v1/tenant/therapists/:id/services`
+
+Returns the current service mappings for a therapist, including both active and inactive. This endpoint is intentionally redundant with the `services` array on `GET /tenant/therapists/:id` (§11.4.3) — it exists as a standalone route for clients that only need the mapping list without the full therapist profile (e.g. the availability editor pre-check).
+
+**Required permission:** `therapist.read`
+
+**Response `200 OK`**
+
+```json
+{
+  "therapist_id": "uuid",
+  "services": [
+    {
+      "service_id": "uuid",
+      "name": "Pijat Relaksasi 60 Menit",
+      "category": "Pijat",
+      "duration_minutes": 60,
+      "price_idr": 150000,
+      "is_active": true,
+      "assigned_at": "2026-04-22T10:00:00Z"
+    }
+  ]
+}
+```
+
+`services` is always an array. Soft-deleted services are excluded.
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `therapist.read` |
+| 404 | `THERAPIST_NOT_FOUND` | Therapist not found |
+
+---
+
+#### 11.6.2 `PUT /api/v1/tenant/therapists/:id/services`
+
+Full-replace of the therapist's service assignments. The body declares the desired active set. The backend reconciles as follows (cross-agent flag #2):
+
+1. For each `service_id` in the request body that has no existing `therapist_service` row: INSERT a new row with `is_active = true`.
+2. For each `service_id` in the request body that has an existing row with `is_active = false`: UPDATE `is_active = true` (re-activates a previously suspended mapping).
+3. For each `service_id` in the request body that has an existing row with `is_active = true`: no change.
+4. For each existing row whose `service_id` is NOT in the request body: UPDATE `is_active = false` (soft-deactivation; row and its `created_at`/`created_by` are preserved).
+
+Sending an empty array (`"service_ids": []`) soft-deactivates all current mappings.
+
+**Required permission:** `therapist.update` (mapping management is considered a therapist profile update)
+
+**Cross-branch rule:** same as §11.4.4.
+
+**Request**
+
+```json
+{ "service_ids": ["uuid-1", "uuid-2"] }
+```
+
+| Field | Type | Validation |
+|---|---|---|
+| `service_ids` | []string | required (empty array is valid), each element: uuid, must belong to caller's tenant, service must not be soft-deleted |
+
+**Response `200 OK`**
+
+```json
+{
+  "therapist_id": "uuid",
+  "services": [
+    {
+      "service_id": "uuid",
+      "name": "Pijat Relaksasi 60 Menit",
+      "category": "Pijat",
+      "duration_minutes": 60,
+      "price_idr": 150000,
+      "is_active": true,
+      "assigned_at": "2026-04-22T10:00:00Z"
+    }
+  ]
+}
+```
+
+The response reflects the full mapping state after reconciliation (all rows for this therapist, including rows just set to `is_active = false`), matching the shape of §11.6.1. This allows the client to re-render the Layanan tab without a separate GET.
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Binding failure or a `service_id` is not a valid UUID |
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `therapist.update` |
+| 403 | `CROSS_BRANCH_FORBIDDEN` | Branch mismatch for `branch_admin` |
+| 404 | `THERAPIST_NOT_FOUND` | Therapist not found |
+| 404 | `SERVICE_NOT_FOUND` | One or more `service_id` values do not exist in this tenant or are soft-deleted |
+
+**Side-effects:** audit log event `therapist_service.updated` with metadata listing added and removed service IDs.
+
+---
+
+### 11.7 Availability Endpoints
+
+---
+
+#### 11.7.1 `GET /api/v1/tenant/therapists/:id/availability`
+
+Returns the therapist's current weekly availability pattern as a flat list of windows sorted by `day_of_week ASC`, then `start_time ASC`.
+
+**Required permission:** `availability.read`
+
+**Response `200 OK`**
+
+```json
+{
+  "therapist_id": "uuid",
+  "windows": [
+    { "id": "uuid", "dow": 1, "start": "09:00", "end": "12:00" },
+    { "id": "uuid", "dow": 1, "start": "14:00", "end": "17:00" },
+    { "id": "uuid", "dow": 3, "start": "09:00", "end": "17:00" }
+  ]
+}
+```
+
+`windows` is always an array (empty if no availability is set). `dow` follows the DB convention: 0 = Sunday, 1 = Monday, …, 6 = Saturday. `start` and `end` are `"HH:MM"` strings. `id` is the `therapist_availability.id` UUID — exposed so the client can reference individual rows if needed (Phase 5).
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `availability.read` |
+| 404 | `THERAPIST_NOT_FOUND` | Therapist not found |
+
+---
+
+#### 11.7.2 `PUT /api/v1/tenant/therapists/:id/availability`
+
+Full-replace of the therapist's weekly availability pattern. All existing `therapist_availability` rows for this therapist are deleted and replaced with the submitted windows in a single transaction. This is a destructive replace — the caller submits the complete desired state.
+
+Sending an empty array (`"windows": []`) clears all availability.
+
+**Required permission:** `availability.create` AND `availability.update` (both required — see §11.3 flag #4)
+
+**Cross-branch rule:** same as §11.4.4.
+
+**Payload shape** (cross-agent flag #5 — flat, one object per window):
+
+```json
+{
+  "windows": [
+    { "dow": 1, "start": "09:00", "end": "12:00" },
+    { "dow": 1, "start": "14:00", "end": "17:00" },
+    { "dow": 3, "start": "09:00", "end": "17:00" }
+  ]
+}
+```
+
+| Field | Type | Validation |
+|---|---|---|
+| `windows` | []object | required (empty array is valid) |
+| `windows[].dow` | int | required, min=0, max=6 (0=Sunday) |
+| `windows[].start` | string | required, format `HH:MM`, must be a valid 24h time |
+| `windows[].end` | string | required, format `HH:MM`, must be a valid 24h time, must be after `start` |
+
+**Service-layer validations (applied before DB write, not expressible as binding tags alone):**
+1. `end` must be strictly after `start` on each window.
+2. No two windows for the same `dow` may overlap: for any pair on the same day, `window_a.end <= window_b.start` (after sorting by `start`). Returns `409 AVAILABILITY_OVERLAP` if violated.
+3. Maximum 3 windows per day (matches the UI constraint from DESIGN_SYSTEM.md §3A). Returns `400 VALIDATION` if exceeded.
+4. `start` and `end` must be on 5-minute boundaries (i.e. minutes must be divisible by 5). Returns `400 VALIDATION` if violated. The DB stores whatever TIME value the service sends; the 5-minute rule is enforced here at the service layer.
+
+**Response `200 OK`** — same shape as `GET /availability` (§11.7.1) reflecting the new state after replace.
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Binding failure, invalid time format, end ≤ start, >3 windows/day, or non-5-minute boundary |
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `availability.create` or `availability.update` (either missing blocks the request) |
+| 403 | `CROSS_BRANCH_FORBIDDEN` | Branch mismatch for `branch_admin` |
+| 404 | `THERAPIST_NOT_FOUND` | Therapist not found |
+| 409 | `AVAILABILITY_OVERLAP` | Two windows on the same day overlap |
+
+**Side-effects:** audit log event `therapist_availability.replaced` with `window_count` in metadata.
+
+---
+
+### 11.8 Branch Operational Hours
+
+---
+
+#### 11.8.1 `GET /api/v1/tenant/branches/:id/operational-hours`
+
+Extracts the `operational_hours` JSONB field from the branch row. No new DB query — reads the existing `branch` row and projects the `operational_hours` field. This endpoint is read-only; to update operational hours use `PATCH /api/v1/tenant/branches/:id` (Phase 3, §10).
+
+**Required permission:** `branch.read`
+
+**Response `200 OK`**
+
+```json
+{
+  "branch_id": "uuid",
+  "timezone": "Asia/Jakarta",
+  "operational_hours": [
+    { "day": "monday",    "open": "09:00", "close": "21:00" },
+    { "day": "tuesday",   "open": "09:00", "close": "21:00" },
+    { "day": "wednesday", "open": "09:00", "close": "21:00" },
+    { "day": "thursday",  "open": "09:00", "close": "21:00" },
+    { "day": "friday",    "open": "09:00", "close": "21:00" },
+    { "day": "saturday",  "open": "10:00", "close": "20:00" },
+    { "day": "sunday",    "open": "10:00", "close": "18:00" }
+  ]
+}
+```
+
+The `operational_hours` array shape mirrors the JSONB stored in `branch.operational_hours` (Phase 3 schema). An empty array `[]` is returned if the branch has not yet had operational hours configured. `timezone` is always present — the frontend availability editor uses it to annotate the display. The JSONB is returned as-is from the DB; no re-projection.
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `branch.read` |
+| 404 | `NOT_FOUND` | Branch not found or belongs to a different tenant |

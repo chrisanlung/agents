@@ -112,4 +112,27 @@ var (
 
 	// ErrRegistrationNotFound is returned when a registration ID does not resolve.
 	ErrRegistrationNotFound = errors.New("registration not found")
+
+	// Phase 4 — Master Operational Data (ADR 0009).
+
+	// ErrTherapistNotFound is returned when a therapist ID does not resolve, is
+	// soft-deleted, or belongs to a different tenant.
+	ErrTherapistNotFound = errors.New("therapist not found")
+
+	// ErrServiceNotFound is returned when a service ID does not resolve, is
+	// soft-deleted, or belongs to a different tenant.
+	ErrServiceNotFound = errors.New("service not found")
+
+	// ErrTherapistHasActiveBookings is returned when a soft-delete is attempted
+	// on a therapist with future non-terminal bookings (enforced in Phase 5).
+	ErrTherapistHasActiveBookings = errors.New("therapist has active bookings")
+
+	// ErrAvailabilityOverlap is returned when two availability windows on the
+	// same day overlap for the same therapist.
+	ErrAvailabilityOverlap = errors.New("availability windows overlap")
+
+	// ErrCrossBranchForbidden is returned when a branch_admin attempts to
+	// create or mutate a therapist or availability window that belongs to a
+	// branch not present in their JWT branches claim.
+	ErrCrossBranchForbidden = errors.New("cross-branch access forbidden")
 )

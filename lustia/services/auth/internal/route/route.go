@@ -23,6 +23,12 @@ type Deps struct {
 	Registration *controller.RegistrationController
 	Tenant       *controller.TenantController
 	Branch       *controller.BranchController
+
+	// Phase 4 — Master Operational Data (ADR 0009).
+	Therapist        *controller.TherapistController
+	Service          *controller.ServiceController
+	Availability     *controller.AvailabilityController
+	TherapistMapping *controller.TherapistMappingController
 }
 
 // Register builds the full Gin route tree on r.
@@ -91,4 +97,11 @@ func Register(r *gin.Engine, deps Deps) {
 	// those permissions).
 	tenantGroup := v1.Group("", jwtMW, tenantMW, scopeGateMW, pwdChangeMW)
 	deps.Branch.Register(tenantGroup, rbacMW)
+
+	// Phase 4 — Master Operational Data (ADR 0009).
+	// All Phase 4 endpoints share the same tenant-scoped group with RBAC per route.
+	deps.Therapist.Register(tenantGroup, rbacMW)
+	deps.Service.Register(tenantGroup, rbacMW)
+	deps.Availability.Register(tenantGroup, rbacMW)
+	deps.TherapistMapping.Register(tenantGroup, rbacMW)
 }

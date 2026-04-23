@@ -34,6 +34,96 @@ export interface BranchListResponse {
   next_cursor: string | null;
 }
 
+// ─── Phase 4 — Master Operational Data (ADR 0009) ────────────────────────────
+
+/** TherapistResponse matches API §11.4 shape exactly. */
+export interface Therapist {
+  id: string;
+  tenant_id: string;
+  branch_id: string;
+  user_id: string | null;
+  full_name: string;
+  gender: "male" | "female" | "other" | null;
+  phone?: string | null;
+  email?: string | null;
+  bio: string | null;
+  photo_url: string | null;
+  specialties: string[];
+  is_active: boolean;
+  joined_at: string | null;
+  created_at: string;
+  updated_at: string;
+  /** Present on GET /tenant/therapists/:id — all mappings (active + inactive) */
+  services?: TherapistServiceMapping[];
+}
+
+export interface TherapistListResponse {
+  data: Therapist[];
+  next_cursor: string | null;
+}
+
+/** One entry in the services array on TherapistResponse (§11.4.3). */
+export interface TherapistServiceMapping {
+  service_id: string;
+  name: string;
+  category: string | null;
+  duration_minutes: number;
+  price_idr: number;
+  is_active: boolean;
+  assigned_at?: string;
+}
+
+/** ServiceResponse matches API §11.5 shape exactly. */
+export interface Service {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description: string | null;
+  category: string | null;
+  duration_minutes: number;
+  price_idr: number;
+  currency: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  /** Present on GET /tenant/services/:id — active mappings only */
+  therapists?: ServiceTherapistEntry[];
+}
+
+export interface ServiceListResponse {
+  data: Service[];
+  next_cursor: string | null;
+}
+
+/** One entry in the therapists array on ServiceResponse (§11.5.3). */
+export interface ServiceTherapistEntry {
+  therapist_id: string;
+  full_name: string;
+  branch_id: string;
+  branch_name: string;
+  is_active: boolean;
+}
+
+/** A single availability window — one row in therapist_availability. */
+export interface AvailabilityWindow {
+  /** id is present on read (GET); omit when writing (PUT) */
+  id?: string;
+  /** day_of_week: 0=Sun … 6=Sat */
+  dow: number;
+  start: string; // "HH:MM"
+  end: string;   // "HH:MM"
+}
+
+export interface AvailabilityResponse {
+  therapist_id: string;
+  windows: AvailabilityWindow[];
+}
+
+export interface ServiceMappingResponse {
+  therapist_id: string;
+  services: TherapistServiceMapping[];
+}
+
 // ─── Onboarding state (ADR 0008 §2.3.3) ─────────────────────────────────────
 
 /**

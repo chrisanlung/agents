@@ -77,6 +77,12 @@ func decodeJSON(raw []byte, v any) error {
 	return json.Unmarshal(raw, v)
 }
 
+// DecodeJSONPublic is the exported form of decodeJSON for test helpers in the
+// same test binary that need to decode a response they obtained via RawDo.
+func DecodeJSONPublic(raw []byte, v any) error {
+	return decodeJSON(raw, v)
+}
+
 // ----- request / response types ----------------------------------------------
 
 type RegisterCompanyRequest struct {
@@ -392,4 +398,216 @@ func ErrorCode(raw []byte) string {
 // RawDo is the escape hatch for tests that need direct access to response bytes.
 func (c *APIClient) RawDo(method, path string, body any, token string) (*http.Response, []byte, error) {
 	return c.do(method, path, body, token)
+}
+
+// LoginWithSlug sends POST /api/v1/auth/login with an explicit tenant_slug.
+// Use "acme-spa" for Alice, "__platform__" for super admin.
+func (c *APIClient) LoginWithSlug(email, password, tenantSlug string) (LoginResponse, *http.Response, error) {
+	body := map[string]string{
+		"email":       email,
+		"password":    password,
+		"tenant_slug": tenantSlug,
+	}
+	resp, raw, err := c.do(http.MethodPost, "/api/v1/auth/login", body, "")
+	if err != nil {
+		return LoginResponse{}, nil, err
+	}
+	var out LoginResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// ============================================================================
+// Phase 4 — Therapist helpers
+// ============================================================================
+
+// ListTherapists sends GET /api/v1/tenant/therapists with optional query string.
+// query may be "" or a raw query string like "branch_id=uuid&is_active=false".
+func (c *APIClient) ListTherapists(token, query string) (TherapistListResponse, *http.Response, error) {
+	path := "/api/v1/tenant/therapists"
+	if query != "" {
+		path += "?" + query
+	}
+	resp, raw, err := c.do(http.MethodGet, path, nil, token)
+	if err != nil {
+		return TherapistListResponse{}, nil, err
+	}
+	var out TherapistListResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// CreateTherapist sends POST /api/v1/tenant/therapists.
+func (c *APIClient) CreateTherapist(token string, body CreateTherapistRequest) (TherapistResponse, *http.Response, error) {
+	resp, raw, err := c.do(http.MethodPost, "/api/v1/tenant/therapists", body, token)
+	if err != nil {
+		return TherapistResponse{}, nil, err
+	}
+	var out TherapistResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// GetTherapist sends GET /api/v1/tenant/therapists/:id.
+func (c *APIClient) GetTherapist(token, id string) (TherapistResponse, *http.Response, error) {
+	resp, raw, err := c.do(http.MethodGet, "/api/v1/tenant/therapists/"+id, nil, token)
+	if err != nil {
+		return TherapistResponse{}, nil, err
+	}
+	var out TherapistResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// UpdateTherapist sends PATCH /api/v1/tenant/therapists/:id.
+func (c *APIClient) UpdateTherapist(token, id string, body UpdateTherapistRequest) (TherapistResponse, *http.Response, error) {
+	resp, raw, err := c.do(http.MethodPatch, "/api/v1/tenant/therapists/"+id, body, token)
+	if err != nil {
+		return TherapistResponse{}, nil, err
+	}
+	var out TherapistResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// ChangeTherapistStatus sends PATCH /api/v1/tenant/therapists/:id/status.
+func (c *APIClient) ChangeTherapistStatus(token, id string, isActive bool) (TherapistResponse, *http.Response, error) {
+	resp, raw, err := c.do(http.MethodPatch, "/api/v1/tenant/therapists/"+id+"/status",
+		TherapistStatusRequest{IsActive: isActive}, token)
+	if err != nil {
+		return TherapistResponse{}, nil, err
+	}
+	var out TherapistResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// DeleteTherapist sends DELETE /api/v1/tenant/therapists/:id.
+func (c *APIClient) DeleteTherapist(token, id string) (*http.Response, error) {
+	resp, _, err := c.do(http.MethodDelete, "/api/v1/tenant/therapists/"+id, nil, token)
+	return resp, err
+}
+
+// ============================================================================
+// Phase 4 — Service helpers
+// ============================================================================
+
+// ListServices sends GET /api/v1/tenant/services with optional query string.
+func (c *APIClient) ListServices(token, query string) (ServiceListResponse, *http.Response, error) {
+	path := "/api/v1/tenant/services"
+	if query != "" {
+		path += "?" + query
+	}
+	resp, raw, err := c.do(http.MethodGet, path, nil, token)
+	if err != nil {
+		return ServiceListResponse{}, nil, err
+	}
+	var out ServiceListResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// CreateService sends POST /api/v1/tenant/services.
+func (c *APIClient) CreateService(token string, body CreateServiceRequest) (ServiceResponse, *http.Response, error) {
+	resp, raw, err := c.do(http.MethodPost, "/api/v1/tenant/services", body, token)
+	if err != nil {
+		return ServiceResponse{}, nil, err
+	}
+	var out ServiceResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// GetService sends GET /api/v1/tenant/services/:id.
+func (c *APIClient) GetService(token, id string) (ServiceResponse, *http.Response, error) {
+	resp, raw, err := c.do(http.MethodGet, "/api/v1/tenant/services/"+id, nil, token)
+	if err != nil {
+		return ServiceResponse{}, nil, err
+	}
+	var out ServiceResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// UpdateService sends PATCH /api/v1/tenant/services/:id.
+func (c *APIClient) UpdateService(token, id string, body UpdateServiceRequest) (ServiceResponse, *http.Response, error) {
+	resp, raw, err := c.do(http.MethodPatch, "/api/v1/tenant/services/"+id, body, token)
+	if err != nil {
+		return ServiceResponse{}, nil, err
+	}
+	var out ServiceResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// ChangeServiceStatus sends PATCH /api/v1/tenant/services/:id/status.
+func (c *APIClient) ChangeServiceStatus(token, id string, isActive bool) (ServiceResponse, *http.Response, error) {
+	resp, raw, err := c.do(http.MethodPatch, "/api/v1/tenant/services/"+id+"/status",
+		ServiceStatusRequest{IsActive: isActive}, token)
+	if err != nil {
+		return ServiceResponse{}, nil, err
+	}
+	var out ServiceResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// DeleteService sends DELETE /api/v1/tenant/services/:id.
+func (c *APIClient) DeleteService(token, id string) (*http.Response, error) {
+	resp, _, err := c.do(http.MethodDelete, "/api/v1/tenant/services/"+id, nil, token)
+	return resp, err
+}
+
+// ============================================================================
+// Phase 4 — Service mapping helpers
+// ============================================================================
+
+// PutTherapistServices sends PUT /api/v1/tenant/therapists/:id/services.
+func (c *APIClient) PutTherapistServices(token, therapistID string, serviceIDs []string) (ServiceMappingResponse, *http.Response, error) {
+	resp, raw, err := c.do(http.MethodPut, "/api/v1/tenant/therapists/"+therapistID+"/services",
+		PutServicesRequest{ServiceIDs: serviceIDs}, token)
+	if err != nil {
+		return ServiceMappingResponse{}, nil, err
+	}
+	var out ServiceMappingResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// GetTherapistServices sends GET /api/v1/tenant/therapists/:id/services.
+func (c *APIClient) GetTherapistServices(token, therapistID string) (ServiceMappingResponse, *http.Response, error) {
+	resp, raw, err := c.do(http.MethodGet, "/api/v1/tenant/therapists/"+therapistID+"/services", nil, token)
+	if err != nil {
+		return ServiceMappingResponse{}, nil, err
+	}
+	var out ServiceMappingResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// ============================================================================
+// Phase 4 — Availability helpers
+// ============================================================================
+
+// GetAvailability sends GET /api/v1/tenant/therapists/:id/availability.
+func (c *APIClient) GetAvailability(token, therapistID string) (AvailabilityResponse, *http.Response, error) {
+	resp, raw, err := c.do(http.MethodGet, "/api/v1/tenant/therapists/"+therapistID+"/availability", nil, token)
+	if err != nil {
+		return AvailabilityResponse{}, nil, err
+	}
+	var out AvailabilityResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
+}
+
+// PutAvailability sends PUT /api/v1/tenant/therapists/:id/availability.
+func (c *APIClient) PutAvailability(token, therapistID string, windows []AvailabilityWindow) (AvailabilityResponse, *http.Response, error) {
+	resp, raw, err := c.do(http.MethodPut, "/api/v1/tenant/therapists/"+therapistID+"/availability",
+		PutAvailabilityRequest{Windows: windows}, token)
+	if err != nil {
+		return AvailabilityResponse{}, nil, err
+	}
+	var out AvailabilityResponse
+	_ = decodeJSON(raw, &out)
+	return out, resp, nil
 }

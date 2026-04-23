@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Building2, LayoutDashboard, MapPin } from "lucide-react";
+import { Building2, LayoutDashboard, MapPin, Stethoscope } from "lucide-react";
 
 import { WorkspaceSwitcher, type MembershipSummary } from "@/components/workspace-switcher";
 import { UserMenu } from "@/components/user-menu";
@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 
 const appName = process.env.NEXT_PUBLIC_APP_NAME ?? "Lustia Tenant Portal";
 
-type NavKey = "dashboard" | "branches";
+type NavKey = "dashboard" | "branches" | "operasional";
 
 interface NavItem {
   key: NavKey;
@@ -19,6 +19,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { key: "dashboard", href: "/dashboard", label: "Dasbor", icon: LayoutDashboard },
   { key: "branches", href: "/branches", label: "Cabang", icon: MapPin },
+  { key: "operasional", href: "/master/therapists", label: "Operasional", icon: Stethoscope },
 ];
 
 interface AppHeaderProps {

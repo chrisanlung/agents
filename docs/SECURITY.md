@@ -808,3 +808,305 @@ The Phase 1–2 controls (Argon2id, RS256 JWT, RLS tenant isolation, refresh tok
 | Date | Change reviewed | Findings | Status |
 |---|---|---|---|
 | 2026-04-23 | Phase 3 delivery — public registration, approval workflow, branch CRUD, change-password UI | **[High — OPEN]** H-1: Hardcoded localhost URL in welcome email (`registration_service.go:86`). **[High — OPEN]** H-2: Full contact email written to audit log (`registration_service.go:245`, Section 7.2 violation). **[Medium]** M-1: Email/slug enumeration via distinct error codes. **[Medium]** M-2: `ChangeTenantStatusRequest.Status` missing `oneof` validation. **[Medium]** M-3: `RequestedSlug` accepts non-slugified characters. **[Medium]** M-4: In-memory rate limiter ineffective against distributed abuse. **[Low]** L-1: Temporary password derives entropy from UUID hex — recommend explicit `crypto/rand`. **[Low]** L-2: `ListTenantsQuery.Status` missing allowlist. **[Low]** L-3: Timezone/country fields accept unvalidated strings. | **BLOCKED — H-1 and H-2 must be resolved** |
+| 2026-04-23 | Phase 4 delivery — therapist CRUD, service catalog, therapist↔service mapping, per-therapist availability | See ## Phase 4 Security Review — 2026-04-23 below. | **BLOCKED — H-1 must be resolved** |
+
+---
+
+## Phase 4 Security Review — 2026-04-23
+
+_Reviewer: security-expert. Code read: therapist_svc.go, availability_service.go, mapping_service.go, catalog_service.go, all four controllers, all four repositories, dto_request.go, migration 000013, migration 000014, migration 000004 (RLS), middleware.ts, and master/*.tsx frontend pages. Review covers ADR 0009, API contract §11, and the 14 new tenant-scoped endpoints._
+
+---
+
+### Executive Summary
+
+Phase 4 introduces 14 new endpoints and 4 DB tables. The authorization architecture is generally sound: cross-branch isolation is correctly enforced via the `IsAdmin / containsBranch` pattern on every write path, IDOR protection follows the established `tenant_id` equality check pattern from Phase 1–3, and RLS policies are in place for three of the four new tables. Mass assignment is not possible — DTOs do not expose `tenant_id`, `branch_id`, `id`, or soft-delete fields. The frontend renders all free-form fields through standard React JSX (no `dangerouslySetInnerHTML`), so the `service.category` XSS vector is not present.
+
+**One High finding blocks sign-off.** The `therapist_service` table is missing both an UPDATE RLS policy and the UPDATE privilege grant. The reconcile operation in `PUT /therapists/:id/services` issues UPDATE statements that therefore run without row-level tenant isolation — RLS defence-in-depth is absent for this mutation path. The service-layer tenant check is the only guard.
+
+**Finding count:** 1 High, 3 Medium, 3 Low, 1 Info.
+
+---
+
+### STRIDE Extension for Phase 4
+
+| # | Category | Concrete Threat | Where | Impact | Mitigation | Status |
+|---|---|---|---|---|---|---|
+| S-4 | Spoofing | `branch_admin` guesses a therapist UUID belonging to another branch and calls PATCH/DELETE | All therapist write endpoints | Cross-branch profile mutation | `containsBranch(callerBranches, t.BranchID)` enforced after tenant equality check | Implemented |
+| T-4 | Tampering | Caller submits `service_ids` from another tenant in `PUT /therapists/:id/services` | `mapping_service.go:56` | Cross-tenant mapping injection | `FindByIDs(ctx, callerTenantID, ids)` validates all IDs against caller's tenant | Implemented |
+| T-5 | Tampering | `PUT /therapists/:id/availability` replaces availability for an unowned therapist | `availability_service.go:63` | Unauthorized schedule override | Tenant + `containsBranch` check before any write | Implemented — note H-1 mitigates via service layer; DB layer gap in therapist_service, not availability |
+| I-5 | Information Disclosure | IDOR: attacker reads availability of another tenant's therapist | `GET /therapists/:id/availability` | Confidential schedule leak | `t.TenantID != callerTenantID` check before returning rows | Implemented |
+| D-4 | Denial of Service | Rapid `PUT /therapists/:id/availability` calls create DELETE+INSERT storm | `therapist_availability_repository.go:43` | Table churn, booking engine degradation in Phase 5 | No per-endpoint rate limit exists | Open — see M-1 |
+| E-4 | Elevation of Privilege | `therapist`-role user overwrites a colleague's availability at same branch | `availability_service.go:71` | Unauthorized schedule modification by peer | No `user_id == callerUserID` check; only branch membership checked | Open — see M-2 |
+
+---
+
+### Findings — High
+
+---
+
+#### H-1: `therapist_service` RLS missing UPDATE policy and UPDATE privilege grant — reconcile writes bypass row-level security (CWE-284)
+
+**Severity:** High
+
+**File:line:** `lustia/migrations/000004_rls_policies.up.sql:317` (grant: `SELECT, INSERT, DELETE` only), `lustia/services/auth/internal/repository/therapist_service_repository.go:88–93` and `118–124`
+
+**Attack scenario:** Migration 000004 section 9 creates `tenant_isolation` (FOR SELECT via subquery join) and `tenant_isolation_write` (FOR INSERT via subquery join) policies on `therapist_service`, then grants `SELECT, INSERT, DELETE` to `lustia_app`. No `FOR UPDATE` policy and no UPDATE grant exists.
+
+`ReconcileForTherapist` at lines 84–127 issues `db.Model(&model.TherapistService{}).Where(...).Updates(...)` calls to re-activate deactivated mappings (lines 88–93) and to deactivate removed mappings (lines 119–124). GORM translates both into `UPDATE therapist_service SET ... WHERE therapist_id = ? AND service_id = ?` statements.
+
+Consequence 1 (current, likely breaking): `lustia_app` has no UPDATE privilege on `therapist_service`. These UPDATE statements will fail at runtime with PostgreSQL error `ERROR: permission denied for table therapist_service`, meaning `PUT /therapists/:id/services` is currently broken whenever it needs to change `is_active` on an existing row. New mappings (INSERT path) work fine; mutations to existing mappings do not.
+
+Consequence 2 (forward): Once the UPDATE privilege is added, without a corresponding RLS UPDATE policy, the UPDATE statements run without row-level tenant isolation. PostgreSQL's default for a table with RLS enabled and no matching PERMISSIVE UPDATE policy is to deny all rows — so the updates would return 0 rows affected. This would silently succeed from the application's perspective (no error thrown) but make no database change, creating a silent correctness bug where re-activation and deactivation of existing mappings appear to succeed but do not persist.
+
+The service-layer tenant check (`t.TenantID != in.CallerTenantID`) is the correct first-line control. However, removing the DB-layer defence-in-depth violates the project's established security pattern (every other mutable table has a full SELECT/INSERT/UPDATE RLS policy set) and creates a blast radius if the service layer is ever bypassed (maintenance scripts, future repositories, direct DB access by `lustia_app`).
+
+**Recommended fix:**
+
+Add to a new migration (000015) or to the down/up pair of a 000013 amendment:
+
+```sql
+-- 1. Add UPDATE RLS policy on therapist_service (mirrors therapist_availability pattern)
+CREATE POLICY tenant_isolation_update ON therapist_service
+    AS PERMISSIVE FOR UPDATE
+    USING (
+        EXISTS (
+            SELECT 1 FROM therapist t
+            WHERE t.id = therapist_service.therapist_id
+              AND t.tenant_id::text = current_setting('app.current_tenant', true)
+        )
+    );
+
+-- 2. Add UPDATE privilege
+GRANT SELECT, INSERT, UPDATE, DELETE ON therapist_service TO lustia_app;
+
+-- 3. While here, add DELETE RLS policy (no current code path exercises DELETE,
+--    but the grant exists and should be guarded):
+CREATE POLICY tenant_isolation_delete ON therapist_service
+    AS PERMISSIVE FOR DELETE
+    USING (
+        EXISTS (
+            SELECT 1 FROM therapist t
+            WHERE t.id = therapist_service.therapist_id
+              AND t.tenant_id::text = current_setting('app.current_tenant', true)
+        )
+    );
+```
+
+**Blocks Phase 4 sign-off:** Yes. `PUT /therapists/:id/services` is broken for any call that mutates an existing mapping row, and the missing RLS policy removes defence-in-depth for this table's mutation path.
+
+---
+
+### Findings — Medium
+
+---
+
+#### M-1: No per-therapist rate limit on `PUT /therapists/:id/availability` — unbounded DELETE+INSERT storm (OWASP A04)
+
+**Severity:** Medium
+
+**File:line:** `lustia/services/auth/internal/repository/therapist_availability_repository.go:43–63`, `lustia/services/auth/internal/service/availability_service.go:104`
+
+**Attack scenario:** `ReplaceAllForTherapist` executes `DELETE WHERE therapist_id = ?` then bulk-inserts up to 21 rows (3 windows × 7 days) inside a transaction on every PUT call. An authenticated `branch_admin` or `tenant_admin` can call this endpoint in a tight loop. Each call issues a full table-replace on the therapist's partition of `therapist_availability`. The global middleware imposes no per-endpoint rate limit. The service-layer validation (overlap, 5-minute boundary, max-3-per-day) runs before the DB write, but it does not prevent rapid repeated calls with valid payloads. The table has a GiST exclusion constraint (migration 000003 comment) which adds constraint-evaluation overhead on every INSERT batch. The Phase 5 booking engine will query this table on hot paths; rapid-churn inflates dead tuple count.
+
+**Recommended fix:** Apply a per-therapist-per-caller rate limit of 10 PUT calls per minute at the controller layer using the existing in-memory limiter pattern:
+
+```go
+// In AvailabilityController.handleReplace after claims extraction:
+key := fmt.Sprintf("avail_replace:%s:%s", claims.TenantID, id)
+if !rateLimiter.Allow(key, 10, time.Minute) {
+    helper.RespondError(c, http.StatusTooManyRequests, constants.CodeRateLimited, "too many availability updates")
+    return
+}
+```
+
+**Blocks Phase 4 sign-off:** No. Requires authentication; blast radius limited to one tenant's availability data. Must be fixed before Phase 5 booking integration.
+
+---
+
+#### M-2: `therapist`-role user can overwrite a colleague's availability at the same branch — missing `user_id == callerUserID` check (OWASP A01)
+
+**Severity:** Medium
+
+**File:line:** `lustia/services/auth/internal/service/availability_service.go:71–75`, `lustia/migrations/000013_phase4_master_data.up.sql:212–215`
+
+**Attack scenario:** Migration 000013 grants `availability.create` and `availability.update` to the `therapist` role. `HasTenantAdminRole` returns false for a `therapist`-role user, triggering the `containsBranch` guard. The guard checks `callerBranches` (from `claims.Branches`, populated from `user_branch` table assignments) against `t.BranchID`. If a `therapist`-role user is assigned to Branch X via a `user_branch` row, they can call `PUT /therapists/:id/availability` for any therapist at Branch X — including colleagues — because there is no check that `t.UserID == in.CallerUserID`. The `therapist.user_id` link is the only mechanism to associate a therapist record with a portal user, but the availability service does not consult it.
+
+**Recommended fix:**
+
+Option A (recommended for Phase 4): Remove `availability.create` and `availability.update` from the `therapist` role in the migration, deferring self-service availability to Phase 5 when the portal for therapists is in scope.
+
+Option B (if self-service is needed now): In `AvailabilitySvc.Replace`, after the `containsBranch` check, add:
+
+```go
+// If caller is not admin and not branch_admin, enforce own-record-only rule.
+if !in.IsAdmin && !hasBranchAdminRole(in.CallerRoles) {
+    if t.UserID == nil || *t.UserID != in.CallerUserID {
+        return AvailabilityOutput{}, constants.ErrCrossBranchForbidden
+    }
+}
+```
+
+This requires passing `CallerRoles` through `ReplaceAvailabilityInput`.
+
+**Blocks Phase 4 sign-off:** No. Exploiting this requires an admin to deliberately assign a `therapist`-role user to a branch and that user to have portal access. Must be resolved before Phase 5 ops-portal delivery.
+
+---
+
+#### M-3: Cursor subquery in `FindByTenant` lacks explicit tenant constraint — implicit RLS dependency in subquery (CWE-89 latent)
+
+**Severity:** Medium
+
+**File:line:** `lustia/services/auth/internal/repository/therapist_repository.go:77`, `lustia/services/auth/internal/repository/service_repository.go:72`
+
+**Attack scenario:** Both list endpoints use a cursor subquery of the form:
+
+```go
+q = q.Where(
+    "(full_name, created_at) > (SELECT full_name, created_at FROM therapist WHERE id = ?)",
+    filter.Cursor,
+)
+```
+
+The `filter.Cursor` value is an opaque UUID from a previous response, passed as a bind variable (no injection risk). However, the subquery `FROM therapist WHERE id = ?` has no `AND tenant_id = ?` constraint. In PostgreSQL, a subquery within the same connection respects RLS on the referenced table — so the subquery returns NULL for a UUID belonging to another tenant (the `app.current_tenant` session variable filters the row away). GORM then generates `> NULL` which evaluates to false, returning an empty page rather than leaking data.
+
+The finding is that the correctness of cursor isolation depends on implicit RLS behaviour in a subquery rather than an explicit WHERE clause. If the subquery ever runs under a connection where `app.current_tenant` is not set or is set incorrectly (e.g. a future code path that initializes the query before setting tenant context), it would return rows from any tenant. Additionally, a caller who provides a cross-tenant UUID as a cursor receives an empty page rather than a validation error, which constitutes a minor UUID existence oracle: an empty page when a syntactically-valid UUID is provided as cursor vs. a normal query result is a timing/behaviour side-channel.
+
+**Recommended fix:**
+
+Add `AND tenant_id = ?` to both subqueries, passing `tenantID` as the second bind variable. This makes the intent explicit and removes the implicit RLS dependency:
+
+```go
+// therapist_repository.go:77
+q = q.Where(
+    "(full_name, created_at) > (SELECT full_name, created_at FROM therapist WHERE id = ? AND tenant_id = ?)",
+    filter.Cursor, tenantID,
+)
+// service_repository.go:72
+q = q.Where(
+    "(name, created_at) > (SELECT name, created_at FROM service WHERE id = ? AND tenant_id = ?)",
+    filter.Cursor, tenantID,
+)
+```
+
+**Blocks Phase 4 sign-off:** No. RLS provides the actual isolation. Fix before Phase 5.
+
+---
+
+### Findings — Low
+
+---
+
+#### L-1: `service.created` audit event logs `service.Name` — free-form business data in audit metadata (CWE-532 risk precedent)
+
+**Severity:** Low
+
+**File:line:** `lustia/services/auth/internal/service/catalog_service.go:64`
+
+**Assessment:** The `service.created` event writes `Meta: map[string]interface{}{"name": sv.Name}`. `sv.Name` is a free-form string up to 200 chars — not PII in the narrow sense (service catalog name, not personal data). The therapist audit events are clean: `therapist.created` logs `branch_id` only; `therapist.updated` logs nothing; `therapist.deleted` logs `cascade_mappings_deactivated: true`. No PII appears in Phase 4 audit events.
+
+The risk is the pattern itself: writing free-form business fields into `meta` establishes a template that future developers may follow, accidentally logging `therapist.full_name`, `therapist.email`, or `therapist.phone`. Phase 3 H-2 was exactly this class of issue.
+
+**Recommended fix:** Replace `"name": sv.Name` with `"service_id": sv.ID` (already present as `ResourceID`). Update the SECURITY.md §7 logging policy to explicitly state that audit `meta` must not contain personal names, email addresses, phone numbers, or free-form description fields.
+
+---
+
+#### L-2: `AvailabilityWindowRequest.DOW` binding tag missing `required` — zero-value ambiguity silently creates Sunday windows (CWE-20)
+
+**Severity:** Low
+
+**File:line:** `lustia/services/auth/internal/controller/dto_request.go:264`
+
+**Assessment:** The struct tag is `binding:"min=0,max=6"` without `required`. In Go, an absent `int` JSON field defaults to `0`. `DOW=0` is valid (Sunday). A client that omits `dow` silently gets a Sunday window instead of a validation error. Not exploitable, but creates surprising behaviour for misconfigured clients.
+
+**Recommended fix:** Change the field to `*int` and use `binding:"required,min=0,max=6"`. Update the service layer to dereference the pointer. This makes an absent `dow` a binding error rather than a silent zero.
+
+---
+
+#### L-3: Dev seed migration 000014 lacks a runtime database-name guard against accidental non-dev application (OWASP A05)
+
+**Severity:** Low
+
+**File:line:** `lustia/migrations/000014_seed_dev_master_data.up.sql:1–10`
+
+**Assessment:** The migration header clearly states "DEV-ONLY — DO NOT APPLY IN STAGING OR PRODUCTION" and provides the `migrate ... up 13` stopping instruction. No credentials or privilege grants are seeded. Both therapist rows have `user_id = NULL`. All rows carry `"source": "dev_seed"` in metadata for detectability. The risk is purely operational: an operator who accidentally runs the full migration chain in staging inserts two therapists and six availability rows into real tenant data. The `ON CONFLICT (id) DO NOTHING` clauses make re-runs safe.
+
+**Recommended fix:** Add a runtime guard at the top of the migration:
+
+```sql
+DO $$
+BEGIN
+    IF current_database() NOT LIKE '%dev%' AND current_database() NOT LIKE '%local%' THEN
+        RAISE EXCEPTION 'Migration 000014 is dev-only. Database "%" does not match dev/local pattern.', current_database();
+    END IF;
+END $$;
+```
+
+As an alternative, enforce via the migration runner in the CI/CD pipeline configuration (staging/prod jobs run `migrate up 13` only).
+
+---
+
+### Findings — Info
+
+---
+
+#### I-1: `therapist_service` also missing DELETE RLS policy — no current code path exercises it, but the DELETE grant exists (design gap)
+
+**Severity:** Info
+
+**File:line:** `lustia/migrations/000004_rls_policies.up.sql:317`
+
+**Assessment:** The DELETE grant on `therapist_service` exists but no application code issues a hard DELETE on this table (ADR 0009 Q4 preserves rows for audit; `DeactivateAllForTherapist` uses UPDATE). The DELETE grant is present for potential future use (cleanup jobs). Without a DELETE RLS policy, any future code path that hard-deletes rows would run without tenant isolation. The recommended fix in H-1 includes a DELETE RLS policy alongside the UPDATE fix — handle both in the same migration.
+
+---
+
+### RLS Coverage Assessment — Phase 4 New Tables
+
+| Table | SELECT | INSERT | UPDATE | DELETE | lustia_app grants | Assessment |
+|---|---|---|---|---|---|---|
+| `service` | tenant_isolation | tenant_isolation_write | tenant_isolation_update | (grant present) | SELECT, INSERT, UPDATE, DELETE | Complete |
+| `therapist` | tenant_isolation | tenant_isolation_write | tenant_isolation_update | Withheld (ADR 0009 Q4) | SELECT, INSERT, UPDATE, DELETE | Complete. Hard DELETE blocked at DB level as intended. |
+| `therapist_availability` | tenant_isolation | tenant_isolation_write | tenant_isolation_update | (grant present) | SELECT, INSERT, UPDATE, DELETE | Complete |
+| `therapist_service` | tenant_isolation (join subquery) | tenant_isolation_write (join subquery) | **MISSING** | **MISSING** | SELECT, INSERT, DELETE (UPDATE missing) | **Gap — H-1** |
+
+---
+
+### Cross-Cutting Check Results
+
+**1. Cross-branch authorization:** Confirmed on all five write paths. `Create`, `Update`, `ChangeStatus`, `SoftDelete` in `therapist_svc.go` all call `containsBranch` after tenant equality check. `Reconcile` in `mapping_service.go:49` does the same. `Replace` in `availability_service.go:71` does the same. LIST correctly restricts `branch_admin` to `filter.BranchIDs = in.CallerBranches` (`therapist_repository.go:68`). GET (read-only) requires only tenant equality — correct per §11.4.3.
+
+**2. Mass assignment:** Clean. `UpdateTherapistRequest` and `UpdateServiceRequest` (dto_request.go) exclude `tenant_id`, `branch_id`, `id`, `deleted_at`, `created_at`, `updated_at`. The `therapist_repository.go:Update` method uses an explicit column map (lines 103–112). No GORM `Save(struct)` that could promote zero-value fields.
+
+**3. IDOR via path param:** Clean. `AvailabilitySvc.Get` (line 41), `MappingService.Reconcile` (line 45), `TherapistSvc.Get` (line 141), and both `GetMappings` (line 307) all load the resource first and check `TenantID == callerTenantID` before returning data. Wrong-tenant returns 404, not the data.
+
+**4. Soft-delete bypass:** Clean. Both `FindByID` implementations (`WHERE id = ? AND deleted_at IS NULL`) and `FindByTenant` queries filter deleted rows. `UpdateStatus` filters `deleted_at IS NULL` — PATCH on a soft-deleted row returns `ErrTherapistNotFound`. Mapping endpoint does not apply `deleted_at` to `therapist_service` (correct — that table uses `is_active` as its only state flag, no `deleted_at` column).
+
+**5. `therapist.user_id` link integrity:** The service layer in `therapist_svc.go` (Create at line 79, Update at line 196) stores `in.UserID` directly without performing the same-tenant membership check specified in ADR 0009 §2.3 and API contract §11.4.1. RLS on the `user` table would prevent reading a cross-tenant user row but does not prevent storing a cross-tenant UUID as `user_id`. The field is informational only in Phase 4 (not used for authentication). Risk is a dangling reference. Must be fixed in Phase 5 before `user_id` is used for portal login: add `userRepo.FindByIDInTenant(ctx, tenantID, userID)` check in the service layer when `UserID != nil`.
+
+**6. Availability window abuse:** Clean. All four service-layer rules are enforced in `validateAvailabilityWindows`: end > start, 5-minute boundaries, max 3 per day, no overlaps. DB exclusion constraint provides backup. Zero-length and reverse windows rejected.
+
+**7. `service.category` XSS (frontend):** Clean. All Phase 4 master pages render data through React's standard JSX text interpolation and `<Badge>` components — no `dangerouslySetInnerHTML`. `services/page.tsx:213` renders `{s.category}` inside `<Badge>`. `therapists/page.tsx` renders therapist names and branch names as text nodes. `service-form.tsx` uses `react-hook-form` controlled inputs. No XSS vector found.
+
+**8. Mapping soft-update race:** Acceptable for Phase 4. Two concurrent PUT calls for the same therapist could both see an existing mapping as inactive and both issue re-activate UPDATEs — the second is a no-op. No corruption. The pre-validation `FindByIDs` call is outside the transaction, creating a narrow race where a service could be soft-deleted between validation and reconcile. Blast radius: one inactive mapping visible to no booking query. Note for Phase 5: hold a SELECT FOR UPDATE on the therapist row at the start of the reconcile transaction.
+
+**9. Availability index adequacy for Phase 5:** Migration 000013 adds `therapist_tenant_branch_active_idx` on `therapist(tenant_id, branch_id)`. Phase 4 availability queries use `therapist_id` (covered by existing indexes from migration 000003). The Phase 5 booking-engine pattern (available therapists at branch X for service Y on day D) will need a composite index on `therapist_availability(branch_id, day_of_week)` — flag for the Phase 5 migration author.
+
+**10. Seed migration 000014:** No credentials, no privilege grants, both therapists have `user_id = NULL`. Fixed UUIDs with `ON CONFLICT DO NOTHING`. See L-3.
+
+**11. RLS coverage:** Detailed table above. Three of four new tables complete; `therapist_service` missing UPDATE policy and grant — H-1.
+
+**12. Audit PII:** No PII in any Phase 4 audit event. `therapist.created` → `branch_id` only. `therapist.updated` → no meta. `therapist.deleted` → `cascade_mappings_deactivated: true`. `therapist_service.updated` → `service_ids` (UUIDs). `therapist_availability.replaced` → `window_count` (int). Phase 3 H-2 class violation not repeated.
+
+---
+
+### Phase 4 Sign-off Recommendation
+
+**Decision: BLOCK — H-1 must be resolved before Phase 4 is done.**
+
+| # | Finding | Required action |
+|---|---|---|
+| H-1 | `therapist_service` missing UPDATE RLS policy + UPDATE grant | Write a new migration (000015 or 000013 amendment) that adds `CREATE POLICY tenant_isolation_update ON therapist_service FOR UPDATE USING (EXISTS (SELECT 1 FROM therapist t WHERE t.id = therapist_service.therapist_id AND t.tenant_id::text = current_setting(...)))` and `GRANT SELECT, INSERT, UPDATE, DELETE ON therapist_service TO lustia_app`. Add DELETE RLS policy in the same migration. |
+
+Medium findings M-1 through M-3 (rate limit on availability PUT, therapist self-service cross-colleague risk, cursor subquery implicit RLS) are accepted for the current closed-beta window and must be tracked to Phase 5. M-2 is the most important of the three and should be resolved before the ops-portal (Phase 5) ships. Low findings are hardening recommendations.
+
+Phase 1–3 controls (Argon2id, RS256 JWT, RLS tenant isolation, refresh token rotation, `must_change_password`) remain sound and were not regressed by Phase 4. The 13 of 14 new endpoints have correct tenant isolation, cross-branch enforcement, and IDOR protection. The `therapist_service` UPDATE gap in H-1 is the only control failure in this delivery.

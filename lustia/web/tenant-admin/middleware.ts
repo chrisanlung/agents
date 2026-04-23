@@ -24,7 +24,8 @@ export function middleware(request: NextRequest) {
     pathname.startsWith("/branches") ||
     pathname.startsWith("/onboarding") ||
     pathname.startsWith("/settings") ||
-    pathname.startsWith("/pengaturan");
+    pathname.startsWith("/pengaturan") ||
+    pathname.startsWith("/master");
 
   if (isProtected) {
     if (!hasSession) {
@@ -106,5 +107,7 @@ export const config = {
     "/settings",
     "/pengaturan/:path*",
     "/pengaturan",
+    "/master/:path*",
+    "/master",
   ],
 };
