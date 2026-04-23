@@ -23,4 +23,11 @@ const (
 	CodeUserAlreadyInTenant    = "CONFLICT_USER_ALREADY_IN_TENANT"
 	CodeRateLimited            = "RATE_LIMITED"
 	CodeInternal               = "INTERNAL"
+
+	// Phase 3 — Tenant Onboarding & Branch Setup (ADR 0008 §2.5).
+	CodeDuplicatePendingRegistration = "DUPLICATE_PENDING_REGISTRATION"
+	CodeTenantSlugTaken              = "TENANT_SLUG_TAKEN"
+	CodeRegistrationNotPending       = "REGISTRATION_NOT_PENDING"
+	CodeInvalidStatusTransition      = "INVALID_STATUS_TRANSITION"
+	CodeBranchLimitReached           = "BRANCH_LIMIT_REACHED"
 )

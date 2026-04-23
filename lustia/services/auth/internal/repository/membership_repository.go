@@ -136,6 +136,45 @@ func (r *MembershipRepository) AssignRoles(ctx context.Context, membershipID str
 	return nil
 }
 
+// FindActiveByTenant returns all active memberships for a given tenant.
+func (r *MembershipRepository) FindActiveByTenant(ctx context.Context, tenantID string) ([]*model.Membership, error) {
+	db := dbFromContext(ctx, r.db)
+	var ms []model.Membership
+	if err := db.Where("tenant_id = ? AND status = ?", tenantID, model.MembershipStatusActive).
+		Find(&ms).Error; err != nil {
+		return nil, fmt.Errorf("find active memberships by tenant: %w", err)
+	}
+	result := make([]*model.Membership, len(ms))
+	for i := range ms {
+		result[i] = &ms[i]
+	}
+	return result, nil
+}
+
+// SuspendAllForTenant sets all active memberships for a tenant to 'suspended' in
+// a single UPDATE. Returns the IDs of affected rows for audit logging.
+func (r *MembershipRepository) SuspendAllForTenant(ctx context.Context, tenantID string) ([]string, error) {
+	db := dbFromContext(ctx, r.db)
+
+	// Collect IDs first so the audit layer can log each one.
+	var ids []string
+	if err := db.Model(&model.Membership{}).
+		Where("tenant_id = ? AND status = ?", tenantID, model.MembershipStatusActive).
+		Pluck("id", &ids).Error; err != nil {
+		return nil, fmt.Errorf("collect active membership ids: %w", err)
+	}
+	if len(ids) == 0 {
+		return ids, nil
+	}
+
+	if err := db.Model(&model.Membership{}).
+		Where("id IN ?", ids).
+		Update("status", string(model.MembershipStatusSuspended)).Error; err != nil {
+		return nil, fmt.Errorf("suspend memberships: %w", err)
+	}
+	return ids, nil
+}
+
 // AssignBranches replaces all branch assignments for the given membership atomically.
 // Passing an empty slice clears all branches.
 func (r *MembershipRepository) AssignBranches(ctx context.Context, membershipID string, branchIDs []string, assignedBy string) error {

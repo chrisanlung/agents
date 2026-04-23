@@ -42,18 +42,28 @@ func TestUserModelPasswordHashNotSerialized(t *testing.T) {
 
 // TestUserProfileHasNoPasswordField locks in SECURITY.md §I-1: the service-
 // layer UserProfile DTO that flows to HTTP responses must not carry the
-// password hash field at all. This guards against future refactors that
-// accidentally add one.
+// password hash field or any secret-bearing field. It may carry flag fields
+// like MustChangePassword (a boolean UI cue, not a secret).
 func TestUserProfileHasNoPasswordField(t *testing.T) {
+	// Fields that look password-ish but are deliberately allowed: they carry
+	// boolean flags/metadata, not plaintext or hashed secrets.
+	allowed := map[string]struct{}{
+		"MustChangePassword": {},
+	}
+
 	p := service.UserProfile{}
 	tp := reflect.TypeOf(p)
 
 	for i := 0; i < tp.NumField(); i++ {
-		name := strings.ToLower(tp.Field(i).Name)
-		assert.False(t, strings.Contains(name, "password"),
-			"service.UserProfile must not expose any password-related field, found %q", tp.Field(i).Name)
-		assert.False(t, strings.Contains(name, "hash"),
-			"service.UserProfile must not expose any hash-related field, found %q", tp.Field(i).Name)
+		fieldName := tp.Field(i).Name
+		if _, ok := allowed[fieldName]; ok {
+			continue
+		}
+		lower := strings.ToLower(fieldName)
+		assert.False(t, strings.Contains(lower, "password"),
+			"service.UserProfile must not expose any password-related field, found %q", fieldName)
+		assert.False(t, strings.Contains(lower, "hash"),
+			"service.UserProfile must not expose any hash-related field, found %q", fieldName)
 	}
 }
 

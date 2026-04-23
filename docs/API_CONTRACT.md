@@ -2,7 +2,7 @@
 
 _Owned by `go-expert`. Consumed by `nextjs-expert` and `flutter-expert`. Changes require frontend sign-off._
 
-_Last updated: 2026-04-18 (Phase 2 — Authentication, Authorization, Access Control)_
+_Last updated: 2026-04-22 (Phase 3 — Tenant Onboarding & Branch Setup)_
 
 ---
 
@@ -564,6 +564,11 @@ Returns all platform roles with their permission codes. Read-only in Phase 2.
 | `DUPLICATE_EMAIL` | 409 | `(tenant_id, email)` unique index violated |
 | `RATE_LIMITED` | 429 | Request throttled |
 | `INTERNAL` | 500 | Unexpected server error |
+| `DUPLICATE_PENDING_REGISTRATION` | 409 | Same email or slug already has a pending registration |
+| `TENANT_SLUG_TAKEN` | 409 | Requested slug belongs to an already-approved tenant |
+| `REGISTRATION_NOT_PENDING` | 409 | Approve/reject attempted on a non-pending registration |
+| `INVALID_STATUS_TRANSITION` | 409 | Requested status change not permitted by the state machine |
+| `BRANCH_LIMIT_REACHED` | 409 | Creating a branch would exceed the tenant's `max_branches` limit |
 
 ---
 
@@ -579,6 +584,285 @@ Returns all platform roles with their permission codes. Read-only in Phase 2.
 | Role creation / permission editing endpoints | Post-Phase 2 |
 | `must_change_password` enforcement | ✅ Shipped 2026-04-21 (migration 000006 + middleware + service + tests). No longer deferred. |
 | MFA / OAuth / social login | Phase 7+ |
+
+---
+
+---
+
+## 8. Public Registration (Phase 3)
+
+### `POST /api/v1/register/company` — public, no auth
+
+**Rate limited:** 3/hour per IP and per email (in-memory; Redis in Phase 10).
+
+**Request**
+
+```json
+{
+  "company_name": "Acme Wellness",
+  "requested_slug": "acme-wellness",
+  "package": "starter",
+  "contact_name": "Alice Founder",
+  "contact_email": "alice@acme-wellness.example",
+  "contact_phone": "+628123456789"
+}
+```
+
+| Field | Validation |
+|---|---|
+| `company_name` | required, 2–200 chars |
+| `requested_slug` | required, 2–100 chars, must match `^[a-z0-9][a-z0-9-]*[a-z0-9]$` |
+| `package` | optional, one of `starter \| growth \| enterprise`, defaults to `starter` |
+| `contact_name` | required, 1–200 chars |
+| `contact_email` | required, valid email, max 320 |
+| `contact_phone` | optional, 5–30 chars |
+
+**Response `201 Created`**
+
+```json
+{ "registration_id": "<uuid>", "status": "pending" }
+```
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Shape/format failure |
+| 409 | `DUPLICATE_PENDING_REGISTRATION` | Same email or slug already has a pending registration |
+| 409 | `TENANT_SLUG_TAKEN` | Slug already belongs to an approved tenant |
+| 429 | `RATE_LIMITED` | 3/hour per IP exceeded |
+
+---
+
+## 9. Admin: Tenant Approval (Phase 3)
+
+All endpoints require `Authorization: Bearer <access_token>` with `scope=platform` (super admin).
+
+### `GET /api/v1/admin/tenant-registrations`
+
+**Required permission:** `tenant.approve`
+
+**Query parameters:** `status=pending|approved|rejected|all` (default `pending`), `cursor`, `limit` (1–200, default 50).
+
+**Response `200 OK`**
+
+```json
+{
+  "data": [
+    {
+      "id": "<uuid>",
+      "company_name": "Acme Wellness",
+      "requested_slug": "acme-wellness",
+      "package": "starter",
+      "contact_name": "Alice Founder",
+      "contact_email": "alice@acme-wellness.example",
+      "contact_phone": "+628123456789",
+      "status": "pending",
+      "approved_at": null,
+      "approved_by": null,
+      "rejected_at": null,
+      "rejection_reason": null,
+      "created_at": "2026-04-22T10:00:00Z"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+### `POST /api/v1/admin/tenant-registrations/:id/approve`
+
+**Required permission:** `tenant.approve`
+
+Side effects (single transaction): creates tenant, user, membership, assigns `tenant_admin` role, updates registration row, fires welcome email.
+
+**Request** (all optional overrides):
+
+```json
+{ "package": "growth", "max_branches": 10 }
+```
+
+**Response `200 OK`**
+
+```json
+{
+  "tenant": { "id": "...", "name": "...", "slug": "...", "status": "active", "package": "growth", "max_branches": 10, "contact_email": "...", "contact_name": "...", "approved_at": "...", "created_at": "..." },
+  "tenant_admin": {
+    "user_id": "<uuid>",
+    "email": "alice@acme-wellness.example",
+    "temporary_password": "<random 16 chars>"
+  },
+  "registration": { ...updated registration object... }
+}
+```
+
+`temporary_password` is **always present** in this response and is also emailed to the contact. It will not appear in any subsequent API call.
+
+**Errors:** `409 TENANT_SLUG_TAKEN`, `409 REGISTRATION_NOT_PENDING`, `404 NOT_FOUND`.
+
+### `POST /api/v1/admin/tenant-registrations/:id/reject`
+
+**Required permission:** `tenant.approve`
+
+**Request:**
+
+```json
+{ "reason": "Duplicate application." }
+```
+
+**Response `200 OK`** — updated registration object (same shape as list item above).
+
+### `GET /api/v1/admin/tenants`
+
+**Required permission:** `tenant.read`
+
+**Query parameters:** `status=pending_approval|active|suspended|deactivated|all`, `cursor`, `limit`.
+
+**Response `200 OK`**
+
+```json
+{
+  "data": [
+    {
+      "id": "...", "name": "...", "slug": "...", "status": "active",
+      "package": "starter", "max_branches": 1,
+      "contact_email": "...", "contact_name": "...",
+      "approved_at": "...", "approved_by": "...",
+      "rejected_at": null, "rejection_reason": null,
+      "created_at": "...",
+      "membership_count": 3,
+      "branch_count": 1
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+### `GET /api/v1/admin/tenants/:id`
+
+**Required permission:** `tenant.read`. Returns single tenant (same shape as list item, counts may be 0 in this path).
+
+### `PATCH /api/v1/admin/tenants/:id/status`
+
+**Required permission:** `tenant.update`
+
+**Request:**
+
+```json
+{ "status": "suspended", "reason": "payment overdue" }
+```
+
+**Response `200 OK`** — updated tenant summary.
+
+**Errors:** `409 INVALID_STATUS_TRANSITION`, `404 NOT_FOUND`.
+
+**State machine:** `pending_approval → active | deactivated`, `active → suspended | deactivated`, `suspended → active | deactivated`. All other transitions return `409 INVALID_STATUS_TRANSITION`.
+
+On transition to `deactivated`: all active memberships are suspended and all refresh tokens scoped to this tenant are revoked atomically.
+
+---
+
+## 10. Tenant: Branch Management (Phase 3)
+
+All endpoints require `Authorization: Bearer <access_token>` with `scope=tenant` and the listed permission.
+
+### `POST /api/v1/tenant/branches`
+
+**Required permission:** `branch.create`
+
+**Request:**
+
+```json
+{
+  "name": "Main Branch",
+  "code": "MAIN",
+  "address_line1": "Jl. Sudirman No. 1",
+  "city": "Jakarta",
+  "province": "DKI Jakarta",
+  "postal_code": "10270",
+  "country": "ID",
+  "timezone": "Asia/Jakarta",
+  "contact_phone": "+62215551234",
+  "contact_email": "main@acme-wellness.example"
+}
+```
+
+**Response `201 Created`** — BranchResponse (see below).
+
+**Errors:** `409 BRANCH_LIMIT_REACHED` when `COUNT(non-deleted branches) >= tenant.max_branches` (unless `max_branches = 999`).
+
+### `GET /api/v1/tenant/branches`
+
+**Required permission:** `branch.read`
+
+**Query:** `status=active|inactive|all`, `cursor`, `limit`.
+
+**Response `200 OK`** — `{ "data": [...BranchResponse], "next_cursor": "..." }`.
+
+### `GET /api/v1/tenant/branches/:id`
+
+**Required permission:** `branch.read`. Returns a single BranchResponse.
+
+### `PATCH /api/v1/tenant/branches/:id`
+
+**Required permission:** `branch.update`. Updates non-status fields (name, address, contact). All fields optional.
+
+**Response `200 OK`** — updated BranchResponse.
+
+### `PATCH /api/v1/tenant/branches/:id/status`
+
+**Required permission:** `branch.update`
+
+**Request:** `{ "status": "active" }` — one of `active | inactive`.
+
+**Response `200 OK`** — updated BranchResponse.
+
+**State machine:** `inactive → active`, `active → inactive`. Other transitions return `409 INVALID_STATUS_TRANSITION`.
+
+### `DELETE /api/v1/tenant/branches/:id`
+
+**Required permission:** `branch.delete`. Soft-deletes the branch (sets `deleted_at`). Only `inactive` branches may be deleted; deleting an `active` branch returns `409 INVALID_STATUS_TRANSITION`.
+
+**Response `204 No Content`**.
+
+### `GET /api/v1/tenant/onboarding-state`
+
+**Required permission:** `branch.read`. Returns the tenant admin's post-login onboarding state.
+
+**Response `200 OK`**
+
+```json
+{
+  "has_branches": false,
+  "active_branch_count": 0,
+  "must_change_password": true
+}
+```
+
+Used by the frontend dashboard redirect: if `has_branches = false` and caller is `tenant_admin` → redirect to `/onboarding/welcome`.
+
+### BranchResponse shape
+
+```json
+{
+  "id": "<uuid>",
+  "tenant_id": "<uuid>",
+  "name": "Main Branch",
+  "code": "MAIN",
+  "status": "inactive",
+  "address_line1": "Jl. Sudirman No. 1",
+  "address_line2": null,
+  "city": "Jakarta",
+  "province": "DKI Jakarta",
+  "postal_code": "10270",
+  "country": "ID",
+  "timezone": "Asia/Jakarta",
+  "contact_phone": "+62215551234",
+  "contact_email": "main@acme-wellness.example",
+  "activated_at": null,
+  "created_at": "2026-04-22T12:00:00Z",
+  "updated_at": "2026-04-22T12:00:00Z"
+}
+```
 
 ---
 

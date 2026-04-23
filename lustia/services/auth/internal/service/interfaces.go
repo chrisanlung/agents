@@ -22,6 +22,7 @@ type UserRepository interface {
 	FindByEmail(ctx context.Context, email string) (*model.User, error)
 	FindByID(ctx context.Context, id string) (*model.User, error)
 	FindByTenant(ctx context.Context, tenantID string, filter UserFilter) ([]*model.User, string, error)
+	// Save inserts a new user row (used by registration approval).
 	Save(ctx context.Context, u *model.User) error
 	Update(ctx context.Context, u *model.User) error
 	UpdatePassword(ctx context.Context, id string, hash string) error
@@ -59,18 +60,83 @@ type MembershipRepository interface {
 	AssignRoles(ctx context.Context, membershipID string, roleIDs []string, assignedBy string) error
 	// AssignBranches replaces all branch assignments for a membership.
 	AssignBranches(ctx context.Context, membershipID string, branchIDs []string, assignedBy string) error
+	// SuspendAllForTenant sets all active memberships for a tenant to 'suspended'.
+	// Returns the slice of affected membership IDs for audit logging.
+	SuspendAllForTenant(ctx context.Context, tenantID string) ([]string, error)
+	// FindActiveByTenant returns all active memberships for a given tenant.
+	FindActiveByTenant(ctx context.Context, tenantID string) ([]*model.Membership, error)
 }
 
-// TenantRepository is the interface for tenant lookups.
+// TenantRepository is the interface for tenant lookups and management.
 type TenantRepository interface {
 	FindBySlug(ctx context.Context, slug string) (*model.Tenant, error)
 	FindByID(ctx context.Context, id string) (*model.Tenant, error)
+	// Save inserts a new tenant row. Used by registration approval.
+	Save(ctx context.Context, t *model.Tenant) error
+	// List returns a filtered, cursor-paginated slice of tenants together with
+	// denormalised membership_count and branch_count per row.
+	List(ctx context.Context, filter TenantFilter) ([]*TenantWithCounts, string, error)
+	// UpdateStatus writes a status transition plus the associated actor and
+	// reason. reason may be nil for non-rejection transitions.
+	UpdateStatus(ctx context.Context, id, newStatus, actorUserID string, reason *string) error
+	// CountActiveBranches returns the number of non-deleted branches for a tenant.
+	CountActiveBranches(ctx context.Context, tenantID string) (int, error)
+}
+
+// TenantFilter carries optional filters for the tenant list query.
+type TenantFilter struct {
+	Status string // empty = all
+	Cursor string
+	Limit  int
+}
+
+// TenantWithCounts wraps a Tenant with read-only aggregate counters.
+type TenantWithCounts struct {
+	model.Tenant
+	MembershipCount int
+	BranchCount     int
+}
+
+// BranchRepository is the interface for branch persistence.
+type BranchRepository interface {
+	FindByID(ctx context.Context, id string) (*model.Branch, error)
+	FindByTenant(ctx context.Context, tenantID string, filter BranchFilter) ([]*model.Branch, string, error)
+	Save(ctx context.Context, b *model.Branch) error
+	Update(ctx context.Context, b *model.Branch) error
+	UpdateStatus(ctx context.Context, id, newStatus string, activatedAt *time.Time) error
+	SoftDelete(ctx context.Context, id string) error
+}
+
+// BranchFilter carries optional filters for the branch list query.
+type BranchFilter struct {
+	Status string // empty = all non-deleted
+	Cursor string
+	Limit  int
+}
+
+// RegistrationRepository is the interface for tenant-registration persistence.
+type RegistrationRepository interface {
+	Save(ctx context.Context, r *model.TenantRegistration) error
+	FindByID(ctx context.Context, id string) (*model.TenantRegistration, error)
+	FindPendingByEmail(ctx context.Context, email string) (*model.TenantRegistration, error)
+	FindPendingBySlug(ctx context.Context, slug string) (*model.TenantRegistration, error)
+	List(ctx context.Context, filter RegistrationFilter) ([]*model.TenantRegistration, string, error)
+	Update(ctx context.Context, r *model.TenantRegistration) error
+}
+
+// RegistrationFilter carries optional filters for the registration list query.
+type RegistrationFilter struct {
+	Status string // empty = pending
+	Cursor string
+	Limit  int
 }
 
 // RoleRepository is the interface for role and permission reads.
 type RoleRepository interface {
 	FindAll(ctx context.Context) ([]*model.Role, error)
 	FindByIDs(ctx context.Context, ids []string) ([]*model.Role, error)
+	// FindByName returns the role with the given name, or ErrRoleNotFound.
+	FindByName(ctx context.Context, name string) (*model.Role, error)
 }
 
 // RefreshTokenRepository is the interface for refresh-token persistence.
@@ -80,6 +146,9 @@ type RefreshTokenRepository interface {
 	Save(ctx context.Context, rt *model.RefreshToken) error
 	Revoke(ctx context.Context, id string, replacedBy *string) error
 	RevokeAllForUser(ctx context.Context, userID string) error
+	// RevokeAllForTenantUsers revokes all refresh tokens that were issued for a
+	// specific tenant scope. Used during tenant deactivation cascade.
+	RevokeAllForTenantUsers(ctx context.Context, tenantID string) error
 	DeleteExpiredAndRevoked(ctx context.Context) error
 }
 

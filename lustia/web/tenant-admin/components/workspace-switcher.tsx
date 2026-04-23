@@ -12,6 +12,7 @@ import {
 import { selectTenantAction } from "@/app/select-tenant/actions";
 
 export interface MembershipSummary {
+  membership_id: string;
   tenant_id: string;
   tenant_name: string;
   tenant_slug: string;

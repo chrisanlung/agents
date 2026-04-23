@@ -12,6 +12,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { NavLinks } from "@/components/nav-links";
 import { SignOutButton } from "./sign-out-button";
 
 export const metadata: Metadata = {
@@ -28,8 +29,6 @@ interface UserProfile {
   avatar_url?: string;
   is_active: boolean;
   is_super_admin?: boolean;
-  roles: string[];
-  branches: string[];
 }
 
 /** ADR 0007 §2.3 — updated /auth/me response */
@@ -50,6 +49,11 @@ interface MeResponse {
     slug: string;
     status: string;
   };
+}
+
+interface RegistrationListResponse {
+  data: Array<{ id: string }>;
+  next_cursor: string | null;
 }
 
 /**
@@ -74,6 +78,21 @@ export default async function DashboardPage() {
       redirect("/login");
     }
     throw err;
+  }
+
+  // Fetch pending registration count for nav badge (non-fatal — badge shows 0 on error)
+  let pendingRegistrationCount = 0;
+  try {
+    const regList = await apiFetch<RegistrationListResponse>(
+      "/admin/tenant-registrations?status=pending&limit=1",
+      {},
+      { auth: true }
+    );
+    // We only need the count hint; the list endpoint returns data so we use length.
+    // A dedicated count endpoint would be ideal — flagged for go-expert.
+    pendingRegistrationCount = regList.data.length > 0 ? regList.data.length : 0;
+  } catch {
+    // Non-fatal: badge will simply show 0
   }
 
   const { user } = data;
@@ -103,7 +122,10 @@ export default async function DashboardPage() {
             </div>
             <span className="font-semibold text-foreground">{appName}</span>
           </div>
-          <SignOutButton />
+          <div className="flex items-center gap-4">
+            <NavLinks pendingCount={pendingRegistrationCount} />
+            <SignOutButton />
+          </div>
         </div>
       </header>
 
@@ -152,7 +174,7 @@ export default async function DashboardPage() {
               <ProfileField label="Email" value={user.email} />
               <ProfileField
                 label="Peran"
-                value={user.roles.length > 0 ? user.roles.join(", ") : "—"}
+                value={user.is_super_admin ? "super_admin" : "—"}
               />
               <ProfileField
                 label="Tenant"

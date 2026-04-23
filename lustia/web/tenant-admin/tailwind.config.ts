@@ -61,6 +61,9 @@ const config: Config = {
       transitionTimingFunction: {
         "design-default": "ease-out",
       },
+      backgroundImage: {
+        "lustia-tenant": "url('/bg-lustia-tenant.webp')",
+      },
     },
   },
   plugins: [],

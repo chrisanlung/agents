@@ -5,10 +5,27 @@ package helper
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/alexedwards/argon2id"
 )
+
+// SHA256Prefix returns the first n hex chars of SHA-256(s). Used to redact PII
+// (emails, phone numbers) in audit logs — see SECURITY.md §7.2. n is clamped
+// to [1, 64]; the input is lowercased before hashing so "Foo@Bar.com" and
+// "foo@bar.com" produce the same prefix.
+func SHA256Prefix(s string, n int) string {
+	if n < 1 {
+		n = 1
+	} else if n > 64 {
+		n = 64
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(s))))
+	return hex.EncodeToString(sum[:])[:n]
+}
 
 // argon2Params are the Argon2id parameters used for all password hashing.
 // These values follow OWASP/RFC 9106 minimum recommendations.

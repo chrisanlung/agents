@@ -22,6 +22,17 @@ func RequirePermission(code string) gin.HandlerFunc {
 			return
 		}
 
+		// super_admin role bypasses the permission check. Super admins
+		// synthesise their role set from the user.is_super_admin flag and have
+		// no user_role rows (membership-scoped), so their JWT permissions
+		// slice is always empty. Granting them implicit god-mode here keeps
+		// the platform-admin console usable without having to seed 50
+		// role_permission rows for a role that already means "everything".
+		if slices.Contains(claims.Roles, constants.RoleCodeSuperAdmin) {
+			c.Next()
+			return
+		}
+
 		if !slices.Contains(claims.Permissions, code) {
 			c.AbortWithStatusJSON(http.StatusForbidden, helper.ErrorResponse{
 				Error: helper.ErrorDetail{

@@ -33,6 +33,21 @@ func (r *RoleRepository) FindAll(ctx context.Context) ([]*model.Role, error) {
 	return roles, nil
 }
 
+// FindByName returns the role with the given name.
+func (r *RoleRepository) FindByName(ctx context.Context, name string) (*model.Role, error) {
+	db := dbFromContext(ctx, r.db)
+	var m model.Role
+	if err := db.Where("name = ?", name).
+		Preload("Permissions.Permission").
+		First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, constants.ErrRoleNotFound
+		}
+		return nil, fmt.Errorf("find role by name: %w", err)
+	}
+	return &m, nil
+}
+
 func (r *RoleRepository) FindByIDs(ctx context.Context, ids []string) ([]*model.Role, error) {
 	if len(ids) == 0 {
 		return nil, nil

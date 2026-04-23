@@ -102,6 +102,8 @@ func main() {
 	passwordResetRepo := repository.NewPasswordResetRepository(gormDB)
 	auditRepo := repository.NewAuditRepository(gormDB)
 	txManager := repository.NewTxManager(gormDB)
+	branchRepo := repository.NewBranchRepository(gormDB)
+	registrationRepo := repository.NewRegistrationRepository(gormDB)
 
 	// -------------------------------------------------------------------------
 	// Services (ADR 0007 wiring — all three services now take MembershipRepository)
@@ -122,6 +124,39 @@ func main() {
 	roleSvc := service.NewRoleService(roleRepo)
 	jwksSvc := service.NewJWKSService(issuer)
 
+	// Phase 3 services.
+	// Registration-specific rate limiter: 3 req/hour per key (IP or email).
+	regRateLimiter := helper.NewMemoryRateLimiter(3, float64(3)/3600)
+	// Platform-wide cap (SECURITY.md Phase 3 M-4): 50/hour across all callers.
+	// Pre-CAPTCHA defense against distributed IP rotation. Migrate to Redis
+	// before horizontal scaling (SECURITY.md §11.7).
+	regGlobalLimiter := helper.NewMemoryRateLimiter(50, float64(50)/3600)
+
+	// TENANT_ADMIN_LOGIN_URL is baked into the welcome email sent to new tenant
+	// admins. A wrong value means approved tenants receive credentials pointing
+	// at a URL that does not serve the portal — high-severity misconfiguration
+	// (SECURITY.md Phase 3 H-1). Fail fast in release mode; fall back to a dev
+	// URL only in debug mode for local setups.
+	tenantAdminLoginURL := os.Getenv("TENANT_ADMIN_LOGIN_URL")
+	if tenantAdminLoginURL == "" {
+		if cfg.GetObject().App.Mode == "release" {
+			log.Fatal(ctx, fmt.Errorf("TENANT_ADMIN_LOGIN_URL is required in release mode"), "misconfiguration")
+		}
+		tenantAdminLoginURL = "http://localhost:3002/login"
+		log.Info(ctx, "TENANT_ADMIN_LOGIN_URL unset — falling back to http://localhost:3002/login (debug mode only)")
+	}
+	registrationSvc := service.NewRegistrationService(
+		registrationRepo, tenantRepo, userRepo, membershipRepo, roleRepo,
+		refreshTokenRepo, hasher, clock, auditRepo, mailer, regRateLimiter,
+		regGlobalLimiter, txManager, tenantAdminLoginURL, senderName,
+	)
+	tenantSvc := service.NewTenantService(
+		tenantRepo, membershipRepo, refreshTokenRepo, auditRepo, txManager, clock,
+	)
+	branchSvc := service.NewBranchService(
+		branchRepo, tenantRepo, userRepo, auditRepo, clock,
+	)
+
 	// -------------------------------------------------------------------------
 	// Controllers
 	// -------------------------------------------------------------------------
@@ -134,11 +169,19 @@ func main() {
 	}
 	healthCtrl := controller.NewHealthController(sqlDB)
 
+	// Phase 3 controllers.
+	registrationCtrl := controller.NewRegistrationController(registrationSvc)
+	tenantCtrl := controller.NewTenantController(tenantSvc)
+	branchCtrl := controller.NewBranchController(branchSvc)
+
 	// -------------------------------------------------------------------------
 	// Gin engine + routes
 	// -------------------------------------------------------------------------
 	mode := cfg.GetObject().App.Mode
 	gin.SetMode(mode)
+	if err := helper.RegisterCustomValidators(); err != nil {
+		log.Fatal(ctx, err, "failed to register custom validators")
+	}
 	r := gin.New()
 
 	var corsOrigins []string
@@ -158,6 +201,9 @@ func main() {
 		Admin:              adminCtrl,
 		JWKS:               jwksCtrl,
 		Health:             healthCtrl,
+		Registration:       registrationCtrl,
+		Tenant:             tenantCtrl,
+		Branch:             branchCtrl,
 	})
 
 	// -------------------------------------------------------------------------

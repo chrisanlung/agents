@@ -150,13 +150,18 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (LoginOutput, er
 	summaries := toMembershipSummaries(activeMemberships)
 
 	switch len(activeMemberships) {
+	case 0:
+		// No active memberships → user has been suspended across every tenant
+		// (e.g. via tenant deactivation cascade). Reject the login entirely
+		// rather than issue a scope=user token with empty memberships, which
+		// would let a deactivated-tenant admin keep obtaining fresh JWTs.
+		// SECURITY.md Phase 3 bug BUG-T7-B.
+		return LoginOutput{}, constants.ErrAccountInactive
 	case 1:
 		// Branch 2: exactly one active membership → auto-select, scope=tenant.
 		return s.issueTenantLogin(ctx, user, activeMemberships[0], summaries, in, now)
 	default:
-		// Branch 3: zero or multiple active memberships → scope=user.
-		// Zero memberships is treated the same as multiple: the caller must pick
-		// (or will see an empty list and contact an admin).
+		// Branch 3: multiple active memberships → scope=user, caller picks tenant.
 		return s.issueUserScopeLogin(ctx, user, summaries, in, now)
 	}
 }

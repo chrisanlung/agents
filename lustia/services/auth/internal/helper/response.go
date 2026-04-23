@@ -81,6 +81,21 @@ func RespondDomainError(c *gin.Context, err error) {
 		errors.Is(err, constants.ErrPasswordResetTokenUsed):
 		// Intentionally vague — anti-enumeration.
 		RespondError(c, http.StatusUnprocessableEntity, constants.CodeTokenInvalid, "invalid or expired reset token")
+
+	// Phase 3 — Tenant Onboarding & Branch Setup (ADR 0008 §2.5).
+	case errors.Is(err, constants.ErrDuplicatePendingRegistration):
+		RespondError(c, http.StatusConflict, constants.CodeDuplicatePendingRegistration, "a pending registration already exists for this email or slug")
+	case errors.Is(err, constants.ErrTenantSlugTaken):
+		RespondError(c, http.StatusConflict, constants.CodeTenantSlugTaken, "the requested slug is already taken by an existing tenant")
+	case errors.Is(err, constants.ErrRegistrationNotPending):
+		RespondError(c, http.StatusConflict, constants.CodeRegistrationNotPending, "registration is not in pending state")
+	case errors.Is(err, constants.ErrInvalidStatusTransition):
+		RespondError(c, http.StatusConflict, constants.CodeInvalidStatusTransition, "the requested status transition is not allowed")
+	case errors.Is(err, constants.ErrBranchLimitReached):
+		RespondError(c, http.StatusConflict, constants.CodeBranchLimitReached, "branch limit reached for this tenant's package")
+	case errors.Is(err, constants.ErrRegistrationNotFound):
+		RespondError(c, http.StatusNotFound, constants.CodeNotFound, "registration not found")
+
 	default:
 		RespondError(c, http.StatusInternalServerError, constants.CodeInternal, "an internal error occurred")
 	}

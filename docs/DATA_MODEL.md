@@ -2,7 +2,7 @@
 
 _Owned by `db-designer`. Every schema change — new table, column, index, or constraint — must update this file in the same turn as the migration._
 
-_Last updated: 2026-04-21 — ADR 0007 User–Membership Pattern (migration 000009)_
+_Last updated: 2026-04-22 — ADR 0008 Tenant Onboarding & Branch Setup (migration 000011)_
 
 ---
 
@@ -20,7 +20,7 @@ All operational tables carry `tenant_id` and are isolated by PostgreSQL Row-Leve
 
 ### 2.1 Access Control Group
 
-_Updated 2026-04-21: ADR 0007 — `user.tenant_id` removed; `membership` table added; `user_role`/`user_branch` re-keyed to `membership_id`._
+_Updated 2026-04-22: ADR 0008 — `tenant_registration` table added; `tenant` extended with package/limits/approval columns; `branch` extended with timezone/activated_at. See also ADR 0007 (migration 000009)._
 
 ```mermaid
 erDiagram
@@ -30,7 +30,14 @@ erDiagram
         TEXT slug
         tenant_status status
         TEXT plan
+        TEXT package
+        INT max_branches
         CITEXT contact_email
+        TIMESTAMPTZ approved_at
+        UUID approved_by FK
+        TIMESTAMPTZ rejected_at
+        UUID rejected_by FK
+        TEXT rejection_reason
         JSONB metadata
         TIMESTAMPTZ deleted_at
     }
@@ -40,8 +47,38 @@ erDiagram
         TEXT name
         TEXT code
         branch_status status
+        TEXT address_line1
+        TEXT address_line2
+        TEXT city
+        TEXT province
+        TEXT postal_code
+        CHAR country_code
+        TEXT timezone
+        TEXT contact_phone
+        CITEXT contact_email
+        TIMESTAMPTZ activated_at
         JSONB operational_hours
         TIMESTAMPTZ deleted_at
+    }
+    tenant_registration {
+        UUID id PK
+        TEXT company_name
+        TEXT requested_slug
+        TEXT package
+        TEXT contact_name
+        CITEXT contact_email
+        TEXT contact_phone
+        tenant_registration_status status
+        UUID approved_tenant_id FK
+        UUID approved_user_id FK
+        TIMESTAMPTZ approved_at
+        UUID approved_by FK
+        TIMESTAMPTZ rejected_at
+        UUID rejected_by FK
+        TEXT rejection_reason
+        JSONB metadata
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
     }
     role {
         UUID id PK
@@ -116,6 +153,8 @@ erDiagram
     user ||--o{ refresh_token : "owns"
     user ||--o{ password_reset : "requests"
     refresh_token o|--o| refresh_token : "replaced_by"
+    tenant_registration o|--o| tenant : "approved_tenant_id (nullable)"
+    tenant_registration o|--o| user : "approved_user_id (nullable)"
 ```
 
 ### 2.2 Operational Group
@@ -265,11 +304,18 @@ Soft-delete tables additionally have `deleted_at TIMESTAMPTZ NULL`. Active-row p
 | `id` | `UUID` | PK, `DEFAULT gen_random_uuid()` | |
 | `name` | `TEXT` | NOT NULL, length 1–200 | Company display name |
 | `slug` | `TEXT` | NOT NULL, length 1–100; UNIQUE WHERE deleted_at IS NULL | URL-safe identifier |
-| `status` | `tenant_status` | NOT NULL, DEFAULT `pending_approval` | Lifecycle status |
-| `plan` | `TEXT` | NULL, length ≤ 50 | Subscription plan placeholder |
+| `status` | `tenant_status` | NOT NULL, DEFAULT `pending_approval` | Lifecycle status; see §5.4 |
+| `plan` | `TEXT` | NULL, length ≤ 50 | Subscription plan placeholder (legacy; see `package`) |
+| `package` | `TEXT` | NOT NULL, DEFAULT `'starter'`; CHECK IN (`starter`,`growth`,`enterprise`) | Onboarding package. Drives `max_branches` default (starter=1, growth=5, enterprise=999). Added migration 000011. |
+| `max_branches` | `INT` | NOT NULL, DEFAULT 1; CHECK ≥ 1 | Maximum active branches. Sentinel 999 = unlimited (enterprise). Enforced by service layer, not DB. Added migration 000011. |
 | `contact_name` | `TEXT` | NULL | Primary contact |
 | `contact_email` | `CITEXT` | NULL, length ≤ 320 | |
 | `contact_phone` | `TEXT` | NULL, length ≤ 30 | |
+| `approved_at` | `TIMESTAMPTZ` | NULL | Timestamp of platform admin approval. Added migration 000011. |
+| `approved_by` | `UUID` | NULL, FK → `"user"(id)` SET NULL | Platform admin who approved. Added migration 000011. |
+| `rejected_at` | `TIMESTAMPTZ` | NULL | Timestamp of platform admin rejection. Added migration 000011. |
+| `rejected_by` | `UUID` | NULL, FK → `"user"(id)` SET NULL | Platform admin who rejected. Added migration 000011. |
+| `rejection_reason` | `TEXT` | NULL, length ≤ 1000 | Freeform reason text. Added migration 000011. |
 | `metadata` | `JSONB` | NOT NULL, DEFAULT `{}` | Extensible fields (logo_url, industry, etc.) |
 | `deleted_at` | `TIMESTAMPTZ` | NULL | Soft delete |
 | _audit columns_ | | | `created_at`, `updated_at`, `created_by`, `updated_by` |
@@ -288,12 +334,18 @@ Soft-delete tables additionally have `deleted_at TIMESTAMPTZ NULL`. Active-row p
 | `id` | `UUID` | PK | |
 | `tenant_id` | `UUID` | NOT NULL, FK → `tenant(id)` RESTRICT | |
 | `name` | `TEXT` | NOT NULL, length 1–200 | |
-| `code` | `TEXT` | NULL, length ≤ 50; UNIQUE per tenant WHERE active | Optional short code |
-| `status` | `branch_status` | NOT NULL, DEFAULT `active` | |
-| `address_line1/2` | `TEXT` | NULL | |
-| `city` / `province` / `postal_code` | `TEXT` | NULL | |
-| `country_code` | `CHAR(2)` | NULL | ISO 3166-1 alpha-2 |
-| `contact_phone` / `contact_email` | `TEXT` / `CITEXT` | NULL | |
+| `code` | `TEXT` | NULL, length ≤ 50; UNIQUE per tenant WHERE deleted_at IS NULL | Optional short code |
+| `status` | `branch_status` | NOT NULL, DEFAULT `active` | Lifecycle; see §5.5 |
+| `address_line1` | `TEXT` | NULL | Street address line 1 |
+| `address_line2` | `TEXT` | NULL | Street address line 2 |
+| `city` | `TEXT` | NULL, length ≤ 100 | |
+| `province` | `TEXT` | NULL, length ≤ 100 | |
+| `postal_code` | `TEXT` | NULL, length ≤ 20 | |
+| `country_code` | `CHAR(2)` | NULL | ISO 3166-1 alpha-2 (e.g. `ID`) |
+| `timezone` | `TEXT` | NOT NULL, DEFAULT `'Asia/Jakarta'` | IANA timezone. Used to convert availability windows to UTC. Added migration 000011. Resolves open question #3. |
+| `contact_phone` | `TEXT` | NULL, length ≤ 30 | |
+| `contact_email` | `CITEXT` | NULL, length 3–320 | |
+| `activated_at` | `TIMESTAMPTZ` | NULL | Timestamp of first activation. NULL for never-activated branches. Added migration 000011. |
 | `operational_hours` | `JSONB` | NOT NULL, DEFAULT `[]` | Array of `{day, open, close}` |
 | `metadata` | `JSONB` | NOT NULL, DEFAULT `{}` | |
 | `deleted_at` | `TIMESTAMPTZ` | NULL | |
@@ -301,6 +353,42 @@ Soft-delete tables additionally have `deleted_at TIMESTAMPTZ NULL`. Active-row p
 
 **Indexes:** `branch_tenant_id_idx`, `branch_tenant_code_active_uidx` (partial unique), `branch_status_idx`, `branch_metadata_gin`.
 **RLS:** `tenant_isolation` policy — reads/writes filtered by `app.current_tenant`.
+
+---
+
+### tenant_registration
+
+**Purpose:** Public registration queue for company onboarding. Each row is a submitted company registration awaiting platform admin review. Platform-level table — not tenant-scoped. Added in migration 000011 (ADR 0008).
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | `UUID` | PK, DEFAULT gen_random_uuid() | |
+| `company_name` | `TEXT` | NOT NULL, length 2–200 | |
+| `requested_slug` | `TEXT` | NOT NULL, length 2–100; regex `^[a-z0-9][a-z0-9-]*[a-z0-9]$` | Desired tenant slug |
+| `package` | `TEXT` | NOT NULL, DEFAULT `'starter'`; CHECK IN (`starter`,`growth`,`enterprise`) | |
+| `contact_name` | `TEXT` | NOT NULL, length 1–200 | Submitter's name |
+| `contact_email` | `CITEXT` | NOT NULL, length 3–320 | Submitter's email |
+| `contact_phone` | `TEXT` | NULL, length 5–30 | |
+| `status` | `tenant_registration_status` | NOT NULL, DEFAULT `'pending'` | Enum: `pending`, `approved`, `rejected` |
+| `approved_tenant_id` | `UUID` | NULL, FK → `tenant(id)` SET NULL | Set on approval: the created tenant row |
+| `approved_user_id` | `UUID` | NULL, FK → `"user"(id)` SET NULL | Set on approval: the created tenant_admin user row |
+| `approved_at` | `TIMESTAMPTZ` | NULL | |
+| `approved_by` | `UUID` | NULL, FK → `"user"(id)` SET NULL | Platform admin who approved |
+| `rejected_at` | `TIMESTAMPTZ` | NULL | |
+| `rejected_by` | `UUID` | NULL, FK → `"user"(id)` SET NULL | Platform admin who rejected |
+| `rejection_reason` | `TEXT` | NULL, length ≤ 1000 | |
+| `metadata` | `JSONB` | NOT NULL, DEFAULT `{}` | IP, user-agent, referral, etc. |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL, DEFAULT now() | |
+| `updated_at` | `TIMESTAMPTZ` | NOT NULL, DEFAULT now() | Auto-updated by `set_updated_at()` trigger |
+
+**Indexes:**
+- `tenant_registration_status_idx`: `(status, created_at)` — primary list query pattern.
+- `tenant_registration_pending_email_uidx`: UNIQUE `(contact_email)` WHERE `status = 'pending'` — prevents duplicate pending submissions from the same email.
+- `tenant_registration_pending_slug_uidx`: UNIQUE `(requested_slug)` WHERE `status = 'pending'` — prevents slug collisions in the queue.
+- `tenant_registration_approved_tenant_id_idx`: partial index on `approved_tenant_id`.
+- `tenant_registration_approved_user_id_idx`: partial index on `approved_user_id`.
+
+**RLS:** `tenant_registration_platform_only` — PERMISSIVE FOR ALL, `USING` and `WITH CHECK` require `app.current_tenant = '__platform__'`. The public registration endpoint runs under the platform sentinel; tenant-scoped sessions cannot access this table.
 
 ---
 
@@ -763,7 +851,51 @@ _Notes:_
 
 ## 5. Status Lifecycles
 
-### 5.1 Booking Status
+### 5.1 Tenant Registration Status
+
+_Added 2026-04-22 — ADR 0008. Each row in `tenant_registration` starts as `pending` and transitions exactly once._
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending : company registration submitted (public endpoint)
+    pending --> approved : platform admin approves (tenant + user created atomically)
+    pending --> rejected : platform admin rejects (optional rejection email sent)
+    approved --> [*]
+    rejected --> [*]
+```
+
+### 5.2 Tenant Status
+
+_Added 2026-04-22 — ADR 0008. State transitions enforced in the service layer (not via DB CHECK — Postgres CHECK cannot read OLD values). `go-expert` implements the transition table._
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending_approval : tenant row created on approval of registration
+    pending_approval --> active : platform admin approves registration
+    pending_approval --> deactivated : platform admin rejects (tenant row kept for audit)
+    active --> suspended : platform admin suspends (subscription lapse, etc.)
+    suspended --> active : platform admin reinstates
+    active --> deactivated : platform admin permanently deactivates
+    suspended --> deactivated : platform admin permanently deactivates
+    deactivated --> [*]
+```
+
+Note: Transition to `deactivated` also cascades all memberships to `suspended` status. This cascade is enforced by the service layer (`go-expert` scope), not by a DB trigger.
+
+### 5.3 Branch Status
+
+_Added 2026-04-22 — ADR 0008. Enforced in service layer._
+
+```mermaid
+stateDiagram-v2
+    [*] --> inactive : branch created (default status)
+    inactive --> active : tenant_admin activates (sets activated_at on first transition)
+    active --> inactive : tenant_admin deactivates
+    inactive --> deleted : tenant_admin soft-deletes (sets deleted_at; branch remains for audit)
+    deleted --> [*]
+```
+
+### 5.4 Booking Status
 
 ```mermaid
 stateDiagram-v2
@@ -782,7 +914,7 @@ stateDiagram-v2
     no_show --> [*]
 ```
 
-### 5.2 Invoice Status
+### 5.5 Invoice Status
 
 ```mermaid
 stateDiagram-v2
@@ -798,7 +930,7 @@ stateDiagram-v2
     void --> [*]
 ```
 
-### 5.3 Payment Status
+### 5.6 Payment Status
 
 ```mermaid
 stateDiagram-v2
@@ -880,19 +1012,45 @@ Soft delete (`deleted_at TIMESTAMPTZ NULL`) is applied to: `tenant`, `branch`, `
 
 The original "one user row per tenant" model required Alice to have two accounts if she worked at two companies. Migration 000009 replaces this with the workspace-membership pattern: `user` holds global identity; `membership` holds per-tenant relationships. Login uses email+password only; tenant selection is a separate post-login step. `user_role` and `user_branch` are re-keyed to `membership_id` so roles are scoped to a specific tenant context. Super admin identity is expressed by `user.is_super_admin = true` (not by `tenant_id IS NULL`). All active refresh tokens are revoked at the end of the migration, forcing a clean re-login with the new JWT shape (`membership_id`, `scope` claims).
 
-### Dev-only seed migration (000010)
+### Tenant onboarding via registration queue (ADR 0008)
 
-Migration `000010_seed_dev_data.up.sql` inserts the `acme-spa` tenant and `alice@acme-spa.example` with `tenant_admin` membership. This migration is **dev-only** and must not be applied in staging or production. In those environments, stop the migration runner at step 9:
+Phase 3 introduces `tenant_registration` as a public-facing queue separate from the `tenant` table. The separation is intentional: an unreviewed submission must not become a `tenant` row until a platform admin explicitly approves it. The `tenant_registration` table is platform-level (no `tenant_id`, RLS enforces the `__platform__` sentinel), keeping it invisible to tenant-scoped sessions. On approval, the service layer creates the `tenant`, `user`, and `membership` rows atomically in one transaction and updates the registration row with `approved_tenant_id` / `approved_user_id` for a complete audit trail. See [ADR 0008](DECISIONS/0008-tenant-onboarding-and-branch-setup.md).
+
+### Tenant/branch status transitions enforced in service layer
+
+The `tenant_status` and `branch_status` state machines (§5.2, §5.3) are NOT enforced via `CHECK` constraints because Postgres `CHECK` constraints cannot compare `NEW` and `OLD` values. The service layer (`go-expert` scope) implements an explicit transition table that returns `409 INVALID_STATUS_TRANSITION` for illegal moves. Deactivation of a tenant cascades membership status to `suspended` — this cascade is also service-layer logic, not a DB trigger, because it crosses two tables and benefits from transactional error handling. See ADR 0008 §5, answer #4.
+
+### Dev-only seed migration (000010 and 000012)
+
+Migration `000010_seed_dev_data.up.sql` inserts the `acme-spa` tenant and `alice@acme-spa.example` with `tenant_admin` membership. Migration `000012_seed_dev_registrations.up.sql` inserts one sample `pending` registration (Zen Wellness) for testing the platform-admin approval queue. Both migrations are **dev-only** and must not be applied in staging or production. In those environments, stop the migration runner at step 11:
 
 ```
-migrate -database "$DATABASE_URL" -path ./migrations up 9
+migrate -database "$DATABASE_URL" -path ./migrations up 11
 ```
 
-Or simply omit the `000010_*.sql` files from the production image. The migration is idempotent (`ON CONFLICT DO NOTHING`) and uses fixed UUIDs prefixed `d0000000-…` for all seed rows. The Argon2id hash for `Staff2026!` is stored as a literal constant in the file; regenerate with `go run ./cmd/argon2hash 'Staff2026!'`.
+Or omit the `000010_*.sql` and `000012_*.sql` files from the production image.
+
+The seed migrations are idempotent (`ON CONFLICT DO NOTHING`) and use fixed UUIDs (`d0000000-…` for migration 010, `e0000000-…` for migration 012). The Argon2id hash for `Staff2026!` is stored as a literal constant in migration 010; regenerate with `go run ./cmd/argon2hash 'Staff2026!'`.
 
 ### `"user"` table separate from `customer` table
 
 Internal staff (super_admin, tenant_admin, branch_admin, finance, therapist) have fundamentally different lifecycle rules from external customers. Staff have roles, permissions, login credentials, and branch assignments. Customers have date-of-birth, gender, and booking histories but (in early phases) no platform login. Merging them into one table would require nullable columns for both sets of attributes and complicate role assignment. Separation keeps each table's purpose clear. A foreign key from `therapist.user_id` to `"user"` bridges the gap when a therapist also has a portal login.
+
+### Enum type catalog
+
+All enum types defined across the migration chain:
+
+| Type | Values | Defined in |
+|---|---|---|
+| `tenant_status` | `pending_approval`, `active`, `suspended`, `deactivated` | migration 000001 |
+| `branch_status` | `active`, `inactive` | migration 000001 |
+| `booking_status` | `draft`, `pending`, `confirmed`, `checked_in`, `in_progress`, `completed`, `cancelled`, `no_show` | migration 000001 |
+| `booking_source` | `walk_in`, `online`, `phone` | migration 000001 |
+| `invoice_status` | `draft`, `issued`, `partially_paid`, `paid`, `void` | migration 000001 |
+| `payment_method` | `cash`, `card`, `transfer`, `qris`, `gateway` | migration 000001 |
+| `payment_status` | `pending`, `captured`, `failed`, `refunded` | migration 000001 |
+| `membership_status` | `active`, `suspended`, `invited`, `left` | migration 000009 |
+| `tenant_registration_status` | `pending`, `approved`, `rejected` | migration 000011 |
 
 ### Native Postgres enums for status fields
 
@@ -918,7 +1076,7 @@ PostgreSQL's native `INET` type stores IPv4 and IPv6 addresses efficiently and e
 
 2. **Cross-tenant check on `therapist_service`:** Both `therapist_id` and `service_id` must belong to the same tenant. Currently enforced at the application layer only. A DB trigger can add a hard constraint. Decision: add trigger in a future migration if cross-tenant contamination incidents occur.
 
-3. **`therapist` availability: timezone handling.** `therapist_availability` stores `start_time` and `end_time` as `TIME WITHOUT TIME ZONE`. The branch's local timezone must be applied by the application when converting availability to absolute UTC slots for booking. Confirm: should `branch` carry a `timezone TEXT` column (e.g. `Asia/Jakarta`)? Recommended yes — flag for Phase 4 scope.
+3. **`therapist` availability: timezone handling.** ✅ Resolved 2026-04-22 — ADR 0008 adds `branch.timezone TEXT NOT NULL DEFAULT 'Asia/Jakarta'` (migration 000011). The application uses this column when converting `therapist_availability.start_time`/`end_time` to absolute UTC slots. IANA timezone string validation is the application's responsibility.
 
 4. **`booking_code` and `invoice_number` generation.** These are app-generated human-readable codes (e.g. `BKG-20240418-001`). The DB uniqueness constraint catches collisions. Define the generation algorithm in `go-expert` scope to avoid race conditions (e.g. use a `SEQUENCE` per tenant, or a padded `COUNT(*)+1`).
 

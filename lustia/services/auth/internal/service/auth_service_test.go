@@ -15,17 +15,21 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Minimal hand-written fakes (no mockgen dependency for Phase 2 unit tests).
+// Fakes updated for ADR 0007 + 0008: user-membership model, no tenant_slug on
+// login, TxManager.SetTenantContext for RLS context switching.
 // ---------------------------------------------------------------------------
 
 type fakeUserRepo struct {
-	findByEmailAndTenant func(ctx context.Context, email string, tenantID *string) (*model.User, error)
-	incrementFailed      func(ctx context.Context, id string, lockUntil *time.Time) error
-	resetFailed          func(ctx context.Context, id string) error
+	findByEmail     func(ctx context.Context, email string) (*model.User, error)
+	incrementFailed func(ctx context.Context, id string, lockUntil *time.Time) error
+	resetFailed     func(ctx context.Context, id string) error
 }
 
-func (f *fakeUserRepo) FindByEmailAndTenant(ctx context.Context, email string, tenantID *string) (*model.User, error) {
-	return f.findByEmailAndTenant(ctx, email, tenantID)
+func (f *fakeUserRepo) FindByEmail(ctx context.Context, email string) (*model.User, error) {
+	if f.findByEmail != nil {
+		return f.findByEmail(ctx, email)
+	}
+	return nil, constants.ErrUserNotFound
 }
 func (f *fakeUserRepo) FindByID(_ context.Context, _ string) (*model.User, error) {
 	return &model.User{}, nil
@@ -33,9 +37,9 @@ func (f *fakeUserRepo) FindByID(_ context.Context, _ string) (*model.User, error
 func (f *fakeUserRepo) FindByTenant(_ context.Context, _ string, _ service.UserFilter) ([]*model.User, string, error) {
 	return nil, "", nil
 }
-func (f *fakeUserRepo) Save(_ context.Context, _ *model.User) error { return nil }
-func (f *fakeUserRepo) Update(_ context.Context, _ *model.User) error { return nil }
-func (f *fakeUserRepo) UpdatePassword(_ context.Context, _ string, _ string) error { return nil }
+func (f *fakeUserRepo) Save(_ context.Context, _ *model.User) error                 { return nil }
+func (f *fakeUserRepo) Update(_ context.Context, _ *model.User) error               { return nil }
+func (f *fakeUserRepo) UpdatePassword(_ context.Context, _ string, _ string) error  { return nil }
 func (f *fakeUserRepo) IncrementFailedLogin(ctx context.Context, id string, lockUntil *time.Time) error {
 	if f.incrementFailed != nil {
 		return f.incrementFailed(ctx, id, lockUntil)
@@ -48,23 +52,61 @@ func (f *fakeUserRepo) ResetFailedLogin(ctx context.Context, id string) error {
 	}
 	return nil
 }
-func (f *fakeUserRepo) AssignRoles(_ context.Context, _ string, _ []string, _ string) error {
-	return nil
-}
-func (f *fakeUserRepo) AssignBranches(_ context.Context, _ string, _ []string, _ string) error {
-	return nil
-}
 func (f *fakeUserRepo) SoftDelete(_ context.Context, _ string) error { return nil }
+
+type fakeMembershipRepo struct {
+	byUser []*model.Membership
+}
+
+func (f *fakeMembershipRepo) FindByUser(_ context.Context, _ string) ([]*model.Membership, error) {
+	return f.byUser, nil
+}
+func (f *fakeMembershipRepo) FindByUserAndTenant(_ context.Context, _, _ string) (*model.Membership, error) {
+	return nil, nil
+}
+func (f *fakeMembershipRepo) FindByID(_ context.Context, _ string) (*model.Membership, error) {
+	return nil, nil
+}
+func (f *fakeMembershipRepo) Save(_ context.Context, _ *model.Membership) error   { return nil }
+func (f *fakeMembershipRepo) Update(_ context.Context, _ *model.Membership) error { return nil }
+func (f *fakeMembershipRepo) SetStatus(_ context.Context, _ string, _ model.MembershipStatus) error {
+	return nil
+}
+func (f *fakeMembershipRepo) AssignRoles(_ context.Context, _ string, _ []string, _ string) error {
+	return nil
+}
+func (f *fakeMembershipRepo) AssignBranches(_ context.Context, _ string, _ []string, _ string) error {
+	return nil
+}
+func (f *fakeMembershipRepo) SuspendAllForTenant(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+func (f *fakeMembershipRepo) FindActiveByTenant(_ context.Context, _ string) ([]*model.Membership, error) {
+	return nil, nil
+}
 
 type fakeTenantRepo struct {
 	findBySlug func(ctx context.Context, slug string) (*model.Tenant, error)
 }
 
 func (f *fakeTenantRepo) FindBySlug(ctx context.Context, slug string) (*model.Tenant, error) {
-	return f.findBySlug(ctx, slug)
+	if f.findBySlug != nil {
+		return f.findBySlug(ctx, slug)
+	}
+	return nil, errors.New("not found")
 }
 func (f *fakeTenantRepo) FindByID(_ context.Context, _ string) (*model.Tenant, error) {
 	return &model.Tenant{}, nil
+}
+func (f *fakeTenantRepo) Save(_ context.Context, _ *model.Tenant) error { return nil }
+func (f *fakeTenantRepo) List(_ context.Context, _ service.TenantFilter) ([]*service.TenantWithCounts, string, error) {
+	return nil, "", nil
+}
+func (f *fakeTenantRepo) UpdateStatus(_ context.Context, _, _, _ string, _ *string) error {
+	return nil
+}
+func (f *fakeTenantRepo) CountActiveBranches(_ context.Context, _ string) (int, error) {
+	return 0, nil
 }
 
 type fakeRefreshTokenRepo struct {
@@ -80,7 +122,10 @@ func (f *fakeRefreshTokenRepo) Save(_ context.Context, rt *model.RefreshToken) e
 }
 func (f *fakeRefreshTokenRepo) Revoke(_ context.Context, _ string, _ *string) error { return nil }
 func (f *fakeRefreshTokenRepo) RevokeAllForUser(_ context.Context, _ string) error  { return nil }
-func (f *fakeRefreshTokenRepo) DeleteExpiredAndRevoked(_ context.Context) error     { return nil }
+func (f *fakeRefreshTokenRepo) RevokeAllForTenantUsers(_ context.Context, _ string) error {
+	return nil
+}
+func (f *fakeRefreshTokenRepo) DeleteExpiredAndRevoked(_ context.Context) error { return nil }
 
 type fakeHasher struct {
 	hash   func(ctx context.Context, password string) (string, error)
@@ -88,10 +133,16 @@ type fakeHasher struct {
 }
 
 func (f *fakeHasher) Hash(ctx context.Context, password string) (string, error) {
-	return f.hash(ctx, password)
+	if f.hash != nil {
+		return f.hash(ctx, password)
+	}
+	return "h:" + password, nil
 }
 func (f *fakeHasher) Verify(ctx context.Context, password, hash string) (bool, error) {
-	return f.verify(ctx, password, hash)
+	if f.verify != nil {
+		return f.verify(ctx, password, hash)
+	}
+	return true, nil
 }
 
 type fakeIssuer struct {
@@ -99,7 +150,10 @@ type fakeIssuer struct {
 }
 
 func (f *fakeIssuer) IssueAccessToken(ctx context.Context, claims model.AccessClaims) (string, error) {
-	return f.issue(ctx, claims)
+	if f.issue != nil {
+		return f.issue(ctx, claims)
+	}
+	return "access.token.value", nil
 }
 func (f *fakeIssuer) VerifyAccessToken(_ context.Context, _ string) (model.AccessClaims, error) {
 	return model.AccessClaims{}, nil
@@ -123,10 +177,12 @@ type fakeTxManager struct{}
 func (f *fakeTxManager) WithTx(ctx context.Context, fn func(context.Context) error) error {
 	return fn(ctx)
 }
+func (f *fakeTxManager) SetTenantContext(_ context.Context, _, _ string) error { return nil }
 
-// newTestAuthService creates an AuthService with the provided fakes.
+// newTestAuthService wires an AuthService with the fakes above.
 func newTestAuthService(
 	users *fakeUserRepo,
+	memberships *fakeMembershipRepo,
 	tenants *fakeTenantRepo,
 	tokens *fakeRefreshTokenRepo,
 	hasher *fakeHasher,
@@ -135,29 +191,125 @@ func newTestAuthService(
 	rateLimiter *fakeRateLimiter,
 ) *service.AuthService {
 	return service.NewAuthService(
-		users, tenants, tokens, hasher, issuer, clock,
+		users, memberships, tenants, tokens, hasher, issuer, clock,
 		&fakeAuditRepo{}, rateLimiter, &fakeTxManager{},
 	)
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Tests — covering the three login branches (platform / single-tenant / user).
 // ---------------------------------------------------------------------------
 
-func TestLogin_GoldenPath(t *testing.T) {
+func TestLogin_SuperAdmin_Platform(t *testing.T) {
 	t.Parallel()
 
-	tenantID := "tenant-uuid-1"
-	userID := "user-uuid-1"
-	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	userID := "u-super"
+	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 
 	tokenRepo := &fakeRefreshTokenRepo{}
 	svc := newTestAuthService(
 		&fakeUserRepo{
-			findByEmailAndTenant: func(_ context.Context, _ string, _ *string) (*model.User, error) {
+			findByEmail: func(_ context.Context, _ string) (*model.User, error) {
 				return &model.User{
 					ID:           userID,
-					TenantID:     &tenantID,
+					Email:        "admin@lustia.local",
+					PasswordHash: "hashed",
+					FullName:     "Super Admin",
+					IsActive:     true,
+					IsSuperAdmin: true,
+				}, nil
+			},
+		},
+		&fakeMembershipRepo{},
+		&fakeTenantRepo{},
+		tokenRepo,
+		&fakeHasher{verify: func(_ context.Context, _, _ string) (bool, error) { return true, nil }},
+		&fakeIssuer{},
+		&fakeClock{t: now},
+		&fakeRateLimiter{allow: true},
+	)
+
+	out, err := svc.Login(context.Background(), service.LoginInput{
+		Email:    "admin@lustia.local",
+		Password: "s3cr3t",
+		IP:       "127.0.0.1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "access.token.value", out.AccessToken)
+	assert.NotEmpty(t, out.RefreshToken)
+	assert.Equal(t, "platform", out.Scope)
+	assert.Nil(t, out.ActiveMembershipID)
+	assert.Empty(t, out.Memberships)
+	require.Len(t, tokenRepo.saved, 1)
+}
+
+func TestLogin_SingleMembership_AutoSelectsTenant(t *testing.T) {
+	t.Parallel()
+
+	userID := "u-alice"
+	tenantID := "t-acme"
+	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+
+	tokenRepo := &fakeRefreshTokenRepo{}
+	svc := newTestAuthService(
+		&fakeUserRepo{
+			findByEmail: func(_ context.Context, _ string) (*model.User, error) {
+				return &model.User{
+					ID:           userID,
+					Email:        "alice@acme-spa.example",
+					PasswordHash: "hashed",
+					FullName:     "Alice",
+					IsActive:     true,
+				}, nil
+			},
+			resetFailed: func(_ context.Context, _ string) error { return nil },
+		},
+		&fakeMembershipRepo{
+			byUser: []*model.Membership{
+				{
+					ID:       "m-acme",
+					UserID:   userID,
+					TenantID: tenantID,
+					Status:   model.MembershipStatusActive,
+					Tenant:   model.Tenant{ID: tenantID, Name: "Acme Spa", Slug: "acme-spa", Status: model.TenantStatusActive},
+				},
+			},
+		},
+		&fakeTenantRepo{},
+		tokenRepo,
+		&fakeHasher{verify: func(_ context.Context, _, _ string) (bool, error) { return true, nil }},
+		&fakeIssuer{},
+		&fakeClock{t: now},
+		&fakeRateLimiter{allow: true},
+	)
+
+	out, err := svc.Login(context.Background(), service.LoginInput{
+		Email:    "alice@acme-spa.example",
+		Password: "Staff2026!",
+		IP:       "127.0.0.1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "tenant", out.Scope)
+	require.NotNil(t, out.ActiveMembershipID)
+	assert.Equal(t, "m-acme", *out.ActiveMembershipID)
+	require.Len(t, out.Memberships, 1)
+	assert.Equal(t, "acme-spa", out.Memberships[0].TenantSlug)
+}
+
+func TestLogin_MultiMembership_ScopeUser(t *testing.T) {
+	t.Parallel()
+
+	userID := "u-alice"
+	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+
+	tokenRepo := &fakeRefreshTokenRepo{}
+	svc := newTestAuthService(
+		&fakeUserRepo{
+			findByEmail: func(_ context.Context, _ string) (*model.User, error) {
+				return &model.User{
+					ID:           userID,
 					Email:        "alice@example.com",
 					PasswordHash: "hashed",
 					FullName:     "Alice",
@@ -166,53 +318,45 @@ func TestLogin_GoldenPath(t *testing.T) {
 			},
 			resetFailed: func(_ context.Context, _ string) error { return nil },
 		},
-		&fakeTenantRepo{
-			findBySlug: func(_ context.Context, _ string) (*model.Tenant, error) {
-				return &model.Tenant{ID: tenantID, Slug: "acme", Status: model.TenantStatusActive}, nil
+		&fakeMembershipRepo{
+			byUser: []*model.Membership{
+				{ID: "m1", UserID: userID, TenantID: "t1", Status: model.MembershipStatusActive, Tenant: model.Tenant{ID: "t1", Name: "Acme", Slug: "acme", Status: model.TenantStatusActive}},
+				{ID: "m2", UserID: userID, TenantID: "t2", Status: model.MembershipStatusActive, Tenant: model.Tenant{ID: "t2", Name: "Beauty", Slug: "beauty", Status: model.TenantStatusActive}},
 			},
 		},
+		&fakeTenantRepo{},
 		tokenRepo,
-		&fakeHasher{
-			hash:   func(_ context.Context, p string) (string, error) { return "h:" + p, nil },
-			verify: func(_ context.Context, _, _ string) (bool, error) { return true, nil },
-		},
-		&fakeIssuer{
-			issue: func(_ context.Context, _ model.AccessClaims) (string, error) { return "access.token.value", nil },
-		},
+		&fakeHasher{verify: func(_ context.Context, _, _ string) (bool, error) { return true, nil }},
+		&fakeIssuer{},
 		&fakeClock{t: now},
 		&fakeRateLimiter{allow: true},
 	)
 
 	out, err := svc.Login(context.Background(), service.LoginInput{
-		Email:      "alice@example.com",
-		Password:   "password123",
-		TenantSlug: "acme",
-		IP:         "127.0.0.1",
+		Email:    "alice@example.com",
+		Password: "anything",
+		IP:       "127.0.0.1",
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, "access.token.value", out.AccessToken)
-	assert.NotEmpty(t, out.RefreshToken)
-	assert.Equal(t, now.Add(14*24*time.Hour), out.ExpiresAt)
-	assert.Equal(t, "alice@example.com", out.User.Email)
-	require.Len(t, tokenRepo.saved, 1)
+	assert.Equal(t, "user", out.Scope)
+	assert.Nil(t, out.ActiveMembershipID)
+	require.Len(t, out.Memberships, 2)
 }
 
 func TestLogin_InvalidPassword(t *testing.T) {
 	t.Parallel()
 
-	tenantID := "tenant-uuid-2"
-	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	incrementCalled := false
 
 	svc := newTestAuthService(
 		&fakeUserRepo{
-			findByEmailAndTenant: func(_ context.Context, _ string, _ *string) (*model.User, error) {
+			findByEmail: func(_ context.Context, _ string) (*model.User, error) {
 				return &model.User{
 					ID:       "u1",
-					TenantID: &tenantID,
-					IsActive: true,
 					Email:    "bob@example.com",
+					IsActive: true,
 				}, nil
 			},
 			incrementFailed: func(_ context.Context, _ string, _ *time.Time) error {
@@ -220,25 +364,19 @@ func TestLogin_InvalidPassword(t *testing.T) {
 				return nil
 			},
 		},
-		&fakeTenantRepo{
-			findBySlug: func(_ context.Context, _ string) (*model.Tenant, error) {
-				return &model.Tenant{ID: tenantID, Slug: "acme", Status: model.TenantStatusActive}, nil
-			},
-		},
+		&fakeMembershipRepo{},
+		&fakeTenantRepo{},
 		&fakeRefreshTokenRepo{},
-		&fakeHasher{
-			verify: func(_ context.Context, _, _ string) (bool, error) { return false, nil },
-		},
+		&fakeHasher{verify: func(_ context.Context, _, _ string) (bool, error) { return false, nil }},
 		&fakeIssuer{},
 		&fakeClock{t: now},
 		&fakeRateLimiter{allow: true},
 	)
 
 	_, err := svc.Login(context.Background(), service.LoginInput{
-		Email:      "bob@example.com",
-		Password:   "wrongpass",
-		TenantSlug: "acme",
-		IP:         "127.0.0.1",
+		Email:    "bob@example.com",
+		Password: "wrongpass",
+		IP:       "127.0.0.1",
 	})
 
 	require.Error(t, err)
@@ -249,26 +387,21 @@ func TestLogin_InvalidPassword(t *testing.T) {
 func TestLogin_AccountLocked(t *testing.T) {
 	t.Parallel()
 
-	tenantID := "tenant-uuid-3"
-	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	lockedUntil := now.Add(5 * time.Minute)
 
 	svc := newTestAuthService(
 		&fakeUserRepo{
-			findByEmailAndTenant: func(_ context.Context, _ string, _ *string) (*model.User, error) {
+			findByEmail: func(_ context.Context, _ string) (*model.User, error) {
 				return &model.User{
 					ID:          "u2",
-					TenantID:    &tenantID,
 					IsActive:    true,
 					LockedUntil: &lockedUntil,
 				}, nil
 			},
 		},
-		&fakeTenantRepo{
-			findBySlug: func(_ context.Context, _ string) (*model.Tenant, error) {
-				return &model.Tenant{ID: tenantID, Slug: "acme", Status: model.TenantStatusActive}, nil
-			},
-		},
+		&fakeMembershipRepo{},
+		&fakeTenantRepo{},
 		&fakeRefreshTokenRepo{},
 		&fakeHasher{},
 		&fakeIssuer{},
@@ -277,10 +410,9 @@ func TestLogin_AccountLocked(t *testing.T) {
 	)
 
 	_, err := svc.Login(context.Background(), service.LoginInput{
-		Email:      "locked@example.com",
-		Password:   "anything",
-		TenantSlug: "acme",
-		IP:         "127.0.0.1",
+		Email:    "locked@example.com",
+		Password: "anything",
+		IP:       "127.0.0.1",
 	})
 
 	require.Error(t, err)
@@ -292,6 +424,7 @@ func TestLogin_RateLimited(t *testing.T) {
 
 	svc := newTestAuthService(
 		&fakeUserRepo{},
+		&fakeMembershipRepo{},
 		&fakeTenantRepo{},
 		&fakeRefreshTokenRepo{},
 		&fakeHasher{},
@@ -301,10 +434,9 @@ func TestLogin_RateLimited(t *testing.T) {
 	)
 
 	_, err := svc.Login(context.Background(), service.LoginInput{
-		Email:      "any@example.com",
-		Password:   "password",
-		TenantSlug: "acme",
-		IP:         "10.0.0.1",
+		Email:    "any@example.com",
+		Password: "password",
+		IP:       "10.0.0.1",
 	})
 
 	require.Error(t, err)

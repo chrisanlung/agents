@@ -14,7 +14,10 @@ export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const hasSession = request.cookies.has("access_token");
 
-  if (pathname.startsWith("/dashboard") && !hasSession) {
+  if (
+    (pathname.startsWith("/dashboard") || pathname.startsWith("/tenants")) &&
+    !hasSession
+  ) {
     const loginUrl = new URL("/login", request.url);
     return NextResponse.redirect(loginUrl);
   }
@@ -29,9 +32,8 @@ export function middleware(request: NextRequest) {
 
 export const config = {
   /*
-   * Match /login and /dashboard (and sub-paths) only.
-   * Exclude static assets, _next internals, favicon, etc. so the middleware
-   * does not run on every request.
+   * Match /login, /dashboard (and sub-paths), and /tenants (and sub-paths).
+   * Exclude static assets, _next internals, favicon, etc.
    */
-  matcher: ["/login", "/dashboard/:path*"],
+  matcher: ["/login", "/dashboard/:path*", "/tenants/:path*", "/tenants"],
 };

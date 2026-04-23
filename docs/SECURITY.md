@@ -520,3 +520,291 @@ The following questions require a decision from the user or the relevant agent b
 ---
 
 _End of SECURITY.md — Phase 2 baseline._
+
+---
+
+## Phase 3 Security Review — 2026-04-23
+
+_Reviewer: security-expert. Authority: may block Phase 3 sign-off on Critical or High findings. Existing Phase 1–2 threat model and controls are incorporated by reference (Sections 1–11 above). This section covers only the Phase 3 delta._
+
+### Executive Summary
+
+Phase 3 adds a public self-registration endpoint, a platform-admin approval workflow, tenant-scoped branch CRUD, and a forced password-change UI. The overall architecture is well-structured: RLS correctly backstops all tenant-scoped tables, the approval transaction is atomic, and the change-password flow properly revokes all sessions. The most consequential finding is a **hardcoded localhost URL inside the service layer** — in production the welcome email would send tenants to `http://localhost:3002/login`, which is a usability-breaking defect with a minor phishing facilitation angle. Several **information-disclosure** issues allow an attacker to enumerate whether an email or slug is already registered. The temporary password has **marginally acceptable entropy** but relies on `uuid.New()` being a CSPRNG-backed UUIDv4, which is confirmed by the `github.com/google/uuid` library — this is acceptable with the conditions noted below. No critical authentication bypass or tenant data-leak was identified. Two High findings must be resolved before sign-off.
+
+**Finding count by severity:** High: 2 | Medium: 4 | Low: 3 | Info: 2
+
+---
+
+### Findings — High
+
+---
+
+#### H-1: Hardcoded `localhost` URL in welcome email — production tokens delivered to wrong host
+
+**Severity:** High
+
+**File:line:** `lustia/services/auth/internal/service/registration_service.go:86`
+
+**Attack scenario:** The constant `tenantAdminLoginURL = "http://localhost:3002/login"` is the fallback value used when `NewRegistrationService` receives an empty `loginURL` string. In `main.go:130` the value is read from `TENANT_ADMIN_LOGIN_URL` env var, which is correct. However, the constant itself is also used as the package-level default inside the service constructor: `if loginURL == "" { loginURL = tenantAdminLoginURL }`. If the env var is accidentally left unset in staging or production (a realistic mistake — it is absent from the `deploy/.env.example` file's required-section), the welcome email body (`registration_service.go:439`) sends the new tenant admin to `http://localhost:3002/login`. The tenant cannot onboard. A secondary concern: if an attacker in a shared-hosting environment controlled port 3002 on that host, they could capture the temporary password when the user follows the link.
+
+**Recommended fix:**
+
+1. Add `TENANT_ADMIN_LOGIN_URL` to `deploy/.env.example` in the required (not optional) section with a clear production placeholder value (e.g. `TENANT_ADMIN_LOGIN_URL=https://app.YOUR_DOMAIN/login`).
+2. In `main.go`, fail fast at startup if the value is missing in non-local environments:
+   ```go
+   tenantAdminLoginURL := envStr("TENANT_ADMIN_LOGIN_URL", "")
+   if tenantAdminLoginURL == "" && appEnv != "local" {
+       log.Fatal(ctx, "TENANT_ADMIN_LOGIN_URL must be set in non-local environments")
+   }
+   ```
+3. Remove the in-service fallback constant entirely (or keep it only for unit tests). The service should not have a production-meaningful default.
+4. Add `TENANT_ADMIN_LOGIN_URL` to the Section 9.4 production readiness checklist.
+
+**Blocks Phase 3 sign-off:** Yes — without the env-var gate, a misconfigured production deploy silently breaks tenant onboarding and exposes temporary passwords to localhost.
+
+---
+
+#### H-2: Full contact email written to audit log — PII logging violation (CWE-532)
+
+**Severity:** High
+
+**File:line:** `lustia/services/auth/internal/service/registration_service.go:245`
+
+**Attack scenario:** The audit entry written on registration submission includes `"email": in.ContactEmail` — the full, raw email address. Section 7.2 of this document explicitly prohibits full email addresses from structured logs (rule: "Full email address in logs — use hashed prefix"). The audit log table is append-only and accessible to anyone with DB read access. If the audit log is also streamed to an external log aggregator (Datadog, Loki, CloudWatch), the raw email propagates to that system's retention and search indexes. Under Indonesian PDPA and GDPR this constitutes unauthorized storage of personal data in a secondary system without the data subject's specific consent for that purpose. For a multi-tenant SaaS with potentially hundreds of business registrations per day, this creates a meaningful PII aggregation risk.
+
+**Recommended fix:**
+
+Replace the raw email with a hashed prefix (consistent with the login and password-reset audit pattern already established in Section 7.1):
+
+```go
+_ = s.audit.Append(ctx, AuditEntry{
+    Action:       "registration.submitted",
+    ResourceType: "tenant_registration",
+    ResourceID:   reg.ID,
+    Meta: map[string]interface{}{
+        "slug":         resolvedSlug,
+        "email_prefix": helper.SHA256Prefix(in.ContactEmail, 8), // first 8 hex chars
+    },
+})
+```
+
+Use whatever `helper.SHA256Prefix` (or equivalent) is already used for login audit entries.
+
+**Blocks Phase 3 sign-off:** Yes — this is a direct violation of the project's own logging rules (Section 7.2) and applicable data-protection law.
+
+---
+
+### Findings — Medium
+
+---
+
+#### M-1: Email and slug existence enumeration via distinct error codes (CWE-204)
+
+**Severity:** Medium
+
+**File:line:** `lustia/services/auth/internal/service/registration_service.go:186-205` and frontend `web/tenant-admin/app/register/actions.ts:78-95`
+
+**Attack scenario:** `SubmitRegistration` returns `ErrDuplicatePendingRegistration` when a pending registration with the same email exists, and `ErrTenantSlugTaken` when the requested slug is already live. The frontend maps these to distinct field-level error messages: `contact_email` shows "Email ini sudah memiliki permintaan pendaftaran" and `company_name` shows the slug-collision message. An attacker can enumerate: (a) whether a specific company email already has a pending application, and (b) whether a specific slug belongs to an active tenant — without being authenticated. For a B2B SaaS where company identities are semi-sensitive this leaks competitive intelligence (which businesses have registered) and enables targeted spear-phishing by confirming a prospective customer's status.
+
+This is distinct from the password-reset enumeration protection already in place (Section 2.6) — the registration flow has no equivalent constant-response requirement.
+
+**Recommended fix:**
+
+Return a single generic error code (`CONFLICT`) for all registration uniqueness failures. The frontend already handles `CONFLICT` generically. Replace the two specific codes with one:
+
+```go
+// Both duplicate-email and slug-taken become the same opaque CONFLICT response.
+return RegistrationOutput{}, constants.ErrRegistrationConflict
+```
+
+Map to HTTP 409 with code `CONFLICT` and message "A registration conflict occurred. Please review your details or contact support." Internally log the specific reason (email conflict vs slug conflict) to the audit log using a hashed email prefix (see H-2 fix).
+
+**Blocks Phase 3 sign-off:** No — but should be fixed before public beta. Accepted risk window: internal/closed-beta only.
+
+---
+
+#### M-2: `ChangeTenantStatusRequest.Status` has no allowlist validation (CWE-20)
+
+**Severity:** Medium
+
+**File:line:** `lustia/services/auth/internal/controller/dto_request.go:129`
+
+**Attack scenario:** The DTO field is `Status string \`json:"status" binding:"required"\`` — the `binding` tag has no `oneof` constraint. Any string value passes validation and reaches `TenantService.TransitionStatus`. The service delegates to `tenant.CanTransitionTo(newStatus)` which uses a whitelist of valid transitions, so an unexpected value returns `ErrInvalidStatusTransition`. The DB update is parameterized, so there is no injection risk. However, the missing validation means: (a) the DTO contract is ambiguous to API consumers, (b) if the model's state machine is ever refactored incorrectly, the service-level gate is the only check, and (c) unexpected values are processed further into the service before being rejected, creating a wider path for future logic bugs. Compare: `ChangeBranchStatusRequest.Status` at line 169 correctly uses `binding:"required,oneof=active inactive"`.
+
+**Recommended fix:**
+
+```go
+type ChangeTenantStatusRequest struct {
+    Status string `json:"status" binding:"required,oneof=active suspended deactivated"`
+    Reason string `json:"reason" binding:"omitempty,max=1000"`
+}
+```
+
+Align the allowed values with the `validTenantTransitions` map in `model/tenant.go`. This is defense-in-depth at the controller layer, consistent with all other status-change DTOs.
+
+**Blocks Phase 3 sign-off:** No — the service-layer state machine provides adequate protection.
+
+---
+
+#### M-3: `RequestedSlug` accepts arbitrary characters — slug injection into tenant slug column (CWE-20)
+
+**Severity:** Medium
+
+**File:line:** `lustia/services/auth/internal/controller/dto_request.go:90`
+
+**Attack scenario:** The DTO field `RequestedSlug string \`json:"requested_slug" binding:"omitempty,min=2,max=100"\`` imposes only length constraints. When the caller supplies an explicit slug (non-empty), the service skips the `slugify()` sanitizer and stores the raw value directly in `tenant_registration.requested_slug`, then copies it verbatim into `tenant.slug` at approval time. A caller could submit a slug containing characters outside `[a-z0-9-]` — for example Unicode characters, path traversal sequences (`../admin`), or leading/trailing hyphens. The slug is used as a URL segment and in the welcome email body, so an unexpected character set could cause routing ambiguity in the frontend, produce unexpected URL encoding behaviour in HTTP clients, or cause display issues in email templates.
+
+**Recommended fix:**
+
+Add a custom validator or a regexp constraint to `RequestedSlug`:
+```go
+RequestedSlug string `json:"requested_slug" binding:"omitempty,min=2,max=100,alphanum_dash"`
+```
+Where `alphanum_dash` is a custom `go-playground/validator/v10` validator that accepts `[a-z0-9-]+`, no leading/trailing hyphens, and no consecutive hyphens. Alternatively, always run `slugify()` on the caller-supplied value and compare it to the original — reject if they differ:
+```go
+if slugify(explicit) != explicit {
+    return RegistrationOutput{}, constants.ErrInvalidInput
+}
+```
+
+**Blocks Phase 3 sign-off:** No — the downstream tenant slug column is parameterized (no injection risk) and the value is always under admin review before approval. Fix before public launch.
+
+---
+
+#### M-4: In-memory rate limiter for registration is ineffective against distributed abuse and does not survive restarts (OWASP A04)
+
+**Severity:** Medium
+
+**File:line:** `lustia/services/auth/cmd/auth/main.go:129`, `registration_service.go:171-176`
+
+**Attack scenario:** The registration rate limiter is instantiated as `helper.NewMemoryRateLimiter(3, float64(3)/3600)` — a token-bucket counter living in process memory. Three weaknesses follow: (1) On service restart (deploy, crash, OOM kill) all rate-limit state is reset; an attacker can trigger a restart (e.g. by sending a DoS spike elsewhere) and then fire 3 requests per IP again. (2) In a multi-instance deployment (horizontal scaling, canary deploy) each replica has independent state — effective limit per attacker becomes `3 × N` where N is instance count. (3) IP-based rate limiting is bypassed by rotating through residential proxies or a botnet with multiple IPs; each IP gets a fresh 3-request allowance. The registration flow creates DB rows, sends emails, and performs multiple slug-uniqueness queries per submission — the cost-per-request is non-trivial. This is acknowledged as an open question in Section 11.7 for the broader rate limiting concern, but the registration endpoint is higher-risk than most because it is fully public and unauthenticated.
+
+**Recommended fix:**
+
+This is a pre-existing accepted design choice (Section 11.7) for Phase 2 single-instance deployments. For Phase 3 (public endpoint exposure), two additional controls should be added regardless of Redis migration timing:
+1. Add a global per-hour cap on total registrations (e.g. 50/hour platform-wide) enforced in the service, to bound DB/email cost even without per-IP accuracy.
+2. Add `CAPTCHA` (hCaptcha or Cloudflare Turnstile) to the registration form before public launch — this is the correct defense against distributed IP rotation, and it keeps the Go service rate-limit as a backstop rather than the primary control.
+3. When Redis is introduced (Section 11.7), use a sliding-window Lua script for the registration limiter.
+
+**Blocks Phase 3 sign-off:** No for closed beta; must be addressed before public launch.
+
+---
+
+### Findings — Low
+
+---
+
+#### L-1: Temporary password entropy is sufficient but derives from UUIDv4 hex — document the dependency (CWE-331 risk awareness)
+
+**Severity:** Low
+
+**File:line:** `lustia/services/auth/internal/service/registration_service.go:93-107`
+
+**Assessment:** `generateTemporaryPassword()` takes the first 16 hex characters of a UUIDv4 produced by `github.com/google/uuid`. The `google/uuid` library generates v4 UUIDs from `crypto/rand`, providing 128 bits of cryptographically random material before the UUID format fields are applied. A UUIDv4 has 6 bits of fixed format (version and variant nibbles), leaving 122 bits of random content across the full 32-hex-char string. The first 16 hex characters (64 bits) include the version nibble (4 bits fixed as `4`) and no variant bits, so the effective entropy of the 16-character prefix is approximately 60 bits. For a one-time-use temporary password delivered via email, 60 bits of entropy is acceptable — it is computationally infeasible to brute-force online, and the password is single-use by design (`must_change_password=true`). However, the implementation is fragile: if `uuid.New()` is ever swapped for a non-CSPRNG source (e.g. in a testing mock that leaks into production via a config flag), the entropy collapses without warning.
+
+**Recommended fix:**
+
+Replace with an explicit `crypto/rand`-backed generator that is obviously correct and does not depend on UUID version semantics:
+
+```go
+import "crypto/rand"
+import "encoding/hex"
+
+func generateTemporaryPassword() string {
+    b := make([]byte, 10) // 80 bits of entropy → 20 hex chars
+    if _, err := rand.Read(b); err != nil {
+        panic("crypto/rand unavailable: " + err.Error())
+    }
+    return hex.EncodeToString(b)
+}
+```
+
+80 bits → 20 hex characters exceeds the Section 2.3 password length minimum (10 chars) and provides comfortable margin above NIST SP 800-63B's 112-bit recommendation for out-of-band tokens. The `panic` on `rand.Read` failure is intentional — if the CSPRNG is unavailable the service should not continue issuing credentials.
+
+**Blocks Phase 3 sign-off:** No — current entropy is adequate. Hardening recommended before production.
+
+---
+
+#### L-2: `ListTenantsQuery.Status` has no allowlist — arbitrary status values forwarded to repository (CWE-20)
+
+**Severity:** Low
+
+**File:line:** `lustia/services/auth/internal/controller/dto_request.go:122`
+
+**Assessment:** `ListTenantsQuery.Status string \`form:"status" binding:"omitempty"\`` accepts any string. It is forwarded via `TenantFilter.Status` to the repository layer, which likely uses it in a `WHERE status = ?` parameterized query — so there is no injection risk. However, passing arbitrary strings to the DB filter returns an empty result set silently rather than a validation error, which is a minor correctness issue and could mask misconfigured clients. Compare: `ListRegistrationsQuery.Status` at line 111 correctly uses `oneof=pending approved rejected all`.
+
+**Recommended fix:**
+```go
+Status string `form:"status" binding:"omitempty,oneof=active suspended deactivated all"`
+```
+
+---
+
+#### L-3: Timezone and country-code fields accept unvalidated strings (CWE-20)
+
+**Severity:** Low
+
+**File:line:** `lustia/services/auth/internal/controller/dto_request.go:146,161`
+
+**Assessment:** `Country` is validated `len=2` which is correct for ISO 3166-1 alpha-2 but does not restrict to known country codes — a caller can send `"XX"` or `"00"`. `Timezone` is validated `max=100` only — arbitrary strings pass through and are stored in the `branch.timezone` JSONB column (actually a text column per the branch model). If the timezone string is later used to call `time.LoadLocation()` in Go or `AT TIME ZONE` in PostgreSQL, an invalid value will cause a runtime error. This is not exploitable for data exfiltration but creates a reliability risk.
+
+**Recommended fix:**
+
+For `Country`: add a custom validator that checks against the ISO 3166-1 alpha-2 list (a static ~250-entry slice).
+
+For `Timezone`: validate against the IANA tz database. Go's `time.LoadLocation(tz)` returns an error for unknown names — call it at validation time:
+```go
+if _, err := time.LoadLocation(req.Timezone); err != nil {
+    return ErrInvalidInput
+}
+```
+This check should live in the service layer (on `CreateBranchInput.Timezone`) rather than the DTO validator, since IANA tz names are runtime data, not a static enum.
+
+---
+
+### Findings — Info
+
+---
+
+#### I-1: JWT `must_change_password` claim read unverified in Edge middleware — accepted design with adequate backstop
+
+**Severity:** Info (not a finding — design assessment)
+
+**File:line:** `lustia/web/tenant-admin/middleware.ts:45-51`
+
+**Assessment:** The Next.js Edge middleware decodes the JWT payload without verifying the RS256 signature (this is explicitly documented in the middleware comment). It reads `claims.must_change_password` to decide whether to redirect to the forced password-change screen. An attacker who controls an `access_token` cookie could craft a JWT with `must_change_password: false` and bypass the frontend redirect gate. However: (1) The backend's `PasswordChangeRequired` middleware enforces the same gate at every protected API endpoint server-side — a crafted token will still be rejected by the server for any state-changing operation. (2) The frontend gate is a UX mechanism, not a security gate. (3) `GET /auth/me` (the first call made by every dashboard Server Component) validates the JWT server-side and returns the current `must_change_password` flag from the DB; the frontend would immediately re-trigger the redirect. The design matches the documented model in Phase 2 (Section 9.1). No fix required.
+
+---
+
+#### I-2: CSRF on server actions — Next.js 15 built-in protection is sufficient
+
+**Severity:** Info (not a finding — design assessment)
+
+**File:line:** `lustia/web/tenant-admin/app/register/actions.ts`, `web/tenant-admin/app/pengaturan/ubah-kata-sandi/actions.ts`
+
+**Assessment:** Next.js 15 Server Actions use the `Same-Origin` enforcement in the `Origin` header check built into the framework since Next.js 14.1 (CVE-2024-34351 addressed the prior bypass). Additionally, server actions are dispatched via a `POST` with a `Next-Action` header that browsers cannot set cross-origin without CORS preflight approval. The tenant-admin app's cookie should be `SameSite=Lax` (or `Strict`) — verify this is set on the `access_token` and `refresh_token` cookies issued by the backend. If `SameSite=None` is used without explicit CSRF tokens, revisit. No fix required under current configuration; flag for `devops-expert` to confirm cookie attributes in the production cookie-setting path.
+
+---
+
+### RLS Bypass Scope Assessment (super_admin deactivation cascade)
+
+The `TransitionStatus` deactivation cascade (`tenant_service.go:103-125`) calls `memberships.SuspendAllForTenant` and `tokens.RevokeAllForTenantUsers`. Both repository methods are parameterized `WHERE tenant_id = ?` queries executed through the standard `lustia_app` connection pool. The `app.current_tenant` session variable is set to `__platform__` for super_admin requests by the JWT middleware (per Section 3.4), which allows the `user` RLS policy's sentinel branch to pass. The `membership` table does not have RLS (it is a platform-level table per the migration comment), so the suspension UPDATE runs without needing the sentinel. The `refresh_token` RLS policy uses a join through `user` — the `RevokeAllForTenantUsers` update targets `WHERE tenant_id = ?` directly on the `refresh_token` table, which requires a `tenant_id` column on that table; the query at `refresh_token_repository.go:75` uses this column. No cross-tenant blast radius was identified: the cascade is correctly scoped to the single target `tenantID` in all three write paths.
+
+---
+
+### Phase 3 Sign-off Recommendation
+
+**Decision: BLOCK — two conditions must be resolved before Phase 3 is considered done.**
+
+| # | Finding | Required action |
+|---|---|---|
+| H-1 | Hardcoded localhost URL in welcome email | Add `TENANT_ADMIN_LOGIN_URL` to `.env.example` required section; add startup fail-fast guard in `main.go`; add to Section 9.4 checklist |
+| H-2 | Full contact email in audit log | Replace `"email": in.ContactEmail` with `"email_prefix": helper.SHA256Prefix(...)` in `registration_service.go:245` |
+
+All Medium findings (M-1 through M-4) are accepted for the current closed-beta window but must be tracked and resolved before public launch. Low and Info findings are hardening recommendations with no sign-off impact.
+
+The Phase 1–2 controls (Argon2id, RS256 JWT, RLS tenant isolation, refresh token rotation, `must_change_password` enforcement) remain sound and were not regressed by Phase 3. The new branch and tenant management endpoints correctly enforce tenant scoping at both the service layer and the RLS layer.
+
+| Date | Change reviewed | Findings | Status |
+|---|---|---|---|
+| 2026-04-23 | Phase 3 delivery — public registration, approval workflow, branch CRUD, change-password UI | **[High — OPEN]** H-1: Hardcoded localhost URL in welcome email (`registration_service.go:86`). **[High — OPEN]** H-2: Full contact email written to audit log (`registration_service.go:245`, Section 7.2 violation). **[Medium]** M-1: Email/slug enumeration via distinct error codes. **[Medium]** M-2: `ChangeTenantStatusRequest.Status` missing `oneof` validation. **[Medium]** M-3: `RequestedSlug` accepts non-slugified characters. **[Medium]** M-4: In-memory rate limiter ineffective against distributed abuse. **[Low]** L-1: Temporary password derives entropy from UUID hex — recommend explicit `crypto/rand`. **[Low]** L-2: `ListTenantsQuery.Status` missing allowlist. **[Low]** L-3: Timezone/country fields accept unvalidated strings. | **BLOCKED — H-1 and H-2 must be resolved** |

@@ -87,4 +87,29 @@ var (
 
 	// ErrBranchNotFound is returned when a branch ID does not resolve.
 	ErrBranchNotFound = errors.New("branch not found")
+
+	// Phase 3 — Tenant Onboarding & Branch Setup (ADR 0008 §2.5).
+
+	// ErrDuplicatePendingRegistration is returned when the same email or slug
+	// already has a pending registration.
+	ErrDuplicatePendingRegistration = errors.New("duplicate pending registration")
+
+	// ErrTenantSlugTaken is returned when the requested slug belongs to an
+	// already-approved tenant.
+	ErrTenantSlugTaken = errors.New("tenant slug already taken")
+
+	// ErrRegistrationNotPending is returned when an approve/reject action is
+	// attempted on a registration that is not in the 'pending' state.
+	ErrRegistrationNotPending = errors.New("registration is not in pending state")
+
+	// ErrInvalidStatusTransition is returned when a requested status change does
+	// not match the allowed state machine transitions.
+	ErrInvalidStatusTransition = errors.New("invalid status transition")
+
+	// ErrBranchLimitReached is returned when creating a new branch would exceed
+	// the tenant's max_branches limit.
+	ErrBranchLimitReached = errors.New("branch limit reached for this tenant")
+
+	// ErrRegistrationNotFound is returned when a registration ID does not resolve.
+	ErrRegistrationNotFound = errors.New("registration not found")
 )

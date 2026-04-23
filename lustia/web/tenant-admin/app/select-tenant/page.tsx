@@ -12,6 +12,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { logoutAction } from "@/app/dashboard/actions";
+import { AppBackground } from "@/components/app-background";
 import { selectTenantAction } from "./actions";
 
 export const metadata: Metadata = {
@@ -82,7 +83,8 @@ export default async function SelectTenantPage() {
   const { user, memberships } = data;
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-emerald-50 px-4 py-12">
+    <AppBackground>
+    <main className="flex min-h-screen flex-col items-center justify-center px-4 py-12">
       <div className="w-full max-w-2xl space-y-8">
         {/* Header */}
         <div className="flex flex-col items-center gap-3 text-center">
@@ -140,6 +142,7 @@ export default async function SelectTenantPage() {
         </div>
       </div>
     </main>
+    </AppBackground>
   );
 }
 

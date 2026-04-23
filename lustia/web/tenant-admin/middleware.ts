@@ -19,15 +19,35 @@ export function middleware(request: NextRequest) {
   const accessTokenCookie = request.cookies.get("access_token");
   const hasSession = accessTokenCookie !== undefined;
 
-  if (pathname.startsWith("/dashboard")) {
+  const isProtected =
+    pathname.startsWith("/dashboard") ||
+    pathname.startsWith("/branches") ||
+    pathname.startsWith("/onboarding") ||
+    pathname.startsWith("/settings") ||
+    pathname.startsWith("/pengaturan");
+
+  if (isProtected) {
     if (!hasSession) {
       return NextResponse.redirect(new URL("/login", request.url));
     }
 
+    const claims = readJWTClaims(accessTokenCookie.value);
+
     // If the token is user-scoped (no active tenant), force tenant selection.
-    const scope = readJWTScope(accessTokenCookie.value);
-    if (scope === "user") {
+    if (claims?.scope === "user") {
       return NextResponse.redirect(new URL("/select-tenant", request.url));
+    }
+
+    // Forced password-change gate: until the flag is cleared, every protected
+    // route funnels to the change-password screen. /pengaturan/ubah-kata-sandi
+    // itself is the only exemption.
+    if (
+      claims?.must_change_password === true &&
+      !pathname.startsWith("/pengaturan/ubah-kata-sandi")
+    ) {
+      const url = new URL("/pengaturan/ubah-kata-sandi", request.url);
+      url.searchParams.set("reason", "required");
+      return NextResponse.redirect(url);
     }
   }
 
@@ -36,26 +56,27 @@ export function middleware(request: NextRequest) {
   }
 
   if (pathname.startsWith("/login") && hasSession) {
-    // Only redirect to dashboard if already fully scoped; otherwise let the
-    // user go to select-tenant (the login action already handled that redirect,
-    // but a direct /login visit after acquiring a user-scoped token should not
-    // loop back to login).
-    const scope = readJWTScope(accessTokenCookie.value);
-    if (scope !== "user") {
-      return NextResponse.redirect(new URL("/dashboard", request.url));
+    const claims = readJWTClaims(accessTokenCookie.value);
+    if (claims?.scope === "user") {
+      return NextResponse.redirect(new URL("/select-tenant", request.url));
     }
-    return NextResponse.redirect(new URL("/select-tenant", request.url));
+    return NextResponse.redirect(new URL("/dashboard", request.url));
   }
 
   return NextResponse.next();
 }
 
+interface JWTClaims {
+  scope?: string;
+  must_change_password?: boolean;
+}
+
 /**
- * Reads the `scope` claim from a JWT without verifying the signature.
- * Safe for Edge runtime — uses atob (available in all modern runtimes).
- * Returns undefined if parsing fails for any reason.
+ * Decodes a JWT payload without verifying the signature. Safe for Edge runtime —
+ * uses atob (available in all modern runtimes). Used only for routing decisions;
+ * the real auth check happens server-side via GET /auth/me.
  */
-function readJWTScope(token: string): string | undefined {
+function readJWTClaims(token: string): JWTClaims | undefined {
   try {
     const segments = token.split(".");
     if (segments.length !== 3) return undefined;
@@ -66,13 +87,24 @@ function readJWTScope(token: string): string | undefined {
       "="
     );
     const json = atob(padded);
-    const payload = JSON.parse(json) as { scope?: string };
-    return payload.scope;
+    return JSON.parse(json) as JWTClaims;
   } catch {
     return undefined;
   }
 }
 
 export const config = {
-  matcher: ["/login", "/dashboard/:path*", "/select-tenant/:path*", "/select-tenant"],
+  matcher: [
+    "/login",
+    "/dashboard/:path*",
+    "/branches/:path*",
+    "/branches",
+    "/onboarding/:path*",
+    "/select-tenant/:path*",
+    "/select-tenant",
+    "/settings/:path*",
+    "/settings",
+    "/pengaturan/:path*",
+    "/pengaturan",
+  ],
 };

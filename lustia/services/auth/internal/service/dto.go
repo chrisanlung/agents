@@ -252,6 +252,241 @@ type ListRolesOutput struct {
 	Roles []RoleDetail
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3 — Registration
+// ---------------------------------------------------------------------------
+
+// RegistrationInput carries the public company-registration submission.
+type RegistrationInput struct {
+	CompanyName   string
+	RequestedSlug string
+	Package       string
+	ContactName   string
+	ContactEmail  string
+	ContactPhone  string
+	IP            string // used for rate limiting
+}
+
+// RegistrationOutput carries the result of a successful registration submission.
+type RegistrationOutput struct {
+	RegistrationID string
+	Status         string
+}
+
+// ApproveRegistrationInput carries the admin's approval decision.
+type ApproveRegistrationInput struct {
+	RegistrationID string
+	CallerUserID   string
+	// Optional overrides — when nil the defaults from the package matrix apply.
+	Package     *string
+	MaxBranches *int
+}
+
+// ApproveRegistrationOutput carries the objects created during approval.
+type ApproveRegistrationOutput struct {
+	Tenant            TenantDetail
+	TenantAdmin       TenantAdminDetail
+	Registration      RegistrationDetail
+}
+
+// TenantDetail is a read-only projection of a Tenant used in approval responses.
+type TenantDetail struct {
+	ID           string
+	Name         string
+	Slug         string
+	Status       string
+	Package      string
+	MaxBranches  int
+	ContactEmail string
+	ContactName  string
+	ApprovedAt   *string // RFC3339 or nil
+	ApprovedBy   *string
+	CreatedAt    string
+}
+
+// TenantAdminDetail carries the newly-created tenant admin user info.
+// TemporaryPassword is returned once in the approval response and also emailed.
+type TenantAdminDetail struct {
+	UserID            string
+	Email             string
+	TemporaryPassword string // plaintext; returned once
+}
+
+// RegistrationDetail is the read-only projection of a TenantRegistration row.
+type RegistrationDetail struct {
+	ID              string
+	CompanyName     string
+	RequestedSlug   string
+	Package         string
+	ContactName     string
+	ContactEmail    string
+	ContactPhone    *string
+	Status          string
+	ApprovedAt      *string
+	ApprovedBy      *string
+	RejectedAt      *string
+	RejectionReason *string
+	CreatedAt       string
+}
+
+// RejectRegistrationInput carries the admin's rejection decision.
+type RejectRegistrationInput struct {
+	RegistrationID string
+	CallerUserID   string
+	Reason         string
+}
+
+// RejectRegistrationOutput carries the updated registration row.
+type RejectRegistrationOutput struct {
+	Registration RegistrationDetail
+}
+
+// ListRegistrationsInput carries filter + pagination for the registration queue.
+type ListRegistrationsInput struct {
+	Status string // pending|approved|rejected|all  (default pending)
+	Cursor string
+	Limit  int
+}
+
+// ListRegistrationsOutput carries a page of registrations.
+type ListRegistrationsOutput struct {
+	Registrations []RegistrationDetail
+	NextCursor    string
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Tenant management
+// ---------------------------------------------------------------------------
+
+// ListTenantsInput carries filter + pagination for the tenant list.
+type ListTenantsInput struct {
+	Status string // pending_approval|active|suspended|deactivated|all
+	Cursor string
+	Limit  int
+}
+
+// ListTenantsOutput carries a page of tenants with aggregate counts.
+type ListTenantsOutput struct {
+	Tenants    []TenantSummary
+	NextCursor string
+}
+
+// TenantSummary is the read-only projection used in the admin tenant list.
+type TenantSummary struct {
+	ID              string
+	Name            string
+	Slug            string
+	Status          string
+	Package         string
+	MaxBranches     int
+	ContactEmail    string
+	ContactName     string
+	ApprovedAt      *string
+	ApprovedBy      *string
+	RejectedAt      *string
+	RejectionReason *string
+	CreatedAt       string
+	MembershipCount int
+	BranchCount     int
+}
+
+// TransitionTenantStatusInput carries the status-change request.
+type TransitionTenantStatusInput struct {
+	TenantID     string
+	CallerUserID string
+	NewStatus    string
+	Reason       string // required for deactivation
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Branches
+// ---------------------------------------------------------------------------
+
+// CreateBranchInput carries data for a new branch.
+type CreateBranchInput struct {
+	CallerUserID   string
+	CallerTenantID string
+	Name           string
+	Code           string
+	AddressLine1   *string
+	AddressLine2   *string
+	City           *string
+	Province       *string
+	PostalCode     *string
+	Country        string
+	Timezone       string
+	ContactPhone   *string
+	ContactEmail   *string
+}
+
+// UpdateBranchInput carries the mutable non-status fields for a branch update.
+type UpdateBranchInput struct {
+	BranchID       string
+	CallerUserID   string
+	CallerTenantID string
+	Name           *string
+	AddressLine1   *string
+	AddressLine2   *string
+	City           *string
+	Province       *string
+	PostalCode     *string
+	Country        *string
+	Timezone       *string
+	ContactPhone   *string
+	ContactEmail   *string
+}
+
+// ChangeBranchStatusInput carries the status-transition request.
+type ChangeBranchStatusInput struct {
+	BranchID       string
+	CallerUserID   string
+	CallerTenantID string
+	NewStatus      string
+}
+
+// BranchDetail is the read-only projection of a Branch row.
+type BranchDetail struct {
+	ID           string
+	TenantID     string
+	Name         string
+	Code         string
+	Status       string
+	AddressLine1 *string
+	AddressLine2 *string
+	City         *string
+	Province     *string
+	PostalCode   *string
+	Country      string
+	Timezone     string
+	ContactPhone *string
+	ContactEmail *string
+	ActivatedAt  *string // RFC3339 or nil
+	CreatedAt    string
+	UpdatedAt    string
+}
+
+// ListBranchesInput carries filter + pagination for the branch list.
+type ListBranchesInput struct {
+	CallerTenantID string
+	Status         string // active|inactive|all
+	Cursor         string
+	Limit          int
+}
+
+// ListBranchesOutput carries a page of branches.
+type ListBranchesOutput struct {
+	Branches   []BranchDetail
+	NextCursor string
+}
+
+// OnboardingStateOutput carries the tenant admin's post-login onboarding state.
+type OnboardingStateOutput struct {
+	HasBranches        bool
+	ActiveBranchCount  int
+	MaxBranches        int
+	MustChangePassword bool
+}
+
 // RoleDetail is a read-only projection of a role with its permissions.
 type RoleDetail struct {
 	ID          string

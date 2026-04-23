@@ -65,6 +65,20 @@ func (r *RefreshTokenRepository) RevokeAllForUser(ctx context.Context, userID st
 	return nil
 }
 
+// RevokeAllForTenantUsers revokes all active refresh tokens that were scoped to
+// the given tenant. Used during tenant deactivation to invalidate in-flight
+// sessions for that tenant.
+func (r *RefreshTokenRepository) RevokeAllForTenantUsers(ctx context.Context, tenantID string) error {
+	db := dbFromContext(ctx, r.db)
+	now := time.Now().UTC()
+	if err := db.Model(&model.RefreshToken{}).
+		Where("tenant_id = ? AND revoked_at IS NULL", tenantID).
+		Update("revoked_at", now).Error; err != nil {
+		return fmt.Errorf("revoke refresh tokens for tenant users: %w", err)
+	}
+	return nil
+}
+
 func (r *RefreshTokenRepository) DeleteExpiredAndRevoked(ctx context.Context) error {
 	db := dbFromContext(ctx, r.db)
 	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)

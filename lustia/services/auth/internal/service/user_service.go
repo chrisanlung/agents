@@ -237,7 +237,7 @@ func (s *UserService) emitAuditCreateUser(userID string, in CreateUserInput, cre
 			ResourceType: "user",
 			ResourceID:  userID,
 			Meta: map[string]interface{}{
-				"email":              in.Email,
+				"email_prefix":       helper.SHA256Prefix(in.Email, 8),
 				"created_user":       createdUser,
 				"created_membership": createdMembership,
 			},

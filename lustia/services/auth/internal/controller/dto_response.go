@@ -121,6 +121,137 @@ type ListRolesResponse struct {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 3 — Registration
+// ---------------------------------------------------------------------------
+
+// CompanyRegistrationResponse is the response for POST /register/company.
+type CompanyRegistrationResponse struct {
+	RegistrationID string `json:"registration_id"`
+	Status         string `json:"status"`
+}
+
+// RegistrationSummaryResponse is the public projection of a tenant_registration row.
+type RegistrationSummaryResponse struct {
+	ID              string  `json:"id"`
+	CompanyName     string  `json:"company_name"`
+	RequestedSlug   string  `json:"requested_slug"`
+	Package         string  `json:"package"`
+	ContactName     string  `json:"contact_name"`
+	ContactEmail    string  `json:"contact_email"`
+	ContactPhone    *string `json:"contact_phone,omitempty"`
+	Status          string  `json:"status"`
+	ApprovedAt      *string `json:"approved_at,omitempty"`
+	ApprovedBy      *string `json:"approved_by,omitempty"`
+	RejectedAt      *string `json:"rejected_at,omitempty"`
+	RejectionReason *string `json:"rejection_reason,omitempty"`
+	CreatedAt       string  `json:"created_at"`
+}
+
+// ListRegistrationsResponse carries a page of registrations.
+type ListRegistrationsResponse struct {
+	Data       []RegistrationSummaryResponse `json:"data"`
+	NextCursor string                        `json:"next_cursor,omitempty"`
+}
+
+// TenantDetailResponse is the full tenant object returned in the approve response.
+type TenantDetailResponse struct {
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	Slug         string  `json:"slug"`
+	Status       string  `json:"status"`
+	Package      string  `json:"package"`
+	MaxBranches  int     `json:"max_branches"`
+	ContactEmail string  `json:"contact_email,omitempty"`
+	ContactName  string  `json:"contact_name,omitempty"`
+	ApprovedAt   *string `json:"approved_at,omitempty"`
+	ApprovedBy   *string `json:"approved_by,omitempty"`
+	CreatedAt    string  `json:"created_at"`
+}
+
+// TenantAdminResponse carries the newly-created tenant admin credentials.
+// TemporaryPassword is returned once and also emailed to the contact.
+type TenantAdminResponse struct {
+	UserID            string `json:"user_id"`
+	Email             string `json:"email"`
+	TemporaryPassword string `json:"temporary_password"`
+}
+
+// ApproveTenantRegistrationResponse is the full approval response.
+type ApproveTenantRegistrationResponse struct {
+	Tenant       TenantDetailResponse        `json:"tenant"`
+	TenantAdmin  TenantAdminResponse         `json:"tenant_admin"`
+	Registration RegistrationSummaryResponse `json:"registration"`
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Tenant management
+// ---------------------------------------------------------------------------
+
+// TenantSummaryResponse is the admin-facing projection of a tenant with counts.
+type TenantSummaryResponse struct {
+	ID              string  `json:"id"`
+	Name            string  `json:"name"`
+	Slug            string  `json:"slug"`
+	Status          string  `json:"status"`
+	Package         string  `json:"package"`
+	MaxBranches     int     `json:"max_branches"`
+	ContactEmail    string  `json:"contact_email,omitempty"`
+	ContactName     string  `json:"contact_name,omitempty"`
+	ApprovedAt      *string `json:"approved_at,omitempty"`
+	ApprovedBy      *string `json:"approved_by,omitempty"`
+	RejectedAt      *string `json:"rejected_at,omitempty"`
+	RejectionReason *string `json:"rejection_reason,omitempty"`
+	CreatedAt       string  `json:"created_at"`
+	MembershipCount int     `json:"membership_count"`
+	BranchCount     int     `json:"branch_count"`
+}
+
+// ListTenantsResponse carries a page of tenants.
+type ListTenantsResponse struct {
+	Data       []TenantSummaryResponse `json:"data"`
+	NextCursor string                  `json:"next_cursor,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Branch management
+// ---------------------------------------------------------------------------
+
+// BranchResponse is the public projection of a branch row.
+type BranchResponse struct {
+	ID           string  `json:"id"`
+	TenantID     string  `json:"tenant_id"`
+	Name         string  `json:"name"`
+	Code         string  `json:"code"`
+	Status       string  `json:"status"`
+	AddressLine1 *string `json:"address_line1,omitempty"`
+	AddressLine2 *string `json:"address_line2,omitempty"`
+	City         *string `json:"city,omitempty"`
+	Province     *string `json:"province,omitempty"`
+	PostalCode   *string `json:"postal_code,omitempty"`
+	Country      string  `json:"country"`
+	Timezone     string  `json:"timezone"`
+	ContactPhone *string `json:"contact_phone,omitempty"`
+	ContactEmail *string `json:"contact_email,omitempty"`
+	ActivatedAt  *string `json:"activated_at,omitempty"`
+	CreatedAt    string  `json:"created_at"`
+	UpdatedAt    string  `json:"updated_at"`
+}
+
+// ListBranchesResponse carries a page of branches.
+type ListBranchesResponse struct {
+	Data       []BranchResponse `json:"data"`
+	NextCursor string           `json:"next_cursor,omitempty"`
+}
+
+// OnboardingStateResponse is the response for GET /tenant/onboarding-state.
+type OnboardingStateResponse struct {
+	HasBranches        bool `json:"has_branches"`
+	ActiveBranchCount  int  `json:"active_branch_count"`
+	MaxBranches        int  `json:"max_branches"`
+	MustChangePassword bool `json:"must_change_password"`
+}
+
+// ---------------------------------------------------------------------------
 // Mapping helpers
 // ---------------------------------------------------------------------------
 
