@@ -8,7 +8,7 @@ import { apiFetch, ApiError } from "@/lib/api";
 import type { BranchListResponse, Branch, OnboardingState } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Table,
   TableBody,
@@ -17,8 +17,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Pagination } from "@/components/pagination";
 import { BranchRowActions } from "./branch-row-actions";
 import { BranchSuccessToast } from "./branch-success-toast";
+
+const PAGE_SIZE = 10;
 
 export const metadata: Metadata = {
   title: "Manajemen Cabang",
@@ -37,14 +40,29 @@ const STATUS_VARIANTS: Record<
   inactive: "muted",
 };
 
-export default async function BranchesPage() {
+interface PageProps {
+  searchParams: Promise<{ page?: string }>;
+}
+
+export default async function BranchesPage({ searchParams }: PageProps) {
+  const { page: pageParam } = await searchParams;
+  const pageNum = Math.max(1, Number(pageParam) || 1);
+
   let branches: Branch[] = [];
+  let totalCount = 0;
+  let totalPages = 0;
+  let currentPage = pageNum;
   let onboardingState: OnboardingState | null = null;
+
+  const branchParams = new URLSearchParams({
+    page: String(pageNum),
+    limit: String(PAGE_SIZE),
+  });
 
   try {
     const [branchRes, onboardingRes] = await Promise.allSettled([
       apiFetch<BranchListResponse>(
-        "/tenant/branches?limit=50",
+        `/tenant/branches?${branchParams.toString()}`,
         {},
         { auth: true }
       ),
@@ -57,6 +75,9 @@ export default async function BranchesPage() {
 
     if (branchRes.status === "fulfilled") {
       branches = branchRes.value.data;
+      totalCount = branchRes.value.total_count;
+      totalPages = branchRes.value.total_pages;
+      currentPage = branchRes.value.page;
     } else if (
       branchRes.reason instanceof ApiError &&
       branchRes.reason.status === 401
@@ -75,11 +96,12 @@ export default async function BranchesPage() {
   }
 
   const maxBranches = onboardingState?.max_branches ?? null;
+  // Active branch count: approximate from current page only (sufficient for limit banner at small scale)
   const activeBranchCount = branches.filter((b) => b.status === "active").length;
   const atLimit =
     maxBranches !== null &&
     maxBranches !== 999 &&
-    branches.length >= maxBranches;
+    totalCount >= maxBranches;
 
   return (
     <div className="space-y-6">
@@ -205,6 +227,16 @@ export default async function BranchesPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Pagination */}
+      <Pagination
+        pathname="/branches"
+        searchParams={{}}
+        page={currentPage}
+        totalPages={totalPages}
+        totalCount={totalCount}
+        pageSize={PAGE_SIZE}
+      />
     </div>
   );
 }

@@ -6,8 +6,8 @@ import { cookies } from "next/headers";
 const ACCESS_TOKEN_COOKIE = "access_token";
 const REFRESH_TOKEN_COOKIE = "refresh_token";
 
-// 15 minutes in seconds (matches auth-service JWT exp claim)
-const ACCESS_TOKEN_MAX_AGE = 15 * 60;
+// 30 minutes in seconds (matches auth-service JWT exp claim)
+const ACCESS_TOKEN_MAX_AGE = 30 * 60;
 
 // 14 days in seconds (matches auth-service refresh token lifetime)
 const REFRESH_TOKEN_MAX_AGE = 14 * 24 * 60 * 60;

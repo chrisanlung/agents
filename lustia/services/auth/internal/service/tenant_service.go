@@ -41,10 +41,21 @@ func NewTenantService(
 
 // List returns a paginated list of tenants visible to a platform admin.
 func (s *TenantService) List(ctx context.Context, in ListTenantsInput) (ListTenantsOutput, error) {
-	rows, cursor, err := s.tenants.List(ctx, TenantFilter{
-		Status: in.Status,
-		Cursor: in.Cursor,
-		Limit:  in.Limit,
+	limit := in.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	page := in.Page
+	if page < 1 {
+		page = 1
+	}
+
+	rows, total, err := s.tenants.List(ctx, TenantFilter{
+		Status:  in.Status,
+		Q:       in.Q,
+		Package: in.Package,
+		Page:    page,
+		Limit:   limit,
 	})
 	if err != nil {
 		return ListTenantsOutput{}, fmt.Errorf("list tenants: %w", err)
@@ -54,9 +65,16 @@ func (s *TenantService) List(ctx context.Context, in ListTenantsInput) (ListTena
 	for i, r := range rows {
 		summaries[i] = toTenantSummary(r)
 	}
+
+	totalPages := 0
+	if total > 0 {
+		totalPages = int((total + int64(limit) - 1) / int64(limit))
+	}
 	return ListTenantsOutput{
 		Tenants:    summaries,
-		NextCursor: cursor,
+		Page:       page,
+		TotalCount: total,
+		TotalPages: totalPages,
 	}, nil
 }
 

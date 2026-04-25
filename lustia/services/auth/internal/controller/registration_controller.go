@@ -85,10 +85,19 @@ func (h *RegistrationController) handleListRegistrations(c *gin.Context) {
 		return
 	}
 
+	page := q.Page
+	if page < 1 {
+		page = 1
+	}
+	limit := q.Limit
+	if limit < 1 {
+		limit = 10
+	}
+
 	out, err := h.svc.ListPending(c.Request.Context(), service.ListRegistrationsInput{
 		Status: q.Status,
-		Cursor: q.Cursor,
-		Limit:  q.Limit,
+		Page:   page,
+		Limit:  limit,
 	})
 	if err != nil {
 		helper.RespondDomainError(c, err)
@@ -101,7 +110,10 @@ func (h *RegistrationController) handleListRegistrations(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, ListRegistrationsResponse{
 		Data:       items,
-		NextCursor: out.NextCursor,
+		Page:       out.Page,
+		Limit:      limit,
+		TotalCount: out.TotalCount,
+		TotalPages: out.TotalPages,
 	})
 }
 

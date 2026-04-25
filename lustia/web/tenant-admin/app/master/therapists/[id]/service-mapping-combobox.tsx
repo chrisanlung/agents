@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useTransition, useRef } from "react";
-import { Search, ChevronDown, Loader2, X } from "lucide-react";
+import Link from "next/link";
+import { Search, ChevronDown, Loader2, X, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
 
@@ -179,9 +180,22 @@ export function ServiceMappingCombobox({
 
             {/* Service list */}
             <div className="max-h-64 overflow-y-auto py-1">
-              {filtered.length === 0 ? (
+              {allServices.length === 0 ? (
+                <div className="space-y-2 px-3 py-4 text-center">
+                  <p className="text-sm text-muted-foreground">
+                    Belum ada layanan di tenant ini.
+                  </p>
+                  <Link
+                    href="/master/services/new"
+                    className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                  >
+                    <Plus size={12} aria-hidden="true" />
+                    Buat layanan pertama
+                  </Link>
+                </div>
+              ) : filtered.length === 0 ? (
                 <p className="px-3 py-4 text-center text-sm text-muted-foreground">
-                  Tidak ada layanan ditemukan
+                  Tidak ada layanan yang cocok dengan pencarian.
                 </p>
               ) : (
                 filtered.map((s) => {

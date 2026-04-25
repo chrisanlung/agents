@@ -64,7 +64,7 @@ type ListUsersQuery struct {
 	RoleID   string `form:"role_id"   binding:"omitempty,uuid"`
 	BranchID string `form:"branch_id" binding:"omitempty,uuid"`
 	IsActive *bool  `form:"is_active"`
-	Cursor   string `form:"cursor"`
+	Page     int    `form:"page"  binding:"omitempty,min=1"`
 	Limit    int    `form:"limit" binding:"omitempty,min=1,max=200"`
 }
 
@@ -111,8 +111,8 @@ type RejectTenantRegistrationRequest struct {
 // ListRegistrationsQuery are query params for GET /admin/tenant-registrations.
 type ListRegistrationsQuery struct {
 	Status string `form:"status" binding:"omitempty,oneof=pending approved rejected all"`
-	Cursor string `form:"cursor"`
-	Limit  int    `form:"limit" binding:"omitempty,min=1,max=200"`
+	Page   int    `form:"page"   binding:"omitempty,min=1"`
+	Limit  int    `form:"limit"  binding:"omitempty,min=1,max=200"`
 }
 
 // ---------------------------------------------------------------------------
@@ -121,9 +121,11 @@ type ListRegistrationsQuery struct {
 
 // ListTenantsQuery are query params for GET /admin/tenants.
 type ListTenantsQuery struct {
-	Status string `form:"status" binding:"omitempty,oneof=active suspended deactivated pending_approval all"`
-	Cursor string `form:"cursor"`
-	Limit  int    `form:"limit" binding:"omitempty,min=1,max=200"`
+	Status  string `form:"status"  binding:"omitempty,oneof=active suspended deactivated pending_approval all"`
+	Q       string `form:"q"       binding:"omitempty,min=2,max=200"`
+	Package string `form:"package" binding:"omitempty,oneof=starter growth enterprise"`
+	Page    int    `form:"page"    binding:"omitempty,min=1"`
+	Limit   int    `form:"limit"   binding:"omitempty,min=1,max=200"`
 }
 
 // ChangeTenantStatusRequest is the JSON body for PATCH /admin/tenants/:id/status.
@@ -175,8 +177,8 @@ type ChangeBranchStatusRequest struct {
 // ListBranchesQuery are query params for GET /tenant/branches.
 type ListBranchesQuery struct {
 	Status string `form:"status" binding:"omitempty,oneof=active inactive all"`
-	Cursor string `form:"cursor"`
-	Limit  int    `form:"limit" binding:"omitempty,min=1,max=200"`
+	Page   int    `form:"page"   binding:"omitempty,min=1"`
+	Limit  int    `form:"limit"  binding:"omitempty,min=1,max=200"`
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +186,8 @@ type ListBranchesQuery struct {
 // ---------------------------------------------------------------------------
 
 // CreateTherapistRequest is the JSON body for POST /tenant/therapists.
+// photo_key is intentionally absent — set only via POST …/therapists/:id/photo
+// (ADR 0011 §2.3.2).
 type CreateTherapistRequest struct {
 	BranchID  string  `json:"branch_id"  binding:"required,uuid"`
 	FullName  string  `json:"full_name"  binding:"required,min=1,max=200"`
@@ -191,20 +195,25 @@ type CreateTherapistRequest struct {
 	Phone     *string `json:"phone"      binding:"omitempty,max=30"`
 	Email     *string `json:"email"      binding:"omitempty,email,max=320"`
 	Bio       *string `json:"bio"        binding:"omitempty,max=500"`
-	PhotoURL  *string `json:"photo_url"  binding:"omitempty,url,max=2048"`
+	HeightCm  int16   `json:"height_cm"  binding:"required,min=100,max=250"`
+	WeightKg  int16   `json:"weight_kg"  binding:"required,min=30,max=250"`
+	Build     string  `json:"build"      binding:"required,oneof=langsing sedang atletis tegap"`
 	JoinedAt  *string `json:"joined_at"  binding:"omitempty"`
 	UserID    *string `json:"user_id"    binding:"omitempty,uuid"`
 }
 
 // UpdateTherapistRequest is the JSON body for PATCH /tenant/therapists/:id.
 // All fields are optional — only provided fields are updated.
+// photo_key is intentionally absent — use POST …/therapists/:id/photo.
 type UpdateTherapistRequest struct {
 	FullName  *string `json:"full_name"  binding:"omitempty,min=1,max=200"`
 	Gender    *string `json:"gender"     binding:"omitempty,oneof=male female other"`
 	Phone     *string `json:"phone"      binding:"omitempty,max=30"`
 	Email     *string `json:"email"      binding:"omitempty,email,max=320"`
 	Bio       *string `json:"bio"        binding:"omitempty,max=500"`
-	PhotoURL  *string `json:"photo_url"  binding:"omitempty,url,max=2048"`
+	HeightCm  *int16  `json:"height_cm"  binding:"omitempty,min=100,max=250"`
+	WeightKg  *int16  `json:"weight_kg"  binding:"omitempty,min=30,max=250"`
+	Build     *string `json:"build"      binding:"omitempty,oneof=langsing sedang atletis tegap"`
 	JoinedAt  *string `json:"joined_at"  binding:"omitempty"`
 	UserID    *string `json:"user_id"    binding:"omitempty,uuid"`
 }
@@ -218,7 +227,7 @@ type ChangeTherapistStatusRequest struct {
 type ListTherapistsQuery struct {
 	BranchID string `form:"branch_id" binding:"omitempty,uuid"`
 	IsActive *bool  `form:"is_active"`
-	Cursor   string `form:"cursor"`
+	Page     int    `form:"page"  binding:"omitempty,min=1"`
 	Limit    int    `form:"limit" binding:"omitempty,min=1,max=200"`
 }
 
@@ -250,7 +259,7 @@ type ChangeServiceStatusRequest struct {
 type ListServicesQuery struct {
 	IsActive *bool   `form:"is_active"`
 	Category *string `form:"category"`
-	Cursor   string  `form:"cursor"`
+	Page     int     `form:"page"  binding:"omitempty,min=1"`
 	Limit    int     `form:"limit" binding:"omitempty,min=1,max=200"`
 }
 
@@ -269,4 +278,109 @@ type AvailabilityWindowRequest struct {
 // PutAvailabilityRequest is the JSON body for PUT /tenant/therapists/:id/availability.
 type PutAvailabilityRequest struct {
 	Windows []AvailabilityWindowRequest `json:"windows" binding:"required"`
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0010 — Tenant-wide add-on catalog (rewritten 2026-04-24).
+// ---------------------------------------------------------------------------
+
+// CreateAddonRequest is the JSON body for POST /tenant/addons.
+type CreateAddonRequest struct {
+	Name        string  `json:"name"        binding:"required,min=1,max=120"`
+	Description *string `json:"description" binding:"omitempty,max=500"`
+	PriceIDR    int64   `json:"price_idr"   binding:"min=0"`
+	SortOrder   int     `json:"sort_order"  binding:"min=0,max=9999"`
+}
+
+// UpdateAddonRequest is the JSON body for PATCH /tenant/addons/:id.
+// All fields are optional — only provided fields are updated.
+type UpdateAddonRequest struct {
+	Name        *string `json:"name"        binding:"omitempty,min=1,max=120"`
+	Description *string `json:"description" binding:"omitempty,max=500"`
+	PriceIDR    *int64  `json:"price_idr"   binding:"omitempty,min=0"`
+	SortOrder   *int    `json:"sort_order"  binding:"omitempty,min=0,max=9999"`
+}
+
+// ChangeAddonStatusRequest is the JSON body for
+// PATCH /tenant/addons/:id/status.
+type ChangeAddonStatusRequest struct {
+	IsActive *bool `json:"is_active" binding:"required"`
+}
+
+// ListAddonsQuery are query parameters for GET /tenant/addons.
+type ListAddonsQuery struct {
+	IsActive *bool `form:"is_active"`
+	Page     int   `form:"page"  binding:"omitempty,min=1"`
+	Limit    int   `form:"limit" binding:"omitempty,min=1,max=200"`
+}
+
+// AddonSortOrderItemRequest is a single (id, sort_order) pair in the reorder
+// request body.
+type AddonSortOrderItemRequest struct {
+	ID        string `json:"id"         binding:"required,uuid"`
+	SortOrder int    `json:"sort_order" binding:"min=0,max=9999"`
+}
+
+// ReorderAddonsRequest is the JSON body for PUT /tenant/addons/reorder.
+type ReorderAddonsRequest struct {
+	Items []AddonSortOrderItemRequest `json:"items" binding:"required,min=1,max=200,dive"`
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0012 — Room (Ruangan) catalog.
+// ---------------------------------------------------------------------------
+
+// CreateRoomRequest is the JSON body for POST /tenant/rooms.
+// photo_key is intentionally absent — set only via POST …/rooms/:id/photo
+// (ADR 0012 §2.5, mirrors ADR 0011 §2.3.2).
+type CreateRoomRequest struct {
+	BranchID    string   `json:"branch_id"   binding:"required,uuid"`
+	Name        string   `json:"name"        binding:"required,min=1,max=120"`
+	Description *string  `json:"description" binding:"omitempty,max=500"`
+	RoomType    string   `json:"room_type"   binding:"required,oneof=single couple group vip"`
+	Capacity    int16    `json:"capacity"    binding:"required,min=1,max=20"`
+	Amenities   []string `json:"amenities"   binding:"omitempty,max=20,dive,max=80"`
+	SortOrder   int      `json:"sort_order"  binding:"min=0,max=9999"`
+}
+
+// UpdateRoomRequest is the JSON body for PATCH /tenant/rooms/:id.
+// All fields are optional — only provided fields are updated.
+// branch_id is intentionally included so the service can detect and reject
+// an attempt to change it (immutability check in RoomSvc.Update).
+type UpdateRoomRequest struct {
+	BranchID    *string  `json:"branch_id"   binding:"omitempty,uuid"`
+	Name        *string  `json:"name"        binding:"omitempty,min=1,max=120"`
+	Description *string  `json:"description" binding:"omitempty,max=500"`
+	RoomType    *string  `json:"room_type"   binding:"omitempty,oneof=single couple group vip"`
+	Capacity    *int16   `json:"capacity"    binding:"omitempty,min=1,max=20"`
+	Amenities   []string `json:"amenities"   binding:"omitempty,max=20,dive,max=80"`
+	SortOrder   *int     `json:"sort_order"  binding:"omitempty,min=0,max=9999"`
+}
+
+// ChangeRoomStatusRequest is the JSON body for PATCH /tenant/rooms/:id/status.
+type ChangeRoomStatusRequest struct {
+	IsActive *bool `json:"is_active" binding:"required"`
+}
+
+// ListRoomsQuery are query parameters for GET /tenant/rooms.
+type ListRoomsQuery struct {
+	BranchID *string `form:"branch_id" binding:"omitempty,uuid"`
+	IsActive *bool   `form:"is_active"`
+	RoomType *string `form:"room_type" binding:"omitempty,oneof=single couple group vip"`
+	Page     int     `form:"page"  binding:"omitempty,min=1"`
+	Limit    int     `form:"limit" binding:"omitempty,min=1,max=200"`
+}
+
+// RoomSortOrderItemRequest is a single (id, sort_order) pair in the reorder
+// request body.
+type RoomSortOrderItemRequest struct {
+	ID        string `json:"id"         binding:"required,uuid"`
+	SortOrder int    `json:"sort_order" binding:"min=0,max=9999"`
+}
+
+// ReorderRoomsRequest is the JSON body for PUT /tenant/rooms/reorder.
+// BranchID scopes the reorder operation — all items must belong to this branch.
+type ReorderRoomsRequest struct {
+	BranchID string                     `json:"branch_id" binding:"required,uuid"`
+	Items    []RoomSortOrderItemRequest `json:"items"     binding:"required,min=1,max=200,dive"`
 }

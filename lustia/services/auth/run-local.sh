@@ -60,6 +60,20 @@ export PASSWORD_RESET_URL_BASE=${PASSWORD_RESET_URL_BASE:-http://localhost:3002/
 # Comma-separated exact origins. Leave unset to disable CORS entirely.
 export CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3001,http://localhost:3002,http://localhost:3003}
 
+# --- Storage (ADR 0011) ---
+# Local driver writes to a sub-directory of the repo checkout (gitignored).
+# Switch to r2/supabase by overriding STORAGE_DRIVER and supplying credentials
+# before sourcing this file. Complete OPERATIONS.md §10.4 before doing so.
+export STORAGE_DRIVER=local
+export STORAGE_LOCAL_PATH="$(pwd)/storage-data/uploads"
+export STORAGE_PUBLIC_BASE_URL=http://localhost:8080/uploads
+export UPLOAD_MAX_MB=5
+export UPLOAD_TENANT_HOURLY_LIMIT=30
+
+# Ensure the local upload directory exists before the service starts.
+# The service itself fails-fast if the path is missing or non-writable (ADR 0011 §2.2).
+mkdir -p "$STORAGE_LOCAL_PATH"
+
 # If invoked with `./run-local.sh run`, actually start the service.
 if [ "${1:-}" = "run" ]; then
     exec go run ./cmd/auth

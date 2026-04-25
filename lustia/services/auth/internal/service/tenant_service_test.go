@@ -32,8 +32,8 @@ func (r *stubTenantRepoForSvc) FindByID(_ context.Context, _ string) (*model.Ten
 	return r.tenant, nil
 }
 func (r *stubTenantRepoForSvc) Save(_ context.Context, _ *model.Tenant) error { return nil }
-func (r *stubTenantRepoForSvc) List(_ context.Context, _ service.TenantFilter) ([]*service.TenantWithCounts, string, error) {
-	return nil, "", nil
+func (r *stubTenantRepoForSvc) List(_ context.Context, _ service.TenantFilter) ([]*service.TenantWithCounts, int64, error) {
+	return nil, 0, nil
 }
 func (r *stubTenantRepoForSvc) UpdateStatus(ctx context.Context, id, newStatus, actor string, reason *string) error {
 	if r.updateStatus != nil {

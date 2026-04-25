@@ -6,7 +6,7 @@ import { cookies } from "next/headers";
 const ACCESS_TOKEN_COOKIE = "access_token";
 const REFRESH_TOKEN_COOKIE = "refresh_token";
 
-const ACCESS_TOKEN_MAX_AGE = 15 * 60;
+const ACCESS_TOKEN_MAX_AGE = 30 * 60;
 const REFRESH_TOKEN_MAX_AGE = 14 * 24 * 60 * 60;
 
 const isProduction = process.env.NODE_ENV === "production";

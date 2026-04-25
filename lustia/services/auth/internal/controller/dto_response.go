@@ -94,10 +94,13 @@ type CreateUserResponse struct {
 	CreatedMembership bool                `json:"created_membership"`
 }
 
-// ListUsersResponse carries a page of users and the next cursor.
+// ListUsersResponse carries a page of users and pagination metadata.
 type ListUsersResponse struct {
 	Data       []UserProfileResponse `json:"data"`
-	NextCursor string                `json:"next_cursor,omitempty"`
+	Page       int                   `json:"page"`
+	Limit      int                   `json:"limit"`
+	TotalCount int64                 `json:"total_count"`
+	TotalPages int                   `json:"total_pages"`
 }
 
 // RoleResponse carries a role with its permissions.
@@ -147,10 +150,13 @@ type RegistrationSummaryResponse struct {
 	CreatedAt       string  `json:"created_at"`
 }
 
-// ListRegistrationsResponse carries a page of registrations.
+// ListRegistrationsResponse carries a page of registrations and pagination metadata.
 type ListRegistrationsResponse struct {
 	Data       []RegistrationSummaryResponse `json:"data"`
-	NextCursor string                        `json:"next_cursor,omitempty"`
+	Page       int                           `json:"page"`
+	Limit      int                           `json:"limit"`
+	TotalCount int64                         `json:"total_count"`
+	TotalPages int                           `json:"total_pages"`
 }
 
 // TenantDetailResponse is the full tenant object returned in the approve response.
@@ -206,10 +212,13 @@ type TenantSummaryResponse struct {
 	BranchCount     int     `json:"branch_count"`
 }
 
-// ListTenantsResponse carries a page of tenants.
+// ListTenantsResponse carries a page of tenants and pagination metadata.
 type ListTenantsResponse struct {
 	Data       []TenantSummaryResponse `json:"data"`
-	NextCursor string                  `json:"next_cursor,omitempty"`
+	Page       int                     `json:"page"`
+	Limit      int                     `json:"limit"`
+	TotalCount int64                   `json:"total_count"`
+	TotalPages int                     `json:"total_pages"`
 }
 
 // ---------------------------------------------------------------------------
@@ -237,10 +246,13 @@ type BranchResponse struct {
 	UpdatedAt    string  `json:"updated_at"`
 }
 
-// ListBranchesResponse carries a page of branches.
+// ListBranchesResponse carries a page of branches and pagination metadata.
 type ListBranchesResponse struct {
 	Data       []BranchResponse `json:"data"`
-	NextCursor string           `json:"next_cursor,omitempty"`
+	Page       int              `json:"page"`
+	Limit      int              `json:"limit"`
+	TotalCount int64            `json:"total_count"`
+	TotalPages int              `json:"total_pages"`
 }
 
 // OnboardingStateResponse is the response for GET /tenant/onboarding-state.
@@ -268,20 +280,25 @@ type TherapistServiceItemResponse struct {
 }
 
 // TherapistResponse is the public projection of a therapist row (§11.4 shared shape).
+// PhotoURL is resolved from the stored photo_key at the controller boundary
+// (ADR 0011 §2.1). photo_key is never exposed directly over the wire.
 type TherapistResponse struct {
-	ID          string                         `json:"id"`
-	TenantID    string                         `json:"tenant_id"`
-	BranchID    string                         `json:"branch_id"`
-	UserID      *string                        `json:"user_id"`
-	FullName    string                         `json:"full_name"`
-	Gender      *string                        `json:"gender"`
-	Bio         *string                        `json:"bio"`
-	PhotoURL    *string                        `json:"photo_url"`
-	Specialties []string                       `json:"specialties"`
-	IsActive    bool                           `json:"is_active"`
-	JoinedAt    *string                        `json:"joined_at"`
-	CreatedAt   string                         `json:"created_at"`
-	UpdatedAt   string                         `json:"updated_at"`
+	ID          string   `json:"id"`
+	TenantID    string   `json:"tenant_id"`
+	BranchID    string   `json:"branch_id"`
+	UserID      *string  `json:"user_id"`
+	FullName    string   `json:"full_name"`
+	Gender      *string  `json:"gender"`
+	Bio         *string  `json:"bio"`
+	PhotoURL    *string  `json:"photo_url"`    // resolved URL; null when no photo
+	HeightCm    int16    `json:"height_cm"`
+	WeightKg    int16    `json:"weight_kg"`
+	Build       string   `json:"build"`
+	Specialties []string `json:"specialties"`
+	IsActive    bool     `json:"is_active"`
+	JoinedAt    *string  `json:"joined_at"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
 }
 
 // TherapistDetailResponse extends TherapistResponse with the services array
@@ -291,10 +308,13 @@ type TherapistDetailResponse struct {
 	Services []TherapistServiceItemResponse `json:"services"`
 }
 
-// ListTherapistsResponse carries a page of therapists.
+// ListTherapistsResponse carries a page of therapists and pagination metadata.
 type ListTherapistsResponse struct {
 	Data       []TherapistResponse `json:"data"`
-	NextCursor string              `json:"next_cursor,omitempty"`
+	Page       int                 `json:"page"`
+	Limit      int                 `json:"limit"`
+	TotalCount int64               `json:"total_count"`
+	TotalPages int                 `json:"total_pages"`
 }
 
 // ServiceResponse is the public projection of a service row (§11.5 shared shape).
@@ -322,17 +342,43 @@ type ServiceTherapistItemResponse struct {
 	IsActive    bool   `json:"is_active"`
 }
 
-// ServiceDetailResponse extends ServiceResponse with the therapists array for
-// GET /tenant/services/:id.
+// ServiceDetailResponse extends ServiceResponse with the therapists array
+// for GET /tenant/services/:id. Add-ons are a separate tenant-wide resource
+// accessed via GET /tenant/addons (ADR 0010 rewrite 2026-04-24).
 type ServiceDetailResponse struct {
 	ServiceResponse
 	Therapists []ServiceTherapistItemResponse `json:"therapists"`
 }
 
-// ListServicesResponse carries a page of services.
+// AddonResponse is the public projection of an addon row (ADR 0010).
+// tenant_id is intentionally omitted — it is implicit from the JWT.
+type AddonResponse struct {
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Description *string `json:"description"`
+	PriceIDR    int64   `json:"price_idr"`
+	IsActive    bool    `json:"is_active"`
+	SortOrder   int     `json:"sort_order"`
+	CreatedAt   string  `json:"created_at"`
+	UpdatedAt   string  `json:"updated_at"`
+}
+
+// ListAddonsResponse is the response for GET /tenant/addons.
+type ListAddonsResponse struct {
+	Data       []AddonResponse `json:"data"`
+	Page       int             `json:"page"`
+	Limit      int             `json:"limit"`
+	TotalCount int64           `json:"total_count"`
+	TotalPages int             `json:"total_pages"`
+}
+
+// ListServicesResponse carries a page of services and pagination metadata.
 type ListServicesResponse struct {
 	Data       []ServiceResponse `json:"data"`
-	NextCursor string            `json:"next_cursor,omitempty"`
+	Page       int               `json:"page"`
+	Limit      int               `json:"limit"`
+	TotalCount int64             `json:"total_count"`
+	TotalPages int               `json:"total_pages"`
 }
 
 // TherapistMappingResponse is the response for GET/PUT /therapists/:id/services.
@@ -353,6 +399,39 @@ type AvailabilityWindowResponse struct {
 type AvailabilityResponse struct {
 	TherapistID string                       `json:"therapist_id"`
 	Windows     []AvailabilityWindowResponse `json:"windows"`
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0012 — Room (Ruangan) catalog.
+// ---------------------------------------------------------------------------
+
+// RoomResponse is the public projection of a room row (ADR 0012 §2.3).
+// tenant_id and photo_key are intentionally omitted:
+//   - tenant_id is implicit from the JWT (lesson from addon code-review).
+//   - photo_key is an opaque internal storage key; controllers resolve it to
+//     photo_url via Storage.URL before building the response.
+type RoomResponse struct {
+	ID          string   `json:"id"`
+	BranchID    string   `json:"branch_id"`
+	Name        string   `json:"name"`
+	Description *string  `json:"description"`
+	RoomType    string   `json:"room_type"`
+	Capacity    int16    `json:"capacity"`
+	Amenities   []string `json:"amenities"`
+	PhotoURL    *string  `json:"photo_url"`  // resolved URL; null when no photo
+	IsActive    bool     `json:"is_active"`
+	SortOrder   int      `json:"sort_order"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+}
+
+// ListRoomsResponse is the response for GET /tenant/rooms.
+type ListRoomsResponse struct {
+	Data       []RoomResponse `json:"data"`
+	Page       int            `json:"page"`
+	Limit      int            `json:"limit"`
+	TotalCount int64          `json:"total_count"`
+	TotalPages int            `json:"total_pages"`
 }
 
 // ---------------------------------------------------------------------------

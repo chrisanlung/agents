@@ -34,40 +34,43 @@ func (r *BranchRepository) FindByID(ctx context.Context, id string) (*model.Bran
 	return &m, nil
 }
 
-// FindByTenant returns a cursor-paginated list of non-deleted branches for a
-// given tenant, with an optional status filter.
-func (r *BranchRepository) FindByTenant(ctx context.Context, tenantID string, filter service.BranchFilter) ([]*model.Branch, string, error) {
+// FindByTenant returns an offset-paginated list of non-deleted branches for a
+// given tenant, with an optional status filter, plus the total matching count.
+func (r *BranchRepository) FindByTenant(ctx context.Context, tenantID string, filter service.BranchFilter) ([]*model.Branch, int64, error) {
 	db := dbFromContext(ctx, r.db)
 
 	limit := filter.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
+	page := filter.Page
+	if page < 1 {
+		page = 1
+	}
 
-	q := db.Where("tenant_id = ? AND deleted_at IS NULL", tenantID)
+	q := db.Model(&model.Branch{}).Where("tenant_id = ? AND deleted_at IS NULL", tenantID)
 	if filter.Status != "" && filter.Status != "all" {
 		q = q.Where("status = ?", filter.Status)
 	}
-	if filter.Cursor != "" {
-		q = q.Where("created_at < (SELECT created_at FROM branch WHERE id = ?)", filter.Cursor)
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("count branches: %w", err)
 	}
 
 	var rows []model.Branch
-	if err := q.Order("created_at DESC").Limit(limit + 1).Find(&rows).Error; err != nil {
-		return nil, "", fmt.Errorf("find branches by tenant: %w", err)
-	}
-
-	var nextCursor string
-	if len(rows) > limit {
-		rows = rows[:limit]
-		nextCursor = rows[len(rows)-1].ID
+	if err := q.Order("created_at DESC").
+		Offset((page - 1) * limit).
+		Limit(limit).
+		Find(&rows).Error; err != nil {
+		return nil, 0, fmt.Errorf("find branches by tenant: %w", err)
 	}
 
 	out := make([]*model.Branch, len(rows))
 	for i := range rows {
 		out[i] = &rows[i]
 	}
-	return out, nextCursor, nil
+	return out, total, nil
 }
 
 // Save inserts a new branch row.

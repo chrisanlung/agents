@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/chrisanlung/lustia-auth/internal/constants"
@@ -60,14 +61,38 @@ type tenantListRow struct {
 	BranchCount     int `gorm:"column:branch_count"`
 }
 
-// List returns a cursor-paginated list of tenants with optional status filter.
+// List returns an offset-paginated list of tenants with optional status filter,
+// plus the total matching count.
 // Counts are computed via SQL subqueries to avoid N+1 queries.
-func (r *TenantRepository) List(ctx context.Context, filter service.TenantFilter) ([]*service.TenantWithCounts, string, error) {
+func (r *TenantRepository) List(ctx context.Context, filter service.TenantFilter) ([]*service.TenantWithCounts, int64, error) {
 	db := dbFromContext(ctx, r.db)
 
 	limit := filter.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 50
+	}
+	page := filter.Page
+	if page < 1 {
+		page = 1
+	}
+
+	// COUNT query uses a plain table scan with the same WHERE predicates.
+	countQ := db.Table("tenant").Where("deleted_at IS NULL")
+	if filter.Status != "" && filter.Status != "all" {
+		countQ = countQ.Where("status = ?", filter.Status)
+	}
+	if filter.Package != "" {
+		countQ = countQ.Where("package = ?", filter.Package)
+	}
+	if filter.Q != "" {
+		// Trigram-indexed substring match on lower(name) OR lower(slug).
+		// pg_trgm GIN indexes (migration 000023) make this O(log n).
+		needle := "%" + strings.ToLower(filter.Q) + "%"
+		countQ = countQ.Where("lower(name) LIKE ? OR lower(slug) LIKE ?", needle, needle)
+	}
+	var total int64
+	if err := countQ.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("count tenants: %w", err)
 	}
 
 	q := db.Table("tenant AS t").
@@ -79,22 +104,20 @@ func (r *TenantRepository) List(ctx context.Context, filter service.TenantFilter
 	if filter.Status != "" && filter.Status != "all" {
 		q = q.Where("t.status = ?", filter.Status)
 	}
-	if filter.Cursor != "" {
-		q = q.Where("t.created_at < (SELECT created_at FROM tenant WHERE id = ?)", filter.Cursor)
+	if filter.Package != "" {
+		q = q.Where("t.package = ?", filter.Package)
 	}
-
-	// Fetch one extra to determine whether a next page exists.
-	q = q.Order("t.created_at DESC").Limit(limit + 1)
+	if filter.Q != "" {
+		needle := "%" + strings.ToLower(filter.Q) + "%"
+		q = q.Where("lower(t.name) LIKE ? OR lower(t.slug) LIKE ?", needle, needle)
+	}
 
 	var rows []tenantListRow
-	if err := q.Scan(&rows).Error; err != nil {
-		return nil, "", fmt.Errorf("list tenants: %w", err)
-	}
-
-	var nextCursor string
-	if len(rows) > limit {
-		rows = rows[:limit]
-		nextCursor = rows[len(rows)-1].ID
+	if err := q.Order("t.created_at DESC").
+		Offset((page - 1) * limit).
+		Limit(limit).
+		Scan(&rows).Error; err != nil {
+		return nil, 0, fmt.Errorf("list tenants: %w", err)
 	}
 
 	out := make([]*service.TenantWithCounts, len(rows))
@@ -106,7 +129,7 @@ func (r *TenantRepository) List(ctx context.Context, filter service.TenantFilter
 		}
 		out[i] = tc
 	}
-	return out, nextCursor, nil
+	return out, total, nil
 }
 
 // UpdateStatus writes a status transition, setting the appropriate timestamp

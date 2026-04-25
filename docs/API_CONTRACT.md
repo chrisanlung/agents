@@ -2,7 +2,7 @@
 
 _Owned by `go-expert`. Consumed by `nextjs-expert` and `flutter-expert`. Changes require frontend sign-off._
 
-_Last updated: 2026-04-22 (Phase 4 — Master Operational Data)_
+_Last updated: 2026-04-25 (ADR 0012 — Room (Ruangan) catalog)_
 
 ---
 
@@ -15,7 +15,7 @@ _Last updated: 2026-04-22 (Phase 4 — Master Operational Data)_
 | Content-Type | `application/json` (request + response) |
 | Timestamps | RFC 3339 UTC — `2026-04-18T12:00:00Z` |
 | Request ID | `X-Request-ID` header — echoed back in response; generated if absent |
-| Pagination | Cursor-based: `?cursor=<opaque>&limit=<int>` → `{"data": [...], "next_cursor": "..."}`. Absent `next_cursor` means last page. |
+| Pagination | Offset-based (ADR 0013): `?page=<int>&limit=<int>` → `{"data": [...], "page": 1, "limit": 10, "total_count": 47, "total_pages": 5}`. Page is 1-indexed. Missing page defaults to 1. |
 | Versioning | URL-based `/api/v1`; breaking changes bump to `/api/v2` |
 
 ### 1.1 Error Envelope
@@ -439,7 +439,7 @@ Creates a new user within the authenticated admin's tenant. The initial password
 
 #### `GET /api/v1/admin/users`
 
-Lists users in the authenticated admin's tenant with optional filters and cursor pagination.
+Lists users in the authenticated admin's tenant with optional filters and offset pagination.
 
 **Required permission:** `user.read`
 
@@ -450,19 +450,20 @@ Lists users in the authenticated admin's tenant with optional filters and cursor
 | `role_id` | UUID | Filter by role assignment |
 | `branch_id` | UUID | Filter by branch assignment |
 | `is_active` | bool | Filter by active status |
-| `cursor` | string | Opaque pagination cursor from previous response |
-| `limit` | int | 1–200, default 50 |
+| `page` | int | 1-indexed page number, default 1 |
+| `limit` | int | 1–200, default 10 |
 
 **Response `200 OK`**
 
 ```json
 {
   "data": [ { ...UserProfileResponse }, ... ],
-  "next_cursor": "opaque-cursor-string"
+  "page": 1,
+  "limit": 10,
+  "total_count": 47,
+  "total_pages": 5
 }
 ```
-
-`next_cursor` is absent when there are no more results.
 
 ---
 
@@ -642,7 +643,7 @@ All endpoints require `Authorization: Bearer <access_token>` with `scope=platfor
 
 **Required permission:** `tenant.approve`
 
-**Query parameters:** `status=pending|approved|rejected|all` (default `pending`), `cursor`, `limit` (1–200, default 50).
+**Query parameters:** `status=pending|approved|rejected|all` (default `pending`), `page` (default 1), `limit` (1–200, default 10).
 
 **Response `200 OK`**
 
@@ -665,7 +666,10 @@ All endpoints require `Authorization: Bearer <access_token>` with `scope=platfor
       "created_at": "2026-04-22T10:00:00Z"
     }
   ],
-  "next_cursor": null
+  "page": 1,
+  "limit": 10,
+  "total_count": 12,
+  "total_pages": 2
 }
 ```
 
@@ -715,7 +719,7 @@ Side effects (single transaction): creates tenant, user, membership, assigns `te
 
 **Required permission:** `tenant.read`
 
-**Query parameters:** `status=pending_approval|active|suspended|deactivated|all`, `cursor`, `limit`.
+**Query parameters:** `status=pending_approval|active|suspended|deactivated|all`, `page` (default 1), `limit` (1–200, default 10).
 
 **Response `200 OK`**
 
@@ -733,7 +737,10 @@ Side effects (single transaction): creates tenant, user, membership, assigns `te
       "branch_count": 1
     }
   ],
-  "next_cursor": null
+  "page": 1,
+  "limit": 10,
+  "total_count": 24,
+  "total_pages": 3
 }
 ```
 
@@ -794,9 +801,9 @@ All endpoints require `Authorization: Bearer <access_token>` with `scope=tenant`
 
 **Required permission:** `branch.read`
 
-**Query:** `status=active|inactive|all`, `cursor`, `limit`.
+**Query:** `status=active|inactive|all`, `page` (default 1), `limit` (1–200, default 10).
 
-**Response `200 OK`** — `{ "data": [...BranchResponse], "next_cursor": "..." }`.
+**Response `200 OK`** — `{ "data": [...BranchResponse], "page": 1, "limit": 10, "total_count": 3, "total_pages": 1 }`.
 
 ### `GET /api/v1/tenant/branches/:id`
 
@@ -892,6 +899,10 @@ The following codes must be added to `constants/error_codes.go` during implement
 | `THERAPIST_HAS_ACTIVE_BOOKINGS` | 409 | Soft-delete attempted on a therapist with future non-terminal bookings (enforced in Phase 5; service layer must check once bookings table is populated) |
 | `AVAILABILITY_OVERLAP` | 409 | A submitted availability window overlaps an existing window for the same therapist on the same day |
 | `CROSS_BRANCH_FORBIDDEN` | 403 | `branch_admin` attempted to create or mutate a therapist or availability window outside their assigned branch |
+| `UPLOAD_QUOTA_EXCEEDED` | 429 | Tenant has exceeded `UPLOAD_TENANT_HOURLY_LIMIT` uploads in the current hour (in-memory sliding window; resets on service restart) |
+| `INVALID_IMAGE_FORMAT` | 400 | Uploaded file is not JPEG, PNG, or WebP |
+| `IMAGE_TOO_LARGE` | 400 | File exceeds `UPLOAD_MAX_MB` after processing |
+| `IMAGE_DIMENSIONS_TOO_LARGE` | 400 | Image width or height exceeds 4096 px |
 
 ---
 
@@ -955,7 +966,10 @@ All endpoints in this group require `Authorization: Bearer <access_token>` with 
   "full_name": "Siti Rahma",
   "gender": "female",
   "bio": "Berpengalaman 5 tahun dalam pijat relaksasi.",
-  "photo_url": null,
+  "photo_url": "http://localhost:8080/uploads/therapists/uuid/a1b2c3d4e5f6a7b8.jpg",
+  "height_cm": 165,
+  "weight_kg": 55,
+  "build": "sedang",
   "specialties": [],
   "is_active": true,
   "joined_at": "2026-01-15T00:00:00Z",
@@ -964,7 +978,7 @@ All endpoints in this group require `Authorization: Bearer <access_token>` with 
 }
 ```
 
-`user_id`, `gender`, `bio`, `photo_url` are `null` when not set. `specialties` is always an array (empty or populated). `joined_at` is the value stored in `therapist.joined_at`; it may differ from `created_at` if the admin back-fills an existing therapist's start date.
+`user_id`, `gender`, `bio`, `photo_url` are `null` when not set. `photo_url` is the resolved public URL — the server stores an opaque storage key and resolves it at response time; clients must not attempt to construct this URL themselves. `height_cm`, `weight_kg`, `build` are always present (non-null). `specialties` is always an array (empty or populated). `joined_at` is the value stored in `therapist.joined_at`; it may differ from `created_at` if the admin back-fills an existing therapist's start date.
 
 ---
 
@@ -986,7 +1000,9 @@ Creates a new therapist profile scoped to a branch within the caller's tenant.
   "phone": "+628123456789",
   "email": "siti@example.com",
   "bio": "Berpengalaman 5 tahun dalam pijat relaksasi.",
-  "photo_url": null,
+  "height_cm": 165,
+  "weight_kg": 55,
+  "build": "sedang",
   "joined_at": "2026-01-15",
   "user_id": null
 }
@@ -1000,9 +1016,13 @@ Creates a new therapist profile scoped to a branch within the caller's tenant.
 | `phone` | string | optional, max=30 |
 | `email` | string | optional, valid email, max=320 |
 | `bio` | string | optional, max=500 |
-| `photo_url` | string | optional, valid URL, max=2048 |
+| `height_cm` | int | **required**, 100–250 (whole centimetres) |
+| `weight_kg` | int | **required**, 30–250 (whole kilograms) |
+| `build` | string | **required**, oneof=`langsing sedang atletis tegap` |
 | `joined_at` | string | optional, RFC 3339 date (`YYYY-MM-DD`) |
 | `user_id` | string | optional, uuid — must be an active member of the same tenant if provided |
+
+**Note:** `photo_url` / `photo_key` are NOT accepted in the request body. Use `POST /therapists/:id/photo` to set a photo.
 
 **Response `201 Created`** — TherapistResponse (see §11.4 shared shape)
 
@@ -1022,7 +1042,7 @@ Creates a new therapist profile scoped to a branch within the caller's tenant.
 
 #### 11.4.2 `GET /api/v1/tenant/therapists`
 
-Lists therapists within the caller's tenant. Cursor-paginated.
+Lists therapists within the caller's tenant. Offset-paginated (ADR 0013).
 
 **Required permission:** `therapist.read`
 
@@ -1032,8 +1052,8 @@ Lists therapists within the caller's tenant. Cursor-paginated.
 |---|---|---|
 | `branch_id` | uuid | Filter to a single branch. A `branch_admin` always sees only their assigned branches regardless of this filter. |
 | `is_active` | bool | `true` (default) / `false` / absent = active only. Pass `is_active=false` to list deactivated therapists. Soft-deleted rows (`deleted_at IS NOT NULL`) are never returned. |
-| `cursor` | string | Opaque cursor from previous response |
-| `limit` | int | 1–200, default 50 |
+| `page` | int | 1-indexed page number, default 1 |
+| `limit` | int | 1–200, default 10 |
 
 **Default sort:** `full_name ASC`, then `created_at ASC` as tiebreaker.
 
@@ -1042,11 +1062,12 @@ Lists therapists within the caller's tenant. Cursor-paginated.
 ```json
 {
   "data": [ { ...TherapistResponse } ],
-  "next_cursor": "opaque-cursor-string"
+  "page": 1,
+  "limit": 10,
+  "total_count": 23,
+  "total_pages": 3
 }
 ```
-
-`next_cursor` absent on last page.
 
 **Errors**
 
@@ -1120,7 +1141,9 @@ Updates profile fields. Partial update — only provided fields are changed.
   "phone": "+628129999999",
   "email": "siti.new@example.com",
   "bio": "Updated bio.",
-  "photo_url": "https://storage.example/siti.jpg",
+  "height_cm": 165,
+  "weight_kg": 55,
+  "build": "atletis",
   "joined_at": "2026-01-01",
   "user_id": "uuid"
 }
@@ -1133,11 +1156,13 @@ Updates profile fields. Partial update — only provided fields are changed.
 | `phone` | string | optional, max=30 |
 | `email` | string | optional, valid email, max=320 |
 | `bio` | string | optional, max=500 |
-| `photo_url` | string | optional, valid URL, max=2048 |
+| `height_cm` | int | optional, 100–250 |
+| `weight_kg` | int | optional, 30–250 |
+| `build` | string | optional, oneof=`langsing sedang atletis tegap` |
 | `joined_at` | string | optional, RFC 3339 date (`YYYY-MM-DD`) |
 | `user_id` | string | optional, uuid — must be an active member of the same tenant if non-null |
 
-`branch_id` is not patchable — branch assignment is immutable after creation.
+`branch_id` is not patchable — branch assignment is immutable after creation. `photo_url` / `photo_key` are not patchable here — use the photo upload endpoint.
 
 **Response `200 OK`** — updated TherapistResponse (without `services` array; use `GET /:id` to reload services)
 
@@ -1209,6 +1234,72 @@ Soft-deletes a therapist. Sets `deleted_at = now()` and `is_active = false` atom
 
 ---
 
+#### 11.4.7 `POST /api/v1/tenant/therapists/:id/photo`
+
+Uploads a photo for a therapist. Replaces any previously uploaded photo. Returns the full updated TherapistResponse (with `photo_url` resolved).
+
+**Required permission:** `therapist.update`
+
+**Cross-branch rule:** same as §11.4.4.
+
+**Content-Type:** `multipart/form-data`
+
+**Form field:** `photo` (file) — required. Accepted formats: JPEG, PNG, WebP. Max size: `UPLOAD_MAX_MB` (default 5 MiB).
+
+**Server-side pipeline (enforced in order):**
+1. Body-size hard cap via `MaxBytesReader`.
+2. Multipart parse (1 MiB in-memory spill).
+3. MIME sniff — reject non-image content types.
+4. Structural validation via `image.DecodeConfig` — kills polyglot files.
+5. Dimension ceiling: max 4096×4096 px.
+6. Re-encode via `imaging.Fit(1024, 1024)` — strips EXIF/metadata.
+7. Per-tenant hourly quota check (`UPLOAD_TENANT_HOURLY_LIMIT`, default 30).
+8. Storage write (key: `therapists/{id}/{16-hex}.{ext}`).
+9. DB UPDATE in transaction.
+10. Fire-and-forget delete of old key after transaction commits.
+
+**Response `200 OK`** — full TherapistDetailResponse (same shape as `GET /:id`)
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Missing `photo` field or multipart parse failure |
+| 400 | `INVALID_IMAGE_FORMAT` | File is not JPEG, PNG, or WebP |
+| 400 | `IMAGE_TOO_LARGE` | File exceeds `UPLOAD_MAX_MB` after processing |
+| 400 | `IMAGE_DIMENSIONS_TOO_LARGE` | Image exceeds 4096×4096 px |
+| 400 | `VALIDATION` | Structural decode failure (polyglot / corrupted file) |
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `therapist.update` |
+| 403 | `CROSS_BRANCH_FORBIDDEN` | Branch mismatch for `branch_admin` |
+| 404 | `THERAPIST_NOT_FOUND` | Therapist not found |
+| 429 | `UPLOAD_QUOTA_EXCEEDED` | Tenant has exceeded the per-hour upload limit |
+
+**Side-effects:** audit log event `therapist.photo_uploaded`.
+
+---
+
+#### 11.4.8 `DELETE /api/v1/tenant/therapists/:id/photo`
+
+Removes the photo for a therapist. Sets `photo_key = NULL` on the row and schedules deletion of the storage object.
+
+**Required permission:** `therapist.update`
+
+**Cross-branch rule:** same as §11.4.4.
+
+**Response `204 No Content`**
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `therapist.update` |
+| 403 | `CROSS_BRANCH_FORBIDDEN` | Branch mismatch for `branch_admin` |
+| 404 | `THERAPIST_NOT_FOUND` | Therapist not found |
+
+**Side-effects:** audit log event `therapist.photo_removed`.
+
+---
+
 ### 11.5 Service Endpoints
 
 All endpoints in this group require `Authorization: Bearer <access_token>` with `scope=tenant`. Services are tenant-scoped — no `branch_id` filter applies.
@@ -1276,7 +1367,7 @@ Creates a new service in the caller's tenant.
 
 #### 11.5.2 `GET /api/v1/tenant/services`
 
-Lists services within the caller's tenant. Cursor-paginated.
+Lists services within the caller's tenant. Offset-paginated (ADR 0013).
 
 **Required permission:** `service.read`
 
@@ -1286,8 +1377,8 @@ Lists services within the caller's tenant. Cursor-paginated.
 |---|---|---|
 | `is_active` | bool | `true` (default) / `false` / absent = active only. Soft-deleted rows never returned. |
 | `category` | string | Case-sensitive string filter against `service.category`. No validation — free-form. |
-| `cursor` | string | Opaque cursor from previous response |
-| `limit` | int | 1–200, default 50 |
+| `page` | int | 1-indexed page number, default 1 |
+| `limit` | int | 1–200, default 10 |
 
 **Default sort:** `name ASC`, then `created_at ASC` as tiebreaker.
 
@@ -1296,7 +1387,10 @@ Lists services within the caller's tenant. Cursor-paginated.
 ```json
 {
   "data": [ { ...ServiceResponse } ],
-  "next_cursor": "opaque-cursor-string"
+  "page": 1,
+  "limit": 10,
+  "total_count": 18,
+  "total_pages": 2
 }
 ```
 
@@ -1658,3 +1752,458 @@ The `operational_hours` array shape mirrors the JSONB stored in `branch.operatio
 |---|---|---|
 | 403 | `INSUFFICIENT_PERMISSION` | Missing `branch.read` |
 | 404 | `NOT_FOUND` | Branch not found or belongs to a different tenant |
+
+---
+
+## 12. Add-on Catalog (ADR 0010)
+
+_Rewritten 2026-04-24. Owned by `go-expert`. Implements ADR 0010 — tenant-wide add-on catalog (not per-service). The original per-service draft from the same session is superseded in full._
+
+Add-ons are **tenant-wide** optional paid extras. Any add-on in the tenant's catalog is available alongside any service during a booking. No mapping table. See `docs/DECISIONS/0010-per-service-addons.md` for full rationale.
+
+---
+
+### 12.1 New Error Codes (ADR 0010)
+
+| Code | HTTP Status | Meaning |
+|---|---|---|
+| `ADDON_NOT_FOUND` | 404 | Add-on does not exist, is soft-deleted, or belongs to a different tenant |
+| `DUPLICATE_ADDON_NAME` | 409 | An active add-on with the same name already exists for this tenant (partial unique index on `(tenant_id, name) WHERE deleted_at IS NULL`) |
+
+---
+
+### 12.2 Permission Matrix (ADR 0010)
+
+Add-ons are a standalone tenant resource. New `addon.*` permission namespace — distinct from `service.*` so future roles can diverge.
+
+| Operation | Required permission | Roles granted |
+|---|---|---|
+| List / get add-on | `addon.read` | `super_admin`, `tenant_admin`, `branch_admin` |
+| Create add-on | `addon.create` | `super_admin`, `tenant_admin` |
+| Update add-on | `addon.update` | `super_admin`, `tenant_admin` |
+| Soft-delete add-on | `addon.delete` | `super_admin`, `tenant_admin` |
+| Reorder add-ons | `addon.update` | `super_admin`, `tenant_admin` |
+| Change add-on status | `addon.update` | `super_admin`, `tenant_admin` |
+
+All endpoints require `scope=tenant` in the JWT. `branch_admin` is **read-only** on add-ons — they cannot mutate the tenant catalog.
+
+---
+
+### 12.3 Shared Response Shape — AddonResponse
+
+```json
+{
+  "id": "uuid",
+  "name": "Aromaterapi Premium",
+  "description": "Minyak esensial lavender pilihan.",
+  "price_idr": 35000,
+  "is_active": true,
+  "sort_order": 0,
+  "created_at": "2026-04-24T10:00:00Z",
+  "updated_at": "2026-04-24T10:00:00Z"
+}
+```
+
+`description` is `null` when not set. `tenant_id` is intentionally omitted — it is implicit from the JWT and enforced by RLS.
+
+---
+
+### 12.4 Add-on Endpoints
+
+All endpoints require `Authorization: Bearer <access_token>` with `scope=tenant`.
+
+---
+
+#### 12.4.1 `GET /api/v1/tenant/addons`
+
+Lists all non-soft-deleted add-ons for the caller's tenant. Offset-paginated (ADR 0013), default page size 10, max 200 per page. Both active and inactive rows returned by default (admin view).
+
+**Required permission:** `addon.read`
+
+**Query parameters**
+
+| Param | Type | Description |
+|---|---|---|
+| `is_active` | bool | Optional. `true` = active only; `false` = inactive only; absent = all non-deleted |
+| `page` | int | 1-indexed page number, default 1 |
+| `limit` | int | Page size 1–200, default 10 |
+
+**Default sort:** `sort_order ASC`, then `created_at ASC`, then `id ASC` as tiebreaker.
+
+**Response `200 OK`**
+
+```json
+{
+  "data": [ { ...AddonResponse } ],
+  "page": 1,
+  "limit": 10,
+  "total_count": 8,
+  "total_pages": 1
+}
+```
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `addon.read` |
+
+---
+
+#### 12.4.2 `GET /api/v1/tenant/addons/:id`
+
+Returns a single add-on by ID. Cross-tenant IDs return `404` (IDOR guard).
+
+**Required permission:** `addon.read`
+
+**Response `200 OK`** — AddonResponse
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `addon.read` |
+| 404 | `ADDON_NOT_FOUND` | Add-on not found, soft-deleted, or belongs to a different tenant |
+
+---
+
+#### 12.4.3 `POST /api/v1/tenant/addons`
+
+Creates a new tenant-wide add-on. `tenant_id` is taken from the JWT — never from the request body.
+
+**Required permission:** `addon.create`
+
+**Request**
+
+```json
+{
+  "name": "Aromaterapi Premium",
+  "description": "Minyak esensial lavender pilihan.",
+  "price_idr": 35000,
+  "sort_order": 0
+}
+```
+
+| Field | Type | Validation |
+|---|---|---|
+| `name` | string | required, min=1, max=120 (unicode rune count) |
+| `description` | string | optional, max=500 |
+| `price_idr` | int64 | required, min=0 — whole Rupiah, no decimal |
+| `sort_order` | int | optional, default=0, min=0, max=9999 |
+
+**Response `201 Created`** — AddonResponse (`is_active` defaults to `true`)
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Binding failure or service-layer length/range check |
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `addon.create` |
+| 409 | `DUPLICATE_ADDON_NAME` | Active add-on with same name already exists for this tenant |
+
+---
+
+#### 12.4.4 `PATCH /api/v1/tenant/addons/:id`
+
+Updates add-on fields. Partial update — only provided fields are changed.
+
+**Required permission:** `addon.update`
+
+**Request**
+
+```json
+{
+  "name": "Aromaterapi",
+  "description": "Updated description.",
+  "price_idr": 30000,
+  "sort_order": 1
+}
+```
+
+| Field | Type | Validation |
+|---|---|---|
+| `name` | string | optional, min=1, max=120 |
+| `description` | string | optional, max=500 |
+| `price_idr` | int64 | optional, min=0 |
+| `sort_order` | int | optional, min=0, max=9999 |
+
+**Response `200 OK`** — updated AddonResponse
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Binding failure or constraint violation |
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `addon.update` |
+| 404 | `ADDON_NOT_FOUND` | Add-on not found, soft-deleted, or belongs to a different tenant |
+| 409 | `DUPLICATE_ADDON_NAME` | Name change conflicts with existing active add-on |
+
+---
+
+#### 12.4.5 `PATCH /api/v1/tenant/addons/:id/status`
+
+Activates or deactivates an add-on without soft-deleting it.
+
+**Required permission:** `addon.update`
+
+**Request**
+
+```json
+{ "is_active": false }
+```
+
+| Field | Type | Validation |
+|---|---|---|
+| `is_active` | bool | required |
+
+**Response `200 OK`** — updated AddonResponse
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Missing or non-boolean `is_active` |
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `addon.update` |
+| 404 | `ADDON_NOT_FOUND` | Add-on not found |
+
+---
+
+#### 12.4.6 `DELETE /api/v1/tenant/addons/:id`
+
+Soft-deletes an add-on. Sets `deleted_at = now()` and `is_active = false`. Excluded from all subsequent list queries. No hard-DELETE is issued (DB grant does not permit it).
+
+**Required permission:** `addon.delete`
+
+**Response `204 No Content`**
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `addon.delete` |
+| 404 | `ADDON_NOT_FOUND` | Add-on not found |
+
+**Side-effects:** audit log event `addon.deleted`.
+
+---
+
+#### 12.4.7 `PUT /api/v1/tenant/addons/reorder`
+
+Bulk-updates `sort_order` for multiple add-ons atomically (all-or-nothing in one transaction). All provided IDs must belong to the caller's tenant; any foreign or nonexistent ID aborts the entire request (IDOR guard).
+
+**Required permission:** `addon.update`
+
+**Request**
+
+```json
+{
+  "items": [
+    { "id": "uuid-b", "sort_order": 0 },
+    { "id": "uuid-a", "sort_order": 1 },
+    { "id": "uuid-c", "sort_order": 2 }
+  ]
+}
+```
+
+| Field | Type | Validation |
+|---|---|---|
+| `items` | []object | required, min=1, max=200 |
+| `items[].id` | string | required, uuid |
+| `items[].sort_order` | int | required, min=0, max=9999 |
+
+**Response `204 No Content`**
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Binding failure or empty items list |
+| 403 | `INSUFFICIENT_PERMISSION` | Missing `addon.update` |
+| 404 | `ADDON_NOT_FOUND` | One or more IDs not found, soft-deleted, or belong to a different tenant |
+
+**Atomicity guarantee:** the entire bulk update succeeds or fails together. Partial updates are not possible.
+
+---
+
+## 13. Rooms (Ruangan) Catalog (ADR 0012)
+
+**Base path:** `/api/v1/tenant/rooms`
+**Auth:** `scope=tenant` + listed permission on every route.
+**Branch-scope rule:** callers with role `branch_admin` may only create, read, update, delete, and reorder rooms that belong to a branch in their JWT `branches` claim. Attempting to act on a room in a foreign branch returns `403 CROSS_BRANCH_FORBIDDEN`.
+
+### Room object
+
+```json
+{
+  "id": "uuid",
+  "branch_id": "uuid",
+  "name": "VIP 1",
+  "description": "Ruangan premium dengan shower dan TV",
+  "room_type": "vip",
+  "capacity": 2,
+  "amenities": ["shower", "tv", "aromaterapi"],
+  "photo_url": "https://…/uploads/rooms/…/abc.jpg",
+  "is_active": true,
+  "sort_order": 0,
+  "created_at": "2026-04-25T10:00:00Z",
+  "updated_at": "2026-04-25T10:00:00Z"
+}
+```
+
+`tenant_id` and `photo_key` are **never** included in any response. `photo_url` is `null` when no photo has been uploaded. `amenities` is always a JSON array (never `null`); empty array `[]` means no amenities.
+
+### 13.1 List rooms
+
+`GET /api/v1/tenant/rooms`  **Permission:** `room.read`
+
+**Query parameters**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `branch_id` | uuid (optional) | Filter by branch |
+| `is_active` | bool (optional) | Filter by active status; absent returns all non-deleted |
+| `room_type` | string (optional) | One of `single`, `couple`, `group`, `vip` |
+| `page` | int (optional) | 1-indexed page number, default 1 |
+| `limit` | int (optional) | 1–200, default 10 |
+
+**Response `200 OK`**
+
+```json
+{ "data": [ { "…room object…" } ], "page": 1, "limit": 10, "total_count": 6, "total_pages": 1 }
+```
+
+**Errors:** `400 VALIDATION`, `403 INSUFFICIENT_PERMISSION`.
+
+### 13.2 Get room
+
+`GET /api/v1/tenant/rooms/:id`  **Permission:** `room.read`
+
+**Response `200 OK`** — room object.
+
+**Errors:** `404 ROOM_NOT_FOUND` when not found, soft-deleted, or cross-tenant.
+
+### 13.3 Create room
+
+`POST /api/v1/tenant/rooms`  **Permission:** `room.create`
+
+`photo_key` is NOT settable via this endpoint — upload photo via `POST /:id/photo` after first save.
+
+**Request body**
+
+| Field | Type | Validation |
+|---|---|---|
+| `branch_id` | string | required, uuid |
+| `name` | string | required, 1–120 chars |
+| `description` | string | optional, max 500 chars |
+| `room_type` | string | required, one of `single`, `couple`, `group`, `vip` |
+| `capacity` | int | required, 1–20 |
+| `amenities` | []string | optional, max 20 elements, each element max 80 chars; service normalises (lowercase, dedup, trim) |
+| `sort_order` | int | optional, 0–9999, default 0 |
+
+**Response `201 Created`** — room object.
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Binding failure or service-layer validation |
+| 403 | `CROSS_BRANCH_FORBIDDEN` | `branch_admin` targeting a branch not in their JWT |
+| 404 | `NOT_FOUND` | `branch_id` does not exist or does not belong to caller's tenant |
+| 409 | `DUPLICATE_ROOM_NAME` | Name already used in the same branch |
+
+### 13.4 Update room
+
+`PATCH /api/v1/tenant/rooms/:id`  **Permission:** `room.update`
+
+All fields optional. `branch_id` is **immutable**: supplying a different value returns `400 ROOM_BRANCH_IMMUTABLE`. Supplying the same value is allowed.
+
+**Request body fields:** `name`, `description`, `room_type`, `capacity`, `amenities`, `sort_order` (all optional).
+
+**Response `200 OK`** — updated room object.
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `ROOM_BRANCH_IMMUTABLE` | `branch_id` in body differs from stored value |
+| 403 | `CROSS_BRANCH_FORBIDDEN` | `branch_admin` — room belongs to foreign branch |
+| 404 | `ROOM_NOT_FOUND` | Not found or soft-deleted |
+| 409 | `DUPLICATE_ROOM_NAME` | Updated name already used in same branch |
+
+### 13.5 Change room status
+
+`PATCH /api/v1/tenant/rooms/:id/status`  **Permission:** `room.update`
+
+**Request:** `{ "is_active": false }`
+
+**Response `200 OK`** — updated room object.
+
+**Errors:** `403 CROSS_BRANCH_FORBIDDEN`, `404 ROOM_NOT_FOUND`.
+
+### 13.6 Soft-delete room
+
+`DELETE /api/v1/tenant/rooms/:id`  **Permission:** `room.delete`
+
+Sets `deleted_at = now()` and `is_active = false`. No hard DELETE.
+
+**Response `204 No Content`**
+
+**Errors:** `403 CROSS_BRANCH_FORBIDDEN`, `404 ROOM_NOT_FOUND`.
+
+### 13.7 Reorder rooms (bulk)
+
+`PUT /api/v1/tenant/rooms/reorder`  **Permission:** `room.update`
+
+Atomically updates `sort_order` for a batch of rooms. All items must belong to the specified `branch_id`. Max 200 items.
+
+**Request body**
+
+| Field | Type | Validation |
+|---|---|---|
+| `branch_id` | string | required, uuid — all items must belong to this branch |
+| `items` | []object | required, min=1, max=200 |
+| `items[].id` | string | required, uuid |
+| `items[].sort_order` | int | required, 0–9999 |
+
+**Response `204 No Content`**
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | Binding failure, any item belongs to a different branch, or sort_order out of range |
+| 403 | `CROSS_BRANCH_FORBIDDEN` | `branch_admin` — `branch_id` not in their JWT |
+| 404 | `ROOM_NOT_FOUND` | One or more IDs not found, soft-deleted, or cross-tenant |
+
+**Atomicity guarantee:** entire bulk update succeeds or fails together.
+
+### 13.8 Upload room photo
+
+`POST /api/v1/tenant/rooms/:id/photo`  **Permission:** `room.update`
+
+`Content-Type: multipart/form-data`, field name `photo`. Accepted: JPEG, PNG, WebP. Max size: `UPLOAD_MAX_MB` (default 5 MiB). Max dimensions: 4096×4096 px. EXIF stripped on upload. Per-tenant hourly quota **shared** with therapist uploads.
+
+Storage key format: `rooms/{room_id}/{16-hex}.{ext}`.
+
+**Response `200 OK`** — updated room object (with `photo_url` resolved).
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `INVALID_IMAGE_FORMAT` | Not JPEG, PNG, or WebP |
+| 400 | `IMAGE_TOO_LARGE` | Exceeds `UPLOAD_MAX_MB` |
+| 400 | `IMAGE_DIMENSIONS_TOO_LARGE` | Width or height exceeds 4096 px |
+| 403 | `CROSS_BRANCH_FORBIDDEN` | `branch_admin` on foreign branch |
+| 404 | `ROOM_NOT_FOUND` | Not found or soft-deleted |
+| 429 | `UPLOAD_QUOTA_EXCEEDED` | Per-tenant hourly limit reached |
+
+### 13.9 Remove room photo
+
+`DELETE /api/v1/tenant/rooms/:id/photo`  **Permission:** `room.update`
+
+Clears `photo_key` on the room row; schedules async deletion of the old storage object.
+
+**Response `204 No Content`**
+
+**Errors:** `403 CROSS_BRANCH_FORBIDDEN`, `404 ROOM_NOT_FOUND`.

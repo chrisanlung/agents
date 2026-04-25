@@ -1,9 +1,16 @@
-import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Plus, Inbox, AlertCircle } from "lucide-react";
+import { Plus, Sparkles, AlertCircle } from "lucide-react";
+
+import { cn, categoryColorClass } from "@/lib/utils";
 
 import { apiFetch, ApiError } from "@/lib/api";
+import { handleApiError } from "@/lib/auth-guard";
+import { FilterSelect } from "@/components/filter-select";
+import { FilterBar } from "@/components/filter-bar";
+import { Pagination } from "@/components/pagination";
+
+const PAGE_SIZE = 10;
 import type { ServiceListResponse, Service } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -23,7 +30,11 @@ export const metadata: Metadata = {
 };
 
 interface PageProps {
-  searchParams: Promise<{ is_active?: string; category?: string }>;
+  searchParams: Promise<{
+    is_active?: string;
+    category?: string;
+    page?: string;
+  }>;
 }
 
 function formatPrice(priceIdr: number): string {
@@ -35,13 +46,17 @@ function formatPrice(priceIdr: number): string {
 }
 
 export default async function ServicesPage({ searchParams }: PageProps) {
-  const { is_active, category } = await searchParams;
+  const { is_active, category, page: pageParam } = await searchParams;
+  const pageNum = Math.max(1, Number(pageParam) || 1);
 
   let services: Service[] = [];
+  let totalCount = 0;
+  let totalPages = 0;
+  let currentPage = pageNum;
   let allCategories: string[] = [];
   let fetchError = false;
 
-  const params = new URLSearchParams({ limit: "50" });
+  const params = new URLSearchParams({ page: String(pageNum), limit: String(PAGE_SIZE) });
   if (is_active) params.set("is_active", is_active);
   if (category) params.set("category", category);
 
@@ -62,9 +77,14 @@ export default async function ServicesPage({ searchParams }: PageProps) {
 
     if (servicesRes.status === "fulfilled") {
       services = servicesRes.value.data;
+      totalCount = servicesRes.value.total_count;
+      totalPages = servicesRes.value.total_pages;
+      currentPage = servicesRes.value.page;
     } else {
       const err = servicesRes.reason;
-      if (err instanceof ApiError && err.status === 401) redirect("/login");
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        await handleApiError(err);
+      }
       fetchError = true;
     }
 
@@ -75,22 +95,7 @@ export default async function ServicesPage({ searchParams }: PageProps) {
         .filter((c): c is string => !!c && !seen.has(c) && seen.add(c) !== undefined);
     }
   } catch (err) {
-    if (err instanceof ApiError && err.status === 401) redirect("/login");
-    throw err;
-  }
-
-  function buildUrl(patch: Record<string, string | undefined>) {
-    const p = new URLSearchParams();
-    const merged = {
-      is_active,
-      category,
-      ...patch,
-    };
-    Object.entries(merged).forEach(([k, v]) => {
-      if (v !== undefined && v !== "") p.set(k, v);
-    });
-    const qs = p.toString();
-    return `/master/services${qs ? `?${qs}` : ""}`;
+    await handleApiError(err);
   }
 
   return (
@@ -98,12 +103,12 @@ export default async function ServicesPage({ searchParams }: PageProps) {
       {/* Page header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold text-foreground">Layanan</h1>
+          <h1 className="text-xl font-semibold text-foreground sm:text-2xl">Layanan</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Kelola katalog layanan untuk semua cabang
           </p>
         </div>
-        <Button asChild>
+        <Button asChild className="w-full sm:w-auto">
           <Link href="/master/services/new">
             <Plus size={16} aria-hidden="true" />
             Tambah Layanan
@@ -112,57 +117,33 @@ export default async function ServicesPage({ searchParams }: PageProps) {
       </div>
 
       {/* Filter bar */}
-      <div className="flex flex-wrap items-center gap-2">
+      <FilterBar
+        isActive={!!(is_active || category)}
+        resetHref="/master/services"
+      >
         {allCategories.length > 0 && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-sm text-muted-foreground">Kategori:</span>
-            <Link
-              href={buildUrl({ category: undefined })}
-              className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                !category
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted text-muted-foreground hover:bg-muted/80"
-              }`}
-            >
-              Semua
-            </Link>
-            {allCategories.map((cat) => (
-              <Link
-                key={cat}
-                href={buildUrl({ category: cat })}
-                className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                  category === cat
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-muted text-muted-foreground hover:bg-muted/80"
-                }`}
-              >
-                {cat}
-              </Link>
-            ))}
-          </div>
+          <FilterSelect
+            label="Kategori"
+            name="category"
+            current={category}
+            options={[
+              { value: "", label: "Semua" },
+              ...allCategories.map((c) => ({ value: c, label: c })),
+            ]}
+          />
         )}
 
-        <div className="flex items-center gap-1.5">
-          <span className="text-sm text-muted-foreground">Status:</span>
-          {[
-            { label: "Semua", value: undefined },
-            { label: "Aktif", value: "true" },
-            { label: "Nonaktif", value: "false" },
-          ].map(({ label, value }) => (
-            <Link
-              key={label}
-              href={buildUrl({ is_active: value })}
-              className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                is_active === value || (!is_active && value === undefined)
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted text-muted-foreground hover:bg-muted/80"
-              }`}
-            >
-              {label}
-            </Link>
-          ))}
-        </div>
-      </div>
+        <FilterSelect
+          label="Status"
+          name="is_active"
+          current={is_active}
+          options={[
+            { value: "", label: "Semua" },
+            { value: "true", label: "Aktif" },
+            { value: "false", label: "Nonaktif" },
+          ]}
+        />
+      </FilterBar>
 
       {/* Error state */}
       {fetchError && (
@@ -171,61 +152,85 @@ export default async function ServicesPage({ searchParams }: PageProps) {
           className="flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800"
         >
           <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-600" aria-hidden="true" />
-          <span>Gagal memuat data. Coba muat ulang halaman.</span>
+          <span>Gagal memuat data. Muat ulang halaman.</span>
         </div>
       )}
 
       {/* Table */}
       <Card>
-        <CardContent className="p-0">
+        <CardContent className="overflow-x-auto p-0">
           {!fetchError && services.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-              <Inbox size={36} className="text-muted-foreground/40" aria-hidden="true" />
-              <p className="text-sm text-muted-foreground">
-                Belum ada layanan. Tambahkan layanan pertama untuk memulai.
-              </p>
-              <Button asChild size="sm">
-                <Link href="/master/services/new">
-                  <Plus size={14} aria-hidden="true" />
-                  Tambah Layanan
-                </Link>
-              </Button>
+              <Sparkles size={40} className="text-muted-foreground/50" aria-hidden="true" />
+              <div className="space-y-1">
+                <p className="text-sm text-muted-foreground">
+                  {is_active === "false"
+                    ? "Tidak ada layanan nonaktif."
+                    : is_active === "true"
+                      ? "Tidak ada layanan aktif saat ini."
+                      : category
+                        ? `Tidak ada layanan pada kategori "${category}".`
+                        : "Belum ada layanan."}
+                </p>
+                {!is_active && !category && (
+                  <p className="text-xs text-muted-foreground/80">
+                    Tambahkan layanan yang tersedia di spa Anda.
+                  </p>
+                )}
+              </div>
+              {!is_active && !category && (
+                <Button asChild size="sm">
+                  <Link href="/master/services/new">
+                    <Plus size={14} aria-hidden="true" />
+                    Tambah Layanan
+                  </Link>
+                </Button>
+              )}
             </div>
           ) : (
-            <Table>
-              <TableHeader>
+            <Table className="min-w-[480px]">
+              <TableHeader className="bg-muted/30">
                 <TableRow>
                   <TableHead>Nama</TableHead>
                   <TableHead>Kategori</TableHead>
                   <TableHead>Durasi</TableHead>
                   <TableHead>Harga</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Aksi</TableHead>
+                  <TableHead>Aksi</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {services.map((s) => (
-                  <TableRow key={s.id}>
+                  <TableRow key={s.id} className="h-14">
                     <TableCell className="font-medium">{s.name}</TableCell>
                     <TableCell>
                       {s.category ? (
-                        <Badge variant="outline">{s.category}</Badge>
+                        <Badge
+                          variant="outline"
+                          className={cn("border", categoryColorClass(s.category))}
+                        >
+                          {s.category}
+                        </Badge>
                       ) : (
                         <span className="text-muted-foreground">—</span>
                       )}
                     </TableCell>
-                    <TableCell className="tabular-nums text-sm text-muted-foreground">
-                      {s.duration_minutes} menit
+                    <TableCell>
+                      <Badge variant="outline" className="tabular-nums font-normal">
+                        {s.duration_minutes} menit
+                      </Badge>
                     </TableCell>
-                    <TableCell className="tabular-nums text-sm">
-                      {formatPrice(s.price_idr)}
+                    <TableCell>
+                      <Badge variant="outline" className="tabular-nums font-normal">
+                        {formatPrice(s.price_idr)}
+                      </Badge>
                     </TableCell>
                     <TableCell>
                       <Badge variant={s.is_active ? "success" : "muted"}>
                         {s.is_active ? "Aktif" : "Nonaktif"}
                       </Badge>
                     </TableCell>
-                    <TableCell className="text-right">
+                    <TableCell>
                       <ServiceRowActions service={s} />
                     </TableCell>
                   </TableRow>
@@ -235,6 +240,16 @@ export default async function ServicesPage({ searchParams }: PageProps) {
           )}
         </CardContent>
       </Card>
+
+      {/* Pagination */}
+      <Pagination
+        pathname="/master/services"
+        searchParams={{ is_active, category }}
+        page={currentPage}
+        totalPages={totalPages}
+        totalCount={totalCount}
+        pageSize={PAGE_SIZE}
+      />
     </div>
   );
 }

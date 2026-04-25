@@ -7,7 +7,7 @@ const appName = process.env.NEXT_PUBLIC_APP_NAME ?? "Lustia Platform Console";
 
 interface RegistrationListResponse {
   data: Array<{ id: string }>;
-  next_cursor: string | null;
+  total_count: number;
 }
 
 export default async function TenantsLayout({

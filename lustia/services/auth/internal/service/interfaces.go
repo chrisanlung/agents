@@ -6,10 +6,31 @@ package service
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"github.com/chrisanlung/lustia-auth/internal/model"
 )
+
+// ---------------------------------------------------------------------------
+// ADR 0011 — Storage abstraction (consumer-owned, declared in service package).
+// ---------------------------------------------------------------------------
+
+// Storage is the interface for object storage adapters.
+// Implementations live in internal/helper/storage/ and are wired in main.go.
+//
+// Design rationale (ADR 0011 §2.1):
+//   - Upload takes io.Reader to avoid buffering the whole file in memory.
+//   - URL is context-aware and error-returning: R2/Supabase signed-URL
+//     generation can fail; locking the correct signature now prevents a
+//     breaking change later.
+//   - Delete is best-effort; callers log and continue. Deleting a missing key
+//     is not an error.
+type Storage interface {
+	Upload(ctx context.Context, key string, r io.Reader, mimeType string) error
+	Delete(ctx context.Context, key string) error
+	URL(ctx context.Context, key string) (string, error)
+}
 
 // ---------------------------------------------------------------------------
 // Repository interfaces (consumer-owned — declared next to the service that
@@ -21,7 +42,7 @@ type UserRepository interface {
 	// FindByEmail looks up a user globally by email with no tenant filter.
 	FindByEmail(ctx context.Context, email string) (*model.User, error)
 	FindByID(ctx context.Context, id string) (*model.User, error)
-	FindByTenant(ctx context.Context, tenantID string, filter UserFilter) ([]*model.User, string, error)
+	FindByTenant(ctx context.Context, tenantID string, filter UserFilter) ([]*model.User, int64, error)
 	// Save inserts a new user row (used by registration approval).
 	Save(ctx context.Context, u *model.User) error
 	Update(ctx context.Context, u *model.User) error
@@ -36,7 +57,7 @@ type UserFilter struct {
 	RoleID   *string
 	BranchID *string
 	IsActive *bool
-	Cursor   string
+	Page     int
 	Limit    int
 }
 
@@ -73,9 +94,9 @@ type TenantRepository interface {
 	FindByID(ctx context.Context, id string) (*model.Tenant, error)
 	// Save inserts a new tenant row. Used by registration approval.
 	Save(ctx context.Context, t *model.Tenant) error
-	// List returns a filtered, cursor-paginated slice of tenants together with
-	// denormalised membership_count and branch_count per row.
-	List(ctx context.Context, filter TenantFilter) ([]*TenantWithCounts, string, error)
+	// List returns a filtered, offset-paginated slice of tenants together with
+	// denormalised membership_count and branch_count per row, plus total count.
+	List(ctx context.Context, filter TenantFilter) ([]*TenantWithCounts, int64, error)
 	// UpdateStatus writes a status transition plus the associated actor and
 	// reason. reason may be nil for non-rejection transitions.
 	UpdateStatus(ctx context.Context, id, newStatus, actorUserID string, reason *string) error
@@ -85,9 +106,11 @@ type TenantRepository interface {
 
 // TenantFilter carries optional filters for the tenant list query.
 type TenantFilter struct {
-	Status string // empty = all
-	Cursor string
-	Limit  int
+	Status  string // empty = all
+	Q       string // trigram substring match on lower(name) OR lower(slug); min 2 chars enforced at controller
+	Package string // empty = all
+	Page    int
+	Limit   int
 }
 
 // TenantWithCounts wraps a Tenant with read-only aggregate counters.
@@ -100,7 +123,7 @@ type TenantWithCounts struct {
 // BranchRepository is the interface for branch persistence.
 type BranchRepository interface {
 	FindByID(ctx context.Context, id string) (*model.Branch, error)
-	FindByTenant(ctx context.Context, tenantID string, filter BranchFilter) ([]*model.Branch, string, error)
+	FindByTenant(ctx context.Context, tenantID string, filter BranchFilter) ([]*model.Branch, int64, error)
 	Save(ctx context.Context, b *model.Branch) error
 	Update(ctx context.Context, b *model.Branch) error
 	UpdateStatus(ctx context.Context, id, newStatus string, activatedAt *time.Time) error
@@ -110,7 +133,7 @@ type BranchRepository interface {
 // BranchFilter carries optional filters for the branch list query.
 type BranchFilter struct {
 	Status string // empty = all non-deleted
-	Cursor string
+	Page   int
 	Limit  int
 }
 
@@ -120,14 +143,14 @@ type RegistrationRepository interface {
 	FindByID(ctx context.Context, id string) (*model.TenantRegistration, error)
 	FindPendingByEmail(ctx context.Context, email string) (*model.TenantRegistration, error)
 	FindPendingBySlug(ctx context.Context, slug string) (*model.TenantRegistration, error)
-	List(ctx context.Context, filter RegistrationFilter) ([]*model.TenantRegistration, string, error)
+	List(ctx context.Context, filter RegistrationFilter) ([]*model.TenantRegistration, int64, error)
 	Update(ctx context.Context, r *model.TenantRegistration) error
 }
 
 // RegistrationFilter carries optional filters for the registration list query.
 type RegistrationFilter struct {
 	Status string // empty = pending
-	Cursor string
+	Page   int
 	Limit  int
 }
 
@@ -242,23 +265,27 @@ type TherapistRepository interface {
 	// FindByID returns a non-deleted therapist by primary key.
 	// Returns ErrTherapistNotFound when no matching row exists.
 	FindByID(ctx context.Context, id string) (*model.Therapist, error)
-	// FindByTenant returns a cursor-paginated list of non-deleted therapists
-	// for the given tenant, applying optional filters.
-	FindByTenant(ctx context.Context, tenantID string, filter TherapistFilter) ([]*model.Therapist, string, error)
+	// FindByTenant returns an offset-paginated list of non-deleted therapists
+	// for the given tenant, applying optional filters, plus the total count.
+	FindByTenant(ctx context.Context, tenantID string, filter TherapistFilter) ([]*model.Therapist, int64, error)
 	// Update writes the mutable profile columns of an existing therapist row.
 	Update(ctx context.Context, t *model.Therapist) error
 	// UpdateStatus sets is_active for a therapist row.
 	UpdateStatus(ctx context.Context, id string, isActive bool) error
 	// SoftDelete sets deleted_at and is_active=false on the therapist row.
 	SoftDelete(ctx context.Context, id string) error
+	// UpdatePhotoKey atomically swaps the photo_key for a therapist row within
+	// the caller's transaction context.  Returns the old key so the caller can
+	// schedule a background delete after the transaction commits.
+	UpdatePhotoKey(ctx context.Context, id string, newKey *string, updatedBy string) (oldKey *string, err error)
 }
 
 // TherapistFilter carries optional filters for the therapist list query.
 type TherapistFilter struct {
 	BranchID  *string
-	IsActive  *bool  // nil = active only
+	IsActive  *bool    // nil = active only
 	BranchIDs []string // when non-empty, restricts to these branch IDs (branch_admin scope)
-	Cursor    string
+	Page      int
 	Limit     int
 }
 
@@ -269,9 +296,9 @@ type ServiceCatalogRepository interface {
 	// FindByID returns a non-deleted service by primary key.
 	// Returns ErrServiceNotFound when no matching row exists.
 	FindByID(ctx context.Context, id string) (*model.ServiceCatalog, error)
-	// FindByTenant returns a cursor-paginated list of non-deleted services for
-	// the given tenant, applying optional filters.
-	FindByTenant(ctx context.Context, tenantID string, filter ServiceFilter) ([]*model.ServiceCatalog, string, error)
+	// FindByTenant returns an offset-paginated list of non-deleted services for
+	// the given tenant, applying optional filters, plus the total count.
+	FindByTenant(ctx context.Context, tenantID string, filter ServiceFilter) ([]*model.ServiceCatalog, int64, error)
 	// Update writes the mutable columns of an existing service row.
 	Update(ctx context.Context, s *model.ServiceCatalog) error
 	// UpdateStatus sets is_active for a service row.
@@ -285,9 +312,9 @@ type ServiceCatalogRepository interface {
 
 // ServiceFilter carries optional filters for the service list query.
 type ServiceFilter struct {
-	IsActive *bool  // nil = active only
+	IsActive *bool   // nil = active only
 	Category *string
-	Cursor   string
+	Page     int
 	Limit    int
 }
 
@@ -322,4 +349,98 @@ type TherapistAvailabilityRepository interface {
 	// therapist and inserts the new set within a single transaction.
 	// Passing an empty slice clears all availability.
 	ReplaceAllForTherapist(ctx context.Context, therapistID string, rows []*model.TherapistAvailability) error
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0010 — Tenant-wide add-on catalog (rewritten 2026-04-24).
+// ---------------------------------------------------------------------------
+
+// AddonRepository is the interface for tenant-wide addon persistence.
+type AddonRepository interface {
+	// Save inserts a new addon row.
+	Save(ctx context.Context, a *model.Addon) error
+	// FindByID returns a non-deleted add-on by primary key.
+	// Returns ErrAddonNotFound when no matching row exists.
+	FindByID(ctx context.Context, id string) (*model.Addon, error)
+	// FindByIDs returns non-deleted add-ons for the given IDs in a single query.
+	// Used by the reorder flow to batch-validate tenant ownership inside the tx.
+	FindByIDs(ctx context.Context, ids []string) ([]*model.Addon, error)
+	// FindByTenant returns an offset-paginated list of non-deleted add-ons for
+	// the given tenant, applying optional filters, plus the total count.
+	// Ordered by sort_order ASC, created_at ASC.
+	FindByTenant(ctx context.Context, tenantID string, filter AddonFilter) ([]*model.Addon, int64, error)
+	// Update writes the mutable columns of an existing add-on row.
+	Update(ctx context.Context, a *model.Addon) error
+	// UpdateStatus sets is_active for an add-on row.
+	UpdateStatus(ctx context.Context, id string, isActive bool, updatedBy string) error
+	// SoftDelete sets deleted_at and is_active=false on the add-on row.
+	SoftDelete(ctx context.Context, id string, updatedBy string) error
+	// BulkUpdateSortOrder atomically updates sort_order for multiple add-ons
+	// in the caller's transaction context. All IDs must belong to the same
+	// tenant (validated by the service layer before this call).
+	BulkUpdateSortOrder(ctx context.Context, items []AddonSortOrderItem) error
+}
+
+// AddonFilter carries optional filters for the tenant-wide add-on list query.
+type AddonFilter struct {
+	IsActive *bool // nil = all non-deleted (admin view); true = active only
+	Page     int
+	Limit    int
+}
+
+// AddonSortOrderItem is a single (id, sort_order) pair for the reorder bulk
+// update.
+type AddonSortOrderItem struct {
+	ID        string
+	SortOrder int
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0012 — Room (Ruangan) catalog.
+// ---------------------------------------------------------------------------
+
+// RoomRepository is the interface for branch-scoped room persistence.
+// Consumer-owned per SOLID-I: declared here in the service package.
+type RoomRepository interface {
+	// Save inserts a new room row.
+	Save(ctx context.Context, r *model.Room) error
+	// FindByID returns a non-deleted room by primary key.
+	// Returns ErrRoomNotFound when no matching row exists.
+	FindByID(ctx context.Context, id string) (*model.Room, error)
+	// FindByIDs returns non-deleted rooms for the given IDs in a single query.
+	// Used by the reorder flow to batch-validate branch + tenant ownership.
+	FindByIDs(ctx context.Context, ids []string) ([]*model.Room, error)
+	// FindByTenant returns an offset-paginated list of non-deleted rooms for the
+	// given tenant, applying optional filters, plus the total count.
+	// Ordered by sort_order ASC, created_at ASC.
+	FindByTenant(ctx context.Context, tenantID string, filter RoomFilter) ([]*model.Room, int64, error)
+	// Update writes the mutable columns of an existing room row.
+	Update(ctx context.Context, r *model.Room) error
+	// UpdateStatus sets is_active for a room row.
+	UpdateStatus(ctx context.Context, id string, isActive bool, updatedBy string) error
+	// SoftDelete sets deleted_at and is_active=false on the room row.
+	SoftDelete(ctx context.Context, id string, updatedBy string) error
+	// BulkUpdateSortOrder atomically updates sort_order for multiple rooms
+	// in the caller's transaction context. All IDs must belong to the same
+	// branch + tenant (validated by the service layer before this call).
+	BulkUpdateSortOrder(ctx context.Context, items []RoomSortOrderItem) error
+	// UpdatePhotoKey atomically swaps the photo_key for a room row within the
+	// caller's transaction context. Returns the old key so the caller can
+	// schedule a background delete after the transaction commits.
+	UpdatePhotoKey(ctx context.Context, id string, newKey *string, updatedBy string) (oldKey *string, err error)
+}
+
+// RoomFilter carries optional filters for the branch-scoped room list query.
+type RoomFilter struct {
+	BranchID *string
+	IsActive *bool   // nil = all non-deleted (admin view); true = active only
+	RoomType *string // nil = all types
+	Page     int
+	Limit    int
+}
+
+// RoomSortOrderItem is a single (id, sort_order) pair for the reorder bulk update.
+type RoomSortOrderItem struct {
+	ID        string
+	SortOrder int
 }

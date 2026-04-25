@@ -28,6 +28,12 @@ networks:
 volumes:
   postgres_data:
     name: lustia_postgres_data
+  uploads_data:
+    # Named volume for local-driver upload storage (STORAGE_DRIVER=local).
+    # Mount path /app/uploads matches STORAGE_LOCAL_PATH inside the container.
+    # Owned by uid 65532 (distroless nonroot) — do not bind-mount over it in prod.
+    # Must be co-snapshotted with postgres_data on dev-vm (see OPERATIONS.md §11.1).
+    name: lustia_uploads_data
 
 services:
   # ---------------------------------------------------------------------------
@@ -158,11 +164,31 @@ services:
       SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
       SMTP_TIMEOUT_MS: ${SMTP_TIMEOUT_MS:-5000}
       PASSWORD_RESET_URL_BASE: ${PASSWORD_RESET_URL_BASE:-http://localhost:3000/auth/reset}
+      # -----------------------------------------------------------------------
+      # Storage (ADR 0011) — fail-fast on unset STORAGE_DRIVER.
+      # Dev default: local driver, files in the uploads_data named volume.
+      # To switch to r2/supabase in staging/prod, complete OPERATIONS.md §10.4.
+      # -----------------------------------------------------------------------
+      STORAGE_DRIVER: ${STORAGE_DRIVER:?STORAGE_DRIVER is required (local|r2|supabase)}
+      STORAGE_LOCAL_PATH: ${STORAGE_LOCAL_PATH:-/app/uploads}
+      STORAGE_PUBLIC_BASE_URL: ${STORAGE_PUBLIC_BASE_URL:-http://localhost:8080/uploads}
+      # R2 credentials — leave blank for local driver; required when STORAGE_DRIVER=r2.
+      STORAGE_R2_ACCOUNT_ID: ${STORAGE_R2_ACCOUNT_ID:-}
+      STORAGE_R2_ACCESS_KEY_ID: ${STORAGE_R2_ACCESS_KEY_ID:-}
+      STORAGE_R2_SECRET_ACCESS_KEY: ${STORAGE_R2_SECRET_ACCESS_KEY:-}
+      STORAGE_R2_BUCKET: ${STORAGE_R2_BUCKET:-}
+      # Supabase credentials — leave blank for local driver; required when STORAGE_DRIVER=supabase.
+      STORAGE_SUPABASE_URL: ${STORAGE_SUPABASE_URL:-}
+      STORAGE_SUPABASE_SERVICE_KEY: ${STORAGE_SUPABASE_SERVICE_KEY:-}
+      # Upload limits.
+      UPLOAD_MAX_MB: ${UPLOAD_MAX_MB:-5}
+      UPLOAD_TENANT_HOURLY_LIMIT: ${UPLOAD_TENANT_HOURLY_LIMIT:-30}
     ports:
       - "${AUTH_PORT:-8080}:${AUTH_PORT:-8080}"
     volumes:
       - ../services/auth/config/app.yaml:/app/config/app.yaml:ro
       - ./secrets/jwt_private.pem:/app/secrets/jwt_private.pem:ro
+      - uploads_data:/app/uploads
     networks:
       - lustia
     restart: unless-stopped

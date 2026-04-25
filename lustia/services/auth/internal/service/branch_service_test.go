@@ -37,8 +37,8 @@ func (r *stubBranchRepo) FindByID(_ context.Context, id string) (*model.Branch, 
 	}
 	return b, nil
 }
-func (r *stubBranchRepo) FindByTenant(_ context.Context, _ string, _ service.BranchFilter) ([]*model.Branch, string, error) {
-	return nil, "", nil
+func (r *stubBranchRepo) FindByTenant(_ context.Context, _ string, _ service.BranchFilter) ([]*model.Branch, int64, error) {
+	return nil, 0, nil
 }
 func (r *stubBranchRepo) Save(_ context.Context, b *model.Branch) error {
 	r.saved = append(r.saved, b)
@@ -78,8 +78,8 @@ func (r *stubTenantRepoForBranch) FindByID(_ context.Context, _ string) (*model.
 	return r.tenant, nil
 }
 func (r *stubTenantRepoForBranch) Save(_ context.Context, _ *model.Tenant) error { return nil }
-func (r *stubTenantRepoForBranch) List(_ context.Context, _ service.TenantFilter) ([]*service.TenantWithCounts, string, error) {
-	return nil, "", nil
+func (r *stubTenantRepoForBranch) List(_ context.Context, _ service.TenantFilter) ([]*service.TenantWithCounts, int64, error) {
+	return nil, 0, nil
 }
 func (r *stubTenantRepoForBranch) UpdateStatus(_ context.Context, _, _, _ string, _ *string) error {
 	return nil
@@ -96,8 +96,8 @@ func (r *stubUserRepoForBranch) FindByEmail(_ context.Context, _ string) (*model
 func (r *stubUserRepoForBranch) FindByID(_ context.Context, _ string) (*model.User, error) {
 	return &model.User{MustChangePassword: false}, nil
 }
-func (r *stubUserRepoForBranch) FindByTenant(_ context.Context, _ string, _ service.UserFilter) ([]*model.User, string, error) {
-	return nil, "", nil
+func (r *stubUserRepoForBranch) FindByTenant(_ context.Context, _ string, _ service.UserFilter) ([]*model.User, int64, error) {
+	return nil, 0, nil
 }
 func (r *stubUserRepoForBranch) Save(_ context.Context, _ *model.User) error         { return nil }
 func (r *stubUserRepoForBranch) Update(_ context.Context, _ *model.User) error       { return nil }

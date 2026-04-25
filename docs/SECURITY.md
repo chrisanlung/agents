@@ -496,6 +496,7 @@ _Each security review of a diff or PR appends an entry here. Blocking findings (
 | --- | --- | --- | --- |
 | 2026-04-21 | `must_change_password` enforcement shipped | **[Critical — Resolved]** Migration 000006, `middleware.PasswordChangeRequired`, service wiring (Login / Refresh / CreateUser), atomic clear in `UpdatePassword`, regression tests in `security_test.go`. | resolved |
 | 2026-04-18 | Phase 1 schema + Phase 2 auth-service design (initial security design review) | **[Critical — Resolved in follow-up 2026-04-21]** `must_change_password` enforcement was missing; see row above for the fix. **[High]** No object-level tenant/branch check specification existed prior to this document: `/admin/users/:id` and similar resource-by-ID endpoints had no explicit requirement to verify the target resource belongs to the caller's tenant. Without this check, any `tenant_admin` with `user.read` permission could read any user on the platform by guessing UUIDs (IDOR / CWE-639). Fix: Section 3.3 Layer 3 and Section 3.6 are now the explicit requirement. `code-reviewer` must treat absence of this check as a blocking finding. **[High]** `refresh_token.ip` and `user_agent` PII retention was undefined: no retention or access rule existed. These fields are accessible to anyone with DB read access. Fix: Section 1 (I-3) and Section 9.3 now mandate 90-day post-revocation retention, no API exposure, and access restricted to security incident review. **[Medium]** Bootstrap super admin email is non-routable (`superadmin@lustia.internal`): in production this address receives no mail, so password reset emails and security alerts go nowhere. Fix: production readiness checklist item added (Section 9.4). **[Medium]** JWT lifetime and revocation gap: a token issued to a user whose account is subsequently deactivated or whose role is removed remains valid for up to 15 minutes. This is an accepted design trade-off (stateless JWT) but must be documented. Fix: documented in Section 3.2; immediate remediation path (revoke all refresh tokens) documented in Section 2.5. **[Low]** No explicit request body size cap was specified in prior docs: without a cap, an attacker can send a multi-gigabyte body to the Argon2id password verification endpoint and exhaust memory. Fix: 1 MB cap specified in Section 6.5. **[Info]** MFA absence is a documented and accepted risk for Phase 2; super admin accounts are the highest-value target. Noted in Section 2.7. | in-review |
+| 2026-04-24 | Phase 4 therapist photo upload — design review (pre-implementation) | **[High — BLOCKING x4]** (1) MIME sniff via `http.DetectContentType` alone is insufficient: polyglot files pass the 512-byte sniff and can cause XSS if served from the same origin. Fix: add `image.DecodeConfig` structural validation (header-only, no full decode) after MIME sniff; reject on decode error. (3) Static file serving must use `http.FileServer` via `router.StaticFS(http.Dir(...))` only; custom `os.Open(basePath + userPath)` handler would introduce directory traversal. `X-Content-Type-Options: nosniff` and `Cache-Control: public, max-age=31536000, immutable` headers must be added to all `/uploads/*` responses. (4) Multipart endpoint lacks `MaxBytesReader` before `ParseMultipartForm`; a multi-gigabyte upload body bypasses the 5 MB file check and can exhaust server memory. Fix: `http.MaxBytesReader` on the upload handler before any form parsing. (7) EXIF metadata (GPS, device model) is PII under GDPR/PDPA; JPEG/PNG/WebP uploads will contain it. Fix: strip EXIF on upload before writing to storage (re-encode via `github.com/disintegration/imaging`). **[High — Gated, not blocking code now]** (9) R2/Supabase production adapters must not be enabled until bucket policy (no public ListObjects, least-priv service credential), CORS (explicit origin allowlist on bucket), and credentials-in-secret-manager controls are in place. Flag for `devops-expert`. **[Medium]** (5) Use `image.DecodeConfig` (not `image.Decode`) with `LimitReader` to prevent pixel-flood allocation. (6) Cross-tenant photo visibility accepted: UUID v4 keys are 122-bit entropy; public customer-facing photos have no confidentiality requirement. Accepted risk; add Phase 5 draft-state caveat to threat model. (8) Delete-old-then-write pattern risks data loss on partial failure; reverse to write-new-first, async best-effort delete. (10) Same-origin photo serving is acceptable for Phase 4 (tenant admin only); Phase 5 must use a dedicated CDN subdomain before customer-facing launch — added to production readiness checklist. **[Low]** (2) Add key regex guard in `Storage.Delete`/`URL` to reject keys containing `..` or leading `/`. (11) Content moderation (PhotoDNA/Vision API) deferred to Phase 5 pre-launch gate — acceptable for Phase 4 (admin-only uploads, not yet customer-surfaced). | BLOCKED — 4 High findings must be resolved by `go-expert` before implementation proceeds |
 
 ---
 
@@ -1110,3 +1111,395 @@ As an alternative, enforce via the migration runner in the CI/CD pipeline config
 Medium findings M-1 through M-3 (rate limit on availability PUT, therapist self-service cross-colleague risk, cursor subquery implicit RLS) are accepted for the current closed-beta window and must be tracked to Phase 5. M-2 is the most important of the three and should be resolved before the ops-portal (Phase 5) ships. Low findings are hardening recommendations.
 
 Phase 1–3 controls (Argon2id, RS256 JWT, RLS tenant isolation, refresh token rotation, `must_change_password`) remain sound and were not regressed by Phase 4. The 13 of 14 new endpoints have correct tenant isolation, cross-branch enforcement, and IDOR protection. The `therapist_service` UPDATE gap in H-1 is the only control failure in this delivery.
+
+---
+
+## Phase 4 Add-ons Review — 2026-04-24 (ADR 0010, migration 000018)
+
+> **SUPERSEDED** — This review covers the per-service `service_addon` design that was pivoted in the same session before any code was merged or deployed. The design described here no longer exists in the codebase. Retained as an audit trail only.
+> See [Phase 4 Add-ons Review (ADR 0010, tenant-wide redesign) — 2026-04-24](#phase-4-add-ons-review-adr-0010-tenant-wide-redesign--2026-04-24) for the current review.
+
+_Reviewer: security-expert. Code read: `000018_phase4_service_addons.up.sql`, `model/service_addon.go`, `repository/service_addon_repository.go`, `service/service_addon_service.go`, `controller/service_addon_controller.go`, `route/route.go`, `controller/dto_request.go` (add-on DTOs), `controller/dto_response.go`, `service/catalog_service.go` (`Get` + `ListForServiceDetail`), `web/tenant-admin/app/master/services/[id]/addon-actions.ts`, `lib/api.ts`, `lib/types.ts`, `docs/API_CONTRACT.md` §12, `docs/DECISIONS/0010-per-service-addons.md`._
+
+---
+
+### Executive Summary
+
+ADR 0010 adds one new table (`service_addon`), six new endpoints nested under `/tenant/services/:id/addons`, one extension to `GET /services/:id`, and a set of Next.js server actions. The overall implementation is solid: cross-tenant isolation is enforced correctly at the service layer via `resolveAddon` and parent-service tenant checks, RLS policies follow the project-established pattern, hard DELETE is blocked at DB level (grant: SELECT/INSERT/UPDATE only), soft-delete cannot be reversed, and the reorder bulk operation is atomic. No SQL injection vector was found — all queries are parameterized. Frontend server actions correctly derive tenant context from the session cookie only.
+
+**One Medium finding and one Low finding require `go-expert` attention before sign-off.** No Critical or High findings were identified, so this review does not block completion.
+
+**Finding count:** 0 Critical, 0 High, 1 Medium, 2 Low, 2 Info.
+
+---
+
+### STRIDE Extension for ADR 0010
+
+| # | Category | Concrete Threat | Where | Impact | Mitigation | Status |
+|---|---|---|---|---|---|---|
+| T-6 | Tampering | `PUT /reorder` body contains add-on IDs belonging to a different service or tenant | `service_addon_service.go:247–254` | Cross-tenant sort_order pollution | Service layer loops `FindByID` on every item and asserts `a.ServiceID == in.ServiceID && a.TenantID == in.CallerTenantID` before the bulk UPDATE | Implemented |
+| T-7 | Tampering | PATCH/DELETE supply an `addonID` from a different service or tenant | `service_addon_service.go:300–308` (`resolveAddon`) | Cross-tenant mutation | `resolveAddon` checks `a.ServiceID != serviceID \|\| a.TenantID != callerTenantID` — returns 404 on mismatch | Implemented |
+| I-6 | Information Disclosure | `GET /services/:id/addons` returns add-ons without parent service ownership check in the DB query | `service_addon_repository.go:54` | Cross-tenant data leak | Service-layer `List` pre-checks parent service's `TenantID` before calling `FindByServiceID`; RLS backstop further constrains the query to caller's tenant | Implemented |
+| D-5 | Denial of Service | Reorder body with 201+ items; or unbounded list if `max=200` binding is bypassed | `dto_request.go:319` (`binding:"max=200"`) | Service CPU / DB overload | `max=200` binding tag caps array size; list endpoint has no array size (but add-on count per service is expected small; ADR 0010 §5 Q2 notes no hard limit) | See M-1 |
+| E-5 | Elevation of Privilege | `branch_admin` mutates add-ons on a service that their branch does not manage | Permission check uses `service.update`; add-ons are tenant-scoped | Write ops on another branch's service catalogue | Reuses `service.update` permission — which is already a tenant-admin-level permission; `branch_admin` role does not hold it in the current seed | Noted below — see ADR open question |
+
+---
+
+### Cross-Cutting Check Results
+
+**1. RLS correctness.** The `service_addon_tenant_select` policy is `USING (tenant_id::text = current_setting('app.current_tenant', true))`. The second argument `true` to `current_setting` means "missing-ok" — returns empty string if the variable is unset. An empty string cannot equal any valid UUID text representation, so the policy fails closed. No `__platform__` branch is needed or present (no NULL-tenant rows in `service_addon`, consistent with comment in migration header). SELECT, INSERT, and UPDATE policies all use the same predicate. No DELETE policy is needed — the grant is absent. Pattern is correct and consistent with ADR 0009 tables. RLS coverage table:
+
+| Table | SELECT | INSERT | UPDATE | DELETE | lustia_app grants | Assessment |
+|---|---|---|---|---|---|---|
+| `service_addon` | tenant equality | tenant equality | tenant equality (USING + WITH CHECK) | N/A | SELECT, INSERT, UPDATE | Complete. Hard DELETE blocked at DB level as intended. |
+
+**2. Cross-tenant isolation at service layer.** Every mutation path (`Create`, `Update`, `ChangeStatus`, `SoftDelete`) calls `resolveAddon(ctx, addonID, serviceID, callerTenantID)` which asserts both `a.ServiceID == serviceID` and `a.TenantID == callerTenantID` before returning the row. Mismatch returns `ErrServiceAddonNotFound` (404), which reveals nothing about the target row's existence. `Create` and `List` independently fetch the parent service and assert `parent.TenantID == in.CallerTenantID`. `Reorder` separately validates the parent service and then checks every item ID. Isolation is correct and multi-layered.
+
+**3. `ListForServiceDetail` path (embedded in `GET /services/:id`).** `CatalogService.Get` (`catalog_service.go:145`) first verifies `sv.TenantID != callerTenantID` on the parent service, then calls `s.addons.FindByServiceID(ctx, serviceID, ServiceAddonFilter{})` directly (bypassing `ServiceAddonService`). The query runs under the same RLS-protected DB connection (same `app.current_tenant` session variable), so the RLS backstop is in effect. The parent-service ownership check provides application-layer isolation before the DB query. No cross-tenant add-on leak is possible via this path.
+
+**4. Soft-delete / undelete.**  `SoftDelete` sets `deleted_at = now()` and `is_active = false`. There is no "undelete" or "restore" endpoint. `PATCH` (`Update`, `ChangeStatus`) both filter `AND deleted_at IS NULL` in their respective WHERE clauses — a soft-deleted row returns `ErrServiceAddonNotFound`, not a mutable row. A caller cannot accidentally or deliberately resurface a soft-deleted add-on via any existing API surface.
+
+**5. Duplicate-name race safety.** The partial unique index `service_addon_service_name_uidx ON (service_id, name) WHERE deleted_at IS NULL` is the final serialization point. Concurrent inserts with the same `(service_id, name)` will race, but the one that loses receives `ERROR 23505` which is caught by `translateAddonDBError` and mapped to `ErrDuplicateAddonName` (HTTP 409). No silent data corruption. Correct.
+
+**6. Numeric bounds.** `price_idr` is `int64` in Go and `BIGINT` in SQL, with a `CHECK (price_idr >= 0)` constraint backed by a service-layer check (`priceIDR < 0` returns `ErrInvalidInput`). Maximum representable value is 9,223,372,036,854,775,807 — overflow from JSON parsing would require a value outside JSON number precision before GORM receives it. The `go-playground/validator/v10` binding tag `binding:"min=0"` on `CreateServiceAddonRequest.PriceIDR` and `binding:"omitempty,min=0"` on the update DTO enforce the non-negative constraint at the controller layer. No overflow risk in practice for IDR denomination.
+
+**7. Input validation and XSS.** Name and description length constraints exist at three layers: DB `CHECK`, service `validateAddonFields`, and DTO binding tags. All are consistent. The `ServiceAddonResponse` struct exposes `name` and `description` as plain JSON strings — no HTML markup is stored or reflected. The frontend renders these through standard React text interpolation. No XSS vector identified.
+
+**8. Authorization — branch_admin scope.** The ADR 0010 §4.5 open question is: "branch_admin at branch A cannot mutate add-ons on a service owned by tenant X if they aren't a member — should be blocked." Current implementation: add-on write ops require `service.update`. Looking at the existing permission seed in migration 000013, `service.update` is granted to `tenant_admin` role but NOT to `branch_admin`. This means `branch_admin` is implicitly blocked from all add-on mutations today. This is the intended behaviour per ADR 0010 §4.2 ("add-ons are tenant-scoped"). The absence of an explicit RBAC check specific to add-ons is acceptable because the inherited `service.update` permission already achieves the desired outcome. See M-2 for a hardening note.
+
+**9. Logging.** Audit events: `service_addon.created` logs `{"service_id": uuid}` only. `service_addon.updated` logs `{"service_id": uuid}`. `service_addon.activated/deactivated` logs `{"is_active": bool}`. `service_addon.deleted` logs `{"service_id": uuid}`. `service_addon.reordered` logs `{"service_id": uuid, "count": int}`. None of these contain `name`, `description`, or `price_idr`. No PII. Phase 3 H-2 class violation is not repeated.
+
+**10. Server actions tenant isolation.** `addon-actions.ts` functions accept `serviceId` as a parameter (from the URL slug — a UUID already validated by the route) and forward it to `apiFetch`. `apiFetch` in `lib/api.ts` calls `getAccessToken()` from `lib/session` and attaches the `Authorization: Bearer` header — tenant context is derived entirely from the signed JWT, not from any request-body field. No `tenant_id` is passed in any request body. Correct.
+
+**11. Reorder atomicity.** `Reorder` validates all item IDs (N+1 queries — see M-1) then calls `tx.WithTx(ctx, ...)` wrapping `BulkUpdateSortOrder`. The bulk UPDATE uses a CASE expression with parameterized bind variables — no string interpolation of user-supplied IDs in SQL outside the `?` placeholders. On transaction failure all sort_order changes are rolled back. Correct.
+
+---
+
+### Findings — Medium
+
+---
+
+#### M-1: Reorder validation is N+1 `FindByID` calls outside a transaction — TOCTOU window + potential DoS
+
+**Severity:** Medium
+
+**File:line:** `lustia/services/auth/internal/service/service_addon_service.go:247–254`
+
+**Attack scenario:** `Reorder` validates ownership by calling `s.addons.FindByID(ctx, item.ID)` in a loop — one DB round trip per item. With `max=200` items allowed by the binding tag, this is up to 200 sequential `SELECT` statements before the transaction begins. Two issues:
+
+1. **TOCTOU window:** An add-on can be soft-deleted between the validation loop and the `BulkUpdateSortOrder` transaction. The bulk UPDATE filters `AND deleted_at IS NULL`, so a concurrently-deleted add-on is silently skipped — 0 rows affected for that ID. The caller receives HTTP 204 but the deleted add-on's sort_order is not updated. This is a minor correctness issue, not a security issue — the service returns no error and the stale sort_order on a deleted (invisible) row causes no harm.
+
+2. **DoS (moderate):** An authenticated `tenant_admin` with `service.update` can POST a 200-item reorder payload, causing 200 `SELECT` statements before a single write. If called in a rapid loop (no per-endpoint rate limit exists), this creates heavy read load on the `service_addon_tenant_id_idx`. The global 60 req/s rate limiter (`route.go:47`) is the only guard.
+
+**Recommended fix (go-expert):**
+
+Replace the N+1 loop with a single batched query. Add a `FindByIDs(ctx, ids []string) ([]*model.ServiceAddon, error)` method to `ServiceAddonRepository` that runs `SELECT ... WHERE id IN (?) AND deleted_at IS NULL` and returns all matching rows in one query. In `Reorder`, compare the returned set against the input set:
+
+```go
+rows, err := s.addons.FindByIDs(ctx, itemIDs)
+if err != nil { return err }
+if len(rows) != len(in.Items) {
+    return constants.ErrServiceAddonNotFound // one or more IDs invalid/deleted
+}
+for _, row := range rows {
+    if row.ServiceID != in.ServiceID || row.TenantID != in.CallerTenantID {
+        return constants.ErrServiceAddonNotFound
+    }
+}
+```
+
+This reduces validation from N queries to 1 query and eliminates the TOCTOU gap when run inside the same transaction as `BulkUpdateSortOrder`.
+
+**Blocks sign-off:** No. Exploitable only by an authenticated `tenant_admin`; blast radius limited to their own tenant's add-on sort ordering. Fix before production load testing.
+
+---
+
+### Findings — Low
+
+---
+
+#### L-1: `reorderAddons` server action sends bare array instead of `{"items": [...]}` — request body shape mismatch
+
+**Severity:** Low (functional bug with security annotation)
+
+**File:line:** `lustia/web/tenant-admin/app/master/services/[id]/addon-actions.ts:128`
+
+**Attack scenario:** `reorderAddons` calls:
+```typescript
+body: JSON.stringify(items)   // items: ReorderAddonItem[]
+```
+This sends the body as a bare JSON array: `[{id, sort_order}, ...]`.
+
+The backend `ReorderAddonsRequest` struct expects:
+```go
+type ReorderAddonsRequest struct {
+    Items []AddonSortOrderItemRequest `json:"items" binding:"required,min=1,max=200,dive"`
+}
+```
+GORM/Gin's `ShouldBindJSON` will fail to unmarshal a bare array into a struct — `Items` will be an empty slice, and the `binding:"required,min=1"` tag will return HTTP 400 `VALIDATION`. The reorder endpoint is effectively broken from the frontend today.
+
+No security impact — the backend correctly rejects the malformed body. But the failure mode means the `max=200` DoS guard is trivially bypassed by accident (an empty `Items` slice is always rejected before counting).
+
+**Recommended fix (nextjs-expert):**
+
+```typescript
+body: JSON.stringify({ items })
+```
+
+**Blocks sign-off:** No. Backend rejects the malformed body safely. Fix in the same PR as the feature.
+
+---
+
+#### L-2: List endpoint has no server-side item count cap — implicit reliance on ADR 0010 §5 Q2 "expected small" assumption
+
+**Severity:** Low
+
+**File:line:** `lustia/services/auth/internal/repository/service_addon_repository.go:51–69`, `lustia/services/auth/internal/service/service_addon_service.go:106`
+
+**Assessment:** `FindByServiceID` and `List` return all non-deleted add-ons for a service with no `LIMIT` clause and no pagination. The ADR notes "no hard limit; UX may paginate if a service somehow has >20" (§5 Q2). If a tenant creates a large number of add-ons (e.g. 10,000 by scripted abuse), a single `GET /services/:id/addons` would load all rows into memory. The global body-size cap (1 MB per Section 6.5) does not bound the result set size; it bounds the request. For Phase 4 with no booking engine the risk is low, but the assumption "expected to be small" should be hardened before Phase 5.
+
+**Recommended fix (go-expert):** Add a `LIMIT 200` to `FindByServiceID` (matching the reorder cap as a natural ceiling), or enforce a configurable soft cap in the service layer that returns an error if exceeded. Alternatively, add a partial unique index guard that limits `(service_id) WHERE deleted_at IS NULL` rows to a configurable maximum via a trigger or application check.
+
+**Blocks sign-off:** No. Add-on creation rate is bounded by human UX in Phase 4. Address before Phase 5 booking engine.
+
+---
+
+### Findings — Info
+
+---
+
+#### I-1: `sort_order` has no `max` constraint — INT allows values up to 2,147,483,647
+
+**Severity:** Info
+
+**File:line:** `lustia/services/auth/internal/controller/dto_request.go:284,294,313`
+
+**Assessment:** DTO binding uses `binding:"min=0"` for `sort_order` but no `max`. The DB column is `INT NOT NULL` which allows values up to `2^31-1`. No security risk (sort_order is internal display ordering, not used in access control decisions). A client could store `sort_order = 2147483647` which would push the add-on to the last position and could look surprising in a future UI that displays raw integers. Harmless for Phase 4.
+
+**Recommended fix:** Add `max=9999` (or a configurable reasonable ceiling) to the binding tag. Not blocking.
+
+---
+
+#### I-2: `ServiceAddon.TenantID` is included in `ServiceAddonDetail` DTO but excluded from `ServiceAddonResponse` — minor API surface inconsistency
+
+**Severity:** Info
+
+**File:line:** `lustia/services/auth/internal/service/dto.go` (`ServiceAddonDetail`), `lustia/services/auth/internal/controller/dto_response.go:327` (`ServiceAddonResponse`)
+
+**Assessment:** `ServiceAddonDetail` in the service layer includes `TenantID string` (used for audit and cross-layer calls). `ServiceAddonResponse` (the API response type) correctly omits `TenantID`, per the API contract note at §12.4: "tenant_id is not exposed in the response (RLS ensures the caller can only see their own rows)." The service-to-controller translation in `toServiceAddonResponse` strips `TenantID`. This is the correct behaviour — no information disclosure. Noted only to confirm the reviewer checked this path.
+
+---
+
+### Phase 4 Add-ons Sign-off Recommendation
+
+**Decision: NOT BLOCKED — no Critical or High findings. Completion is permitted with the following tracked items.**
+
+| Severity | Finding | Owner | Target |
+|---|---|---|---|
+| Medium | M-1: Reorder validation is N+1 queries outside a transaction (TOCTOU + modest DoS surface) | `go-expert` | Before production load testing |
+| Low | L-1: `reorderAddons` server action sends bare array instead of `{"items": [...]}` — reorder broken from frontend | `nextjs-expert` | Same PR / immediate fix |
+| Low | L-2: List endpoint has no `LIMIT` — relies on "expected small" assumption | `go-expert` | Before Phase 5 booking integration |
+| Info | I-1: `sort_order` has no `max` binding constraint | `go-expert` | Hardening, no urgency |
+| Info | I-2: `TenantID` stripped correctly in API response — confirmed design | — | No action needed |
+
+The ADR 0010 open question (branch_admin scope for add-ons) is resolved by the existing permission model: `service.update` is not granted to `branch_admin`, so branch-scoped users are already blocked from add-on mutations. No schema or code change required. This should be documented in ADR 0010 §5 to close the question explicitly.
+
+RLS on `service_addon` is complete and correct. Cross-tenant isolation is enforced at service layer (resolveAddon pattern) and backstopped by RLS. Soft-delete is irreversible via the API. Audit events contain no PII. Frontend server actions derive tenant context from session cookie only. The only functional defect found (L-1) is a body-shape mismatch that causes the reorder endpoint to return HTTP 400 from the frontend — the backend safely rejects it, making this a correctness issue rather than a security one.
+
+| Date | Change reviewed | Findings | Status |
+|---|---|---|---|
+| 2026-04-24 | ADR 0010 — `service_addon` table, migration 000018, 6 new endpoints + `GET /services/:id` extension, Next.js server actions | **[Medium]** M-1: Reorder validation N+1 queries — TOCTOU + DoS surface (`service_addon_service.go:247–254`). **[Low]** L-1: `reorderAddons` server action sends bare array instead of `{"items": [...]}` — reorder endpoint broken from frontend (`addon-actions.ts:128`). **[Low]** L-2: List endpoint has no `LIMIT` cap (`service_addon_repository.go:51–69`). **[Info]** I-1: `sort_order` has no `max` binding constraint. **[Info]** I-2: `TenantID` correctly excluded from API response — confirmed. | **NOT BLOCKED — no Critical/High findings** |
+| 2026-04-24 | ADR 0010 (tenant-wide redesign) — `addon` table, migration 000018 (rewritten), 7 new endpoints `/tenant/addons/*`, `000019` dev seed, Next.js server actions `master/addons/actions.ts` | **[Medium]** M-1: Cursor subquery lacks explicit tenant constraint — implicit RLS dependency (`addon_repository.go:91–96`). **[Low]** L-1: `updateAddon` server action sends `is_active` in PATCH body — silently ignored by backend (`actions.ts:120–125`). **[Low]** L-2: Dev seed `000019` has no database-name guard against accidental staging application (`000019_seed_dev_addons.up.sql`). **[Info]** I-1: `addon.created` audit event logs `addon_id` in `meta` redundantly — minor but fine. **[Info]** I-2: Superseded-design review above marked with SUPERSEDED banner. | **NOT BLOCKED — no Critical/High findings** |
+
+---
+
+## Phase 4 Add-ons Review (ADR 0010, tenant-wide redesign) -- 2026-04-24
+
+_Reviewer: security-expert. This is the SECOND review of the add-on feature. The first review (above, now marked SUPERSEDED) covered the per-service `service_addon` design that was pivoted in the same session. This review covers the replacement: tenant-wide `addon` table, migration 000018 (rewritten), 7 endpoints under `/api/v1/tenant/addons/*`, dev seed 000019, and Next.js server actions in `lustia/web/tenant-admin/app/master/addons/actions.ts`._
+
+_Code read: `000018_phase4_addons.up.sql`, `000019_seed_dev_addons.up.sql`, `model/addon.go`, `repository/addon_repository.go`, `service/addon_service.go`, `service/addon_service_test.go`, `controller/addon_controller.go`, `controller/dto_request.go` (addon DTOs), `route/route.go`, `middleware/tenant.go`, `middleware/rbac.go`, `middleware/scope_gate.go`, `constants/permissions.go`, `web/tenant-admin/app/master/addons/actions.ts`, `lib/api.ts`, `docs/DECISIONS/0010-per-service-addons.md`._
+
+---
+
+### Executive Summary
+
+The tenant-wide redesign is a sound implementation. The `addon` table has complete RLS coverage (SELECT/INSERT/UPDATE policies; no DELETE grant). Cross-tenant isolation is enforced at the service layer on every read and mutation path. Reorder batch-validates all IDs inside the transaction (the N+1 M-1 finding from the previous review is resolved by design). Input validation is UTF-8-aware (character length, not bytes) at the service layer and backed by DB CHECK constraints. Permission seeding is idempotent. The `branch_admin` write-block is correct: migration seeds `addon.read` only to `branch_admin`; each write endpoint applies `PermAddonCreate/Update/Delete` RBAC.
+
+**No Critical or High findings.** One Medium, two Low, and two Info findings are detailed below. This review does not block completion.
+
+**Finding count:** 0 Critical, 0 High, 1 Medium, 2 Low, 2 Info.
+
+---
+
+### STRIDE Extension for ADR 0010 Tenant-wide Redesign
+
+| # | Category | Concrete Threat | Where | Impact | Mitigation | Status |
+|---|---|---|---|---|---|---|
+| T-8 | Tampering | `PUT /tenant/addons/reorder` body contains IDs from another tenant | `addon_service.go:228-251` | Cross-tenant sort_order pollution | `FindByIDs` inside tx + per-item tenant check | Implemented |
+| T-9 | Tampering | `PATCH/DELETE /tenant/addons/:id` targets an add-on owned by another tenant | `addon_service.go:97-106, 115-116, 160-161, 192-193` | Cross-tenant mutation | Service: `a.TenantID != callerTenantID` returns 404 on mismatch; RLS backstop | Implemented |
+| I-7 | Information Disclosure | Cursor UUID probing -- caller provides a cross-tenant add-on UUID as cursor | `addon_repository.go:87-97` | UUID existence oracle (empty page vs. normal page) | RLS returns NULL from subquery -- empty page, no data exposed; see M-1 | Partial -- see M-1 |
+| D-6 | Denial of Service | Reorder payload with 200 items in rapid loop | `addon_service.go:212`, `dto_request.go:317` | DB write load | `binding:"max=200"` caps array; global rate limiter only guard | Acceptable |
+| E-6 | Elevation of Privilege | `branch_admin` JWT calls `POST/PATCH/DELETE /tenant/addons/*` | `route.go:112`, `rbac.go:36` | Mutating tenant-wide catalog without privilege | `rbacMW(PermAddonCreate/Update/Delete)` aborts with 403; `branch_admin` holds `addon.read` only | Implemented |
+
+---
+
+### Cross-Cutting Check Results
+
+**1. RLS fail-closed behavior.** Policy: `tenant_id::text = current_setting('app.current_tenant', true)`. The second argument `true` is the "missing-ok" flag -- if `app.current_tenant` is not set, `current_setting` returns empty string `''`. An empty string cannot equal any UUID text representation, so the policy evaluates false and returns no rows. No fail-open edge case.
+
+**2. `app.current_tenant` guaranteed on every request.** `middleware/tenant.go` runs as a Gin group middleware on `tenantGroup` (line 101 in `route.go`) before any handler executes. It calls `tm.BeginForRequest` then `tm.SetTenantContext(txCtx, tenantID, userID)`. If `SetTenantContext` fails the middleware aborts with 500 -- the handler never runs. For `scope=tenant` JWTs the real tenant UUID is used; any other scope gets `__platform__` which matches no `addon` row (correct). There is no code path through `tenantGroup` where a handler runs before `app.current_tenant` is set.
+
+**3. Permission model -- `branch_admin` write-block.** Migration 000018 seeds `addon.read/create/update/delete` and wires them: `super_admin` and `tenant_admin` receive all four; `branch_admin` receives `addon.read` only. Route registration at `route.go:112-114` uses `rbacMW(PermAddonCreate)` on POST, `rbacMW(PermAddonUpdate)` on PATCH and PUT (reorder), `rbacMW(PermAddonDelete)` on DELETE. A `branch_admin` JWT calling `POST /tenant/addons` receives HTTP 403. Confirmed correct.
+
+**4. Cross-tenant isolation.** Every service-layer operation checks `TenantID` after the repository load: `Get` (line 102), `Update` (line 115), `ChangeStatus` (line 160), `SoftDelete` (line 192), `Reorder` (line 245 per-item). All return 404 on mismatch -- no information about the target row's existence in another tenant is disclosed.
+
+**5. Soft-delete irreversibility.** `SoftDelete` sets `deleted_at = now()` and `is_active = false`. Both `Update` and `ChangeStatus` filter `WHERE id = ? AND deleted_at IS NULL` via repository -- a soft-deleted add-on returns `ErrAddonNotFound`. No restore endpoint exists. Soft-deleted add-ons cannot be resurrected via any current API surface.
+
+**6. Reorder atomicity and IDOR guard (M-1 from previous review resolved).** `Reorder` at `addon_service.go:220` wraps everything in `s.tx.WithTx(...)`. Inside the transaction: (a) `FindByIDs` batch-fetches all requested IDs in one query with `AND deleted_at IS NULL`; (b) per-item tenant check; (c) `BulkUpdateSortOrder` issues a single CASE-expression UPDATE. All steps share the same transaction. The N+1 TOCTOU finding from the previous review is resolved by design.
+
+**7. Input validation.** `validateAddonInput` at `addon_service.go:275` uses `utf8.RuneCountInString` -- character-length, not byte-length. DB CHECKs use `char_length()` (also character-aware in PostgreSQL). DTO binding tags enforce `min=1,max=120` (name), `max=500` (description), `min=0` (price), `min=0,max=9999` (sort_order). All three layers are consistent.
+
+**8. SQL injection surface -- reorder CASE expression.** `BulkUpdateSortOrder` at `addon_repository.go:179-215` builds a CASE expression using `"WHEN ? THEN ? "` with `args = append(args, it.ID, it.SortOrder)`. All values are bind parameters. No injection surface.
+
+**9. Server actions tenant isolation.** `actions.ts` functions call `apiFetch` with `{ auth: true }`, which calls `getAccessToken()` and attaches `Authorization: Bearer <token>`. No `tenant_id` field is included in any request body. Tenant context is derived entirely from the signed JWT. Correct.
+
+**10. Permission seed idempotency and FK correctness.** All INSERTs use `ON CONFLICT (id) DO NOTHING` or `ON CONFLICT DO NOTHING`. Role_permission rows are seeded via `SELECT ... FROM role r CROSS JOIN permission p WHERE r.name = 'X'`. If the role does not exist the CROSS JOIN returns zero rows and zero inserts occur -- no FK error. Re-running is safe.
+
+**11. Audit events.** `addon.created` meta: `{"addon_id": uuid}`. `addon.updated` meta: empty. `addon.activated/deactivated` meta: `{"is_active": bool}`. `addon.reordered` meta: `{"count": int}`. No `name`, `description`, or `price_idr` in any audit event. No PII. Phase 3 H-2 class violation not repeated.
+
+**12. `TenantID` exclusion from API response.** `toAddonResponse` at `addon_controller.go:225-235` maps from `service.AddonDetail` (which includes `TenantID`) to `AddonResponse` (which does not). Tenant ID is correctly stripped from the wire response.
+
+---
+
+### Findings -- Medium
+
+---
+
+#### M-1: Cursor subquery lacks explicit tenant constraint -- implicit RLS dependency (CWE-89 latent, same class as Phase 4 M-3)
+
+**Severity:** Medium
+
+**File:line:** `lustia/services/auth/internal/repository/addon_repository.go:91-96`
+
+**Assessment:** The cursor subquery is:
+
+```sql
+(sort_order, created_at, id) > (
+    SELECT sort_order, created_at, id FROM addon WHERE id = ? AND deleted_at IS NULL
+)
+```
+
+The `filter.Cursor` UUID is a bind variable (no injection). However the subquery has no `AND tenant_id = ?` predicate. PostgreSQL applies RLS to the `addon` table in the subquery because it runs on the same `lustia_app` connection with `app.current_tenant` set -- so a cursor UUID belonging to another tenant returns NULL, and `> NULL` evaluates to false (empty page, no data leak).
+
+The correctness of cursor isolation depends on implicit RLS behavior in a subquery rather than an explicit WHERE clause. If any future code path constructs this query before the tenant middleware sets `app.current_tenant`, the subquery would return cross-tenant rows. Additionally, a caller providing a foreign-tenant UUID as cursor receives an empty page rather than a validation error -- a minor UUID existence oracle (same as Phase 4 M-3 finding on therapist/service repositories).
+
+**Recommended fix (go-expert):**
+
+```go
+q = q.Where(
+    `(sort_order, created_at, id) > (
+        SELECT sort_order, created_at, id FROM addon
+        WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL
+    )`,
+    filter.Cursor, tenantID,
+)
+```
+
+This makes the intent explicit, removes the implicit RLS dependency, and eliminates the UUID existence oracle.
+
+**Blocks sign-off:** No. RLS provides actual isolation today. Fix before Phase 5 booking integration.
+
+---
+
+### Findings -- Low
+
+---
+
+#### L-1: `updateAddon` server action sends `is_active` in the PATCH body -- silently ignored by backend (functional gap)
+
+**Severity:** Low
+
+**File:line:** `lustia/web/tenant-admin/app/master/addons/actions.ts:120-125`
+
+**Assessment:** `updateAddon` sends `{ name, description, price_idr, is_active }` to `PATCH /tenant/addons/:id`. The backend `UpdateAddonRequest` accepts only `name`, `description`, `price_idr`, and `sort_order` -- no `is_active` field. Gin's `ShouldBindJSON` silently ignores unknown fields. The `is_active` value in the update body is therefore dropped. Toggling the active checkbox on the edit form has no effect; the correct path is `PATCH /tenant/addons/:id/status` via `toggleAddonStatus`.
+
+No security impact -- the backend correctly ignores the unknown field. The failure mode is silent incorrect UX.
+
+**Recommended fix (nextjs-expert):** Remove `is_active` from the `updateAddon` PATCH body and ensure the edit form calls `toggleAddonStatus` separately for the active/inactive toggle.
+
+**Blocks sign-off:** No. Fix before user testing.
+
+---
+
+#### L-2: Dev seed migration 000019 has no database-name guard against accidental staging application (same class as Phase 4 L-3)
+
+**Severity:** Low
+
+**File:line:** `lustia/migrations/000019_seed_dev_addons.up.sql:1-10`
+
+**Assessment:** The header clearly states "DEV-ONLY" and provides a stopping instruction (`migrate ... up 18`). All INSERTs use `ON CONFLICT (id) DO NOTHING`. No credentials or privilege grants are seeded. Risk is purely operational: an operator who accidentally runs the full migration chain in staging inserts 4 add-on rows into real tenant data.
+
+**Recommended fix:** Add a database-name guard (same pattern recommended for 000014 in Phase 4 L-3):
+
+```sql
+DO $$
+BEGIN
+    IF current_database() NOT LIKE '%dev%' AND current_database() NOT LIKE '%local%' THEN
+        RAISE EXCEPTION 'Migration 000019 is dev-only. Database "%" does not match dev/local pattern.', current_database();
+    END IF;
+END $$;
+```
+
+Alternatively, enforce via CI/CD pipeline configuration (staging/prod jobs run `migrate up 18` only).
+
+**Blocks sign-off:** No. Fix before first staging deployment.
+
+---
+
+### Findings -- Info
+
+---
+
+#### I-1: `addon.created` audit event includes `addon_id` in `meta` -- redundant with `ResourceID`
+
+**Severity:** Info
+
+**File:line:** `lustia/services/auth/internal/service/addon_service.go:66-68`
+
+**Assessment:** `addon.created` sets `ResourceID: a.ID` and `Meta: map[string]interface{}{"addon_id": a.ID}` -- the UUID appears twice in the audit row. Not a security issue. `addon.updated`, `addon.deleted`, and `addon.reordered` do not repeat the resource ID in meta. Minor inconsistency worth cleaning up for audit log hygiene.
+
+---
+
+#### I-2: No way to create an add-on in inactive state -- design gap, not a security issue
+
+**Severity:** Info
+
+**File:line:** `lustia/services/auth/internal/service/addon_service.go:50`
+
+**Assessment:** `AddonService.Create` hardcodes `IsActive: true`. `CreateAddonRequest` has no `is_active` field. The frontend `createAddon` action sends `is_active` in the POST body but it is silently ignored. There is currently no API path to create a pre-inactive add-on. This is likely intentional (new add-ons go live immediately; operators deactivate if needed). Should be documented as an explicit design decision in ADR 0010 to prevent future confusion.
+
+---
+
+### RLS Coverage Assessment -- ADR 0010 Tenant-wide `addon` Table
+
+| Table | SELECT | INSERT | UPDATE | DELETE | lustia_app grants | Assessment |
+|---|---|---|---|---|---|---|
+| `addon` | `addon_tenant_select` (tenant equality) | `addon_tenant_insert` (tenant equality WITH CHECK) | `addon_tenant_update` (tenant equality USING + WITH CHECK) | N/A | SELECT, INSERT, UPDATE (no DELETE) | Complete. Hard DELETE blocked at DB level as intended. |
+
+---
+
+### Phase 4 Add-ons (Tenant-wide Redesign) Sign-off Recommendation
+
+**Decision: NOT BLOCKED -- no Critical or High findings.**
+
+| Severity | Finding | Owner | Target |
+|---|---|---|---|
+| Medium | M-1: Cursor subquery lacks explicit tenant constraint -- implicit RLS dependency (`addon_repository.go:91-96`) | `go-expert` | Before Phase 5 booking integration |
+| Low | L-1: `updateAddon` sends `is_active` in PATCH body -- silently ignored; status change does not persist (`actions.ts:120-125`) | `nextjs-expert` | Before user testing |
+| Low | L-2: Dev seed 000019 has no database-name guard (`000019_seed_dev_addons.up.sql`) | `go-expert` or `devops-expert` | Before first staging deployment |
+| Info | I-1: Redundant `addon_id` in `addon.created` meta | `go-expert` | Hardening, no urgency |
+| Info | I-2: No way to create an inactive add-on -- likely intentional; document in ADR 0010 | orchestrator | Clarify in ADR |
+
+The previous review M-1 finding (N+1 reorder validation outside a transaction) has been fully resolved in this redesign: `Reorder` now calls `FindByIDs` inside `tx.WithTx`. The `branch_admin` write-block is correctly implemented via migration seeding and RBAC middleware. Soft-delete is irreversible. No mass-assignment surface. No PII in audit events. Frontend server actions derive tenant context from session cookie only.
+
+Phase 1-4 controls (Argon2id, RS256 JWT, RLS tenant isolation, refresh token rotation, `must_change_password`, branch-level isolation) remain sound and were not regressed by this change.

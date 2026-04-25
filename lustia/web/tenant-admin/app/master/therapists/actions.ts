@@ -22,6 +22,21 @@ const therapistSchema = z.object({
   bio: z.string().max(500).optional().nullable(),
   joined_at: z.string().optional().nullable(),
   branch_id: z.string().uuid("Branch ID tidak valid.").optional().nullable(),
+  // ADR 0011 §2.3.2 — body posture fields (required on create/update)
+  height_cm: z.coerce
+    .number({ invalid_type_error: "Tinggi wajib diisi." })
+    .int("Masukkan angka bulat.")
+    .min(100, "Tinggi minimal 100 cm.")
+    .max(250, "Tinggi maksimal 250 cm."),
+  weight_kg: z.coerce
+    .number({ invalid_type_error: "Berat wajib diisi." })
+    .int("Masukkan angka bulat.")
+    .min(30, "Berat minimal 30 kg.")
+    .max(250, "Berat maksimal 250 kg."),
+  build: z.enum(["langsing", "sedang", "atletis", "tegap"], {
+    required_error: "Postur wajib dipilih.",
+    invalid_type_error: "Pilih salah satu postur.",
+  }),
 });
 
 export type TherapistFormResult =
@@ -52,6 +67,9 @@ export async function createTherapist(
 
   const body: Record<string, unknown> = {
     full_name: parsed.data.full_name,
+    height_cm: parsed.data.height_cm,
+    weight_kg: parsed.data.weight_kg,
+    build: parsed.data.build,
   };
   if (parsed.data.branch_id) body.branch_id = parsed.data.branch_id;
   if (parsed.data.gender) body.gender = parsed.data.gender;
@@ -104,6 +122,9 @@ export async function updateTherapist(
 
   const body: Record<string, unknown> = {
     full_name: parsed.data.full_name,
+    height_cm: parsed.data.height_cm,
+    weight_kg: parsed.data.weight_kg,
+    build: parsed.data.build,
   };
   if (parsed.data.gender !== undefined) body.gender = parsed.data.gender;
   if (parsed.data.phone !== undefined) body.phone = parsed.data.phone;

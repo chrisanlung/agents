@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { Inter } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
+import { FlashToast } from "@/components/flash-toast";
+import { ActivityTracker } from "@/components/activity-tracker";
 import "@/app/globals.css";
 
 const inter = Inter({
@@ -32,6 +35,10 @@ export default function RootLayout({
       <body className={`${inter.variable} font-sans antialiased`}>
         {children}
         <Toaster position="top-right" />
+        <Suspense fallback={null}>
+          <FlashToast />
+        </Suspense>
+        <ActivityTracker />
       </body>
     </html>
   );

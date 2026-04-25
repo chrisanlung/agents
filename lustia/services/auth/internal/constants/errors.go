@@ -135,4 +135,45 @@ var (
 	// create or mutate a therapist or availability window that belongs to a
 	// branch not present in their JWT branches claim.
 	ErrCrossBranchForbidden = errors.New("cross-branch access forbidden")
+
+	// ADR 0010 — Tenant-wide add-on catalog (rewritten 2026-04-24).
+
+	// ErrAddonNotFound is returned when an addon ID does not resolve,
+	// is soft-deleted, or belongs to a different tenant.
+	ErrAddonNotFound = errors.New("add-on not found")
+
+	// ErrDuplicateAddonName is returned when the partial unique index
+	// (tenant_id, name) WHERE deleted_at IS NULL is violated.
+	ErrDuplicateAddonName = errors.New("add-on name already exists for this tenant")
+
+	// ADR 0012 — Room (Ruangan) catalog.
+
+	// ErrRoomNotFound is returned when a room ID does not resolve, is
+	// soft-deleted, or belongs to a different tenant/branch.
+	ErrRoomNotFound = errors.New("room not found")
+
+	// ErrDuplicateRoomName is returned when the partial unique index
+	// (branch_id, name) WHERE deleted_at IS NULL is violated.
+	ErrDuplicateRoomName = errors.New("nama ruangan sudah digunakan di cabang ini")
+
+	// ErrRoomBranchImmutable is returned when an update attempts to change
+	// the branch_id of an existing room.
+	ErrRoomBranchImmutable = errors.New("branch ruangan tidak dapat diubah")
+
+	// ADR 0011 — Storage abstraction + therapist extended profile.
+
+	// ErrUploadQuotaExceeded is returned when a tenant exceeds the per-hour
+	// upload limit (UPLOAD_TENANT_HOURLY_LIMIT).
+	ErrUploadQuotaExceeded = errors.New("batas unggah per jam telah tercapai, coba lagi nanti")
+
+	// ErrInvalidImageFormat is returned when an uploaded file is not one of the
+	// accepted image types (JPEG, PNG, WebP).
+	ErrInvalidImageFormat = errors.New("format gambar tidak didukung; gunakan JPEG, PNG, atau WebP")
+
+	// ErrImageTooLarge is returned when the uploaded image exceeds the size cap.
+	ErrImageTooLarge = errors.New("ukuran gambar melebihi batas yang diizinkan")
+
+	// ErrImageDimensionsTooLarge is returned when the image width or height
+	// exceeds 4096 pixels.
+	ErrImageDimensionsTooLarge = errors.New("dimensi gambar terlalu besar; maksimum 4096×4096 piksel")
 )

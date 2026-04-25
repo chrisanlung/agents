@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import { useTransition, useState } from "react";
-import { useRouter } from "next/navigation";
 import { CheckCircle2, XCircle, Loader2, Copy, Check, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 
@@ -57,8 +56,6 @@ export function ApprovalPanel({
   const [rejectReason, setRejectReason] = useState("");
   const [approvalResult, setApprovalResult] =
     useState<ApproveRegistrationResponse | null>(null);
-
-  const router = useRouter();
 
   function handlePackageChange(val: string) {
     const pkg = val as TenantPackage;

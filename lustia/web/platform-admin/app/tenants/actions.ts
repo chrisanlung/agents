@@ -4,7 +4,7 @@ import { revalidateTag } from "next/cache";
 import { z } from "zod";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import type { Tenant, TenantStatus } from "@/lib/types";
+import type { Tenant } from "@/lib/types";
 
 const changeTenantStatusSchema = z.object({
   id: z.string().uuid(),

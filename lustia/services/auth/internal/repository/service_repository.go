@@ -45,17 +45,21 @@ func (r *ServiceCatalogRepository) FindByID(ctx context.Context, id string) (*mo
 	return &m, nil
 }
 
-// FindByTenant returns a cursor-paginated list of non-deleted services for the
-// given tenant, applying optional filters.
-func (r *ServiceCatalogRepository) FindByTenant(ctx context.Context, tenantID string, filter service.ServiceFilter) ([]*model.ServiceCatalog, string, error) {
+// FindByTenant returns an offset-paginated list of non-deleted services for the
+// given tenant, applying optional filters, plus the total matching count.
+func (r *ServiceCatalogRepository) FindByTenant(ctx context.Context, tenantID string, filter service.ServiceFilter) ([]*model.ServiceCatalog, int64, error) {
 	db := dbFromContext(ctx, r.db)
 
 	limit := filter.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
+	page := filter.Page
+	if page < 1 {
+		page = 1
+	}
 
-	q := db.Where("tenant_id = ? AND deleted_at IS NULL", tenantID)
+	q := db.Model(&model.ServiceCatalog{}).Where("tenant_id = ? AND deleted_at IS NULL", tenantID)
 
 	if filter.IsActive != nil {
 		q = q.Where("is_active = ?", *filter.IsActive)
@@ -67,29 +71,24 @@ func (r *ServiceCatalogRepository) FindByTenant(ctx context.Context, tenantID st
 		q = q.Where("category = ?", *filter.Category)
 	}
 
-	if filter.Cursor != "" {
-		q = q.Where(
-			"(name, created_at) > (SELECT name, created_at FROM service WHERE id = ?)",
-			filter.Cursor,
-		)
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("count services by tenant: %w", err)
 	}
 
 	var rows []model.ServiceCatalog
-	if err := q.Order("name ASC, created_at ASC").Limit(limit + 1).Find(&rows).Error; err != nil {
-		return nil, "", fmt.Errorf("find services by tenant: %w", err)
-	}
-
-	var nextCursor string
-	if len(rows) > limit {
-		rows = rows[:limit]
-		nextCursor = rows[len(rows)-1].ID
+	if err := q.Order("name ASC, created_at ASC").
+		Offset((page - 1) * limit).
+		Limit(limit).
+		Find(&rows).Error; err != nil {
+		return nil, 0, fmt.Errorf("find services by tenant: %w", err)
 	}
 
 	out := make([]*model.ServiceCatalog, len(rows))
 	for i := range rows {
 		out[i] = &rows[i]
 	}
-	return out, nextCursor, nil
+	return out, total, nil
 }
 
 // Update writes the mutable columns of an existing service row.

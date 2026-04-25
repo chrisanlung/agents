@@ -34,7 +34,10 @@ export interface Tenant {
 
 export interface TenantListResponse {
   data: Tenant[];
-  next_cursor: string | null;
+  page: number;
+  limit: number;
+  total_count: number;
+  total_pages: number;
 }
 
 // ─── Tenant Registration ─────────────────────────────────────────────────────
@@ -64,7 +67,10 @@ export interface TenantRegistration {
 
 export interface RegistrationListResponse {
   data: TenantRegistration[];
-  next_cursor: string | null;
+  page: number;
+  limit: number;
+  total_count: number;
+  total_pages: number;
 }
 
 // ─── Approve response (ADR 0008 §2.2.4) ─────────────────────────────────────

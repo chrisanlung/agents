@@ -2,7 +2,7 @@
 
 _Owned by `qa-expert`. Cross-layer test strategy. Unit tests stay with the specialist agents who wrote the code._
 
-_Last updated: 2026-04-23 — Phase 3 integration suite written and executed._
+_Last updated: 2026-04-24 — Tenant-wide add-on catalog (ADR 0010 revised) unit test review; 11 gap tests added by qa-expert (total suite now 40 tests)._
 
 ---
 
@@ -168,6 +168,82 @@ These 8 paths must all be green before Phase 3 is signed off. Each maps to one o
 
 ---
 
+### T15 — Service Add-ons lifecycle (ADR 0010) — SUPERSEDED ENTRY 2026-04-24
+
+> **SUPERSEDED 2026-04-24.** The original T15 entry below was written for a per-service add-on model (`service_addon` table, add-ons owned by a service). That design was rejected in the same session it was implemented (see ADR 0010 change log). All code from that design was replaced before commit. The test function names listed below never existed in source control. The entry is preserved as a design-trail record only.
+>
+> See **T15 (tenant-wide)** below for the current, active entry.
+
+~~**Rationale (superseded):** Full add-on lifecycle per ADR 0010 v1 — create, read, update, activate/deactivate, soft-delete, reorder, cross-tenant isolation, and duplicate-name enforcement (within-service rejected; across-services allowed).~~
+
+~~**Tests (superseded):** `TestAddonCreate_Success`, `TestAddonCreate_EmptyName_Rejected`, `TestAddonCreate_NegativePrice_Rejected`, `TestAddonCreate_DescriptionTooLong_Rejected`, `TestAddonCreate_CrossTenant_Rejected`, `TestAddonCreate_DuplicateName_Rejected`, `TestAddonCreate_NameAt120Chars_Accepted`, `TestAddonCreate_NameAt121Chars_Rejected`, `TestAddonCreate_DuplicateNameAcrossServices_Allowed`, `TestAddonList_AllNonDeleted`, `TestAddonList_FilterActive`, `TestAddonUpdate_Success`, `TestAddonUpdate_WrongService_Rejected`, `TestAddonChangeStatus_Deactivate`, `TestAddonChangeStatus_ReactivateAfterDeactivate`, `TestAddonSoftDelete_Success`, `TestAddonSoftDelete_AlreadyDeletedOrNotFound`, `TestAddonReorder_Atomic_AllOrNothing`, `TestAddonReorder_CrossTenant_Rejected`, `TestAddonReorder_AddonBelongsToDifferentService_Rejected`, `TestAddonCrossTenantIsolation`~~
+
+~~**Status: SUPERSEDED** — replaced by T15 (tenant-wide) below.~~
+
+---
+
+### T15 — Tenant-wide Add-on Catalog lifecycle (ADR 0010 revised)
+
+**Rationale:** Full add-on lifecycle per ADR 0010 (tenant-wide flat catalog) — create, read, update, activate/deactivate, soft-delete, reorder, cross-tenant isolation, duplicate-name enforcement, name/price/sort_order/description boundaries. Any add-on is available across all services for the tenant. No per-service mapping table.
+
+**Critical paths covered:**
+
+| Path | Test function(s) |
+|---|---|
+| Create success | `TestAddonService_Create_Success` |
+| Duplicate name within tenant rejected | `TestAddonService_Create_DuplicateName_SameTenant` |
+| Duplicate name across tenants allowed | `TestAddonService_Create_DuplicateName_DifferentTenant_Allowed` |
+| Name = 0 chars rejected | `TestAddonService_Create_EmptyName_Rejected` |
+| Name = 1 char accepted | `TestAddonService_Create_NameAt1Char_Accepted` |
+| Name = 120 chars accepted (ASCII) | `TestAddonService_Create_NameExactly120_Accepted` |
+| Name = 121 chars rejected | `TestAddonService_Create_NameTooLong_Rejected` |
+| Name = 120 multi-byte runes accepted (rune-count, not byte-count) | `TestAddonService_Create_Name120MultibyteRunes_Accepted` |
+| Price negative rejected | `TestAddonService_Create_NegativePrice_Rejected` |
+| Price zero accepted | `TestAddonService_Create_ZeroPrice_Accepted` |
+| Price large positive accepted | `TestAddonService_Create_LargePositivePrice_Accepted` |
+| Description 501 chars rejected | `TestAddonService_Create_DescriptionTooLong_Rejected` |
+| Description 500 chars accepted | `TestAddonService_Create_DescriptionExactly500_Accepted` |
+| sort_order = 0 accepted | `TestAddonService_Create_Success` (SortOrder: 0) |
+| sort_order = 9999 accepted | `TestAddonService_Create_SortOrderAt9999_Accepted` |
+| sort_order = 10000 rejected (Create) | `TestAddonService_Create_SortOrderAt10000_Rejected` |
+| sort_order = −1 rejected (Create) | `TestAddonService_Create_NegativeSortOrder_Rejected` |
+| sort_order = 10000 rejected (Reorder) | `TestAddonService_Reorder_SortOrderOutOfBounds_Rejected` |
+| List returns only caller tenant | `TestAddonService_List_ReturnsOnlyCallerTenant` |
+| List excludes soft-deleted | `TestAddonService_List_SoftDeletedExcluded` |
+| List is_active filter | `TestAddonService_List_IsActiveFilter` |
+| List default limit = 10 | `TestAddonService_List_DefaultLimit10` |
+| List cursor pagination — non-overlapping pages | `TestAddonService_List_CursorPagination` |
+| Get success | `TestAddonService_Get_Success` |
+| Get not found | `TestAddonService_Get_NotFound` |
+| Get cross-tenant IDOR rejected | `TestAddonService_Get_CrossTenantIDOR` |
+| Update success | `TestAddonService_Update_Success` |
+| Update cross-tenant IDOR rejected | `TestAddonService_Update_CrossTenantIDOR` |
+| Update duplicate name rejected | `TestAddonService_Update_DuplicateName_Rejected` |
+| ChangeStatus deactivate + reactivate | `TestAddonService_ChangeStatus_Toggle` |
+| ChangeStatus cross-tenant IDOR rejected | `TestAddonService_ChangeStatus_CrossTenantIDOR` |
+| ChangeStatus on soft-deleted row returns NotFound | `TestAddonService_ChangeStatus_OnSoftDeletedRow_ReturnsNotFound` |
+| SoftDelete success + Get returns NotFound after | `TestAddonService_SoftDelete_Success` |
+| SoftDelete cross-tenant IDOR rejected | `TestAddonService_SoftDelete_CrossTenantIDOR` |
+| SoftDelete excluded from List | `TestAddonService_SoftDelete_ExcludedFromList` |
+| Reorder success | `TestAddonService_Reorder_Success` |
+| Reorder with mixed foreign-tenant IDs rejected | `TestAddonService_Reorder_MixedForeignIDs_Rejected` |
+| Reorder with nonexistent ID rejected | `TestAddonService_Reorder_NonexistentID_Rejected` |
+| Reorder empty items rejected | `TestAddonService_Reorder_EmptyItems_Rejected` |
+| Reorder atomicity — bulk DB error rolls back | `TestAddonService_Reorder_Atomicity_BulkFailRollsBack` |
+| Full lifecycle: create → update → deactivate → delete → not in list | `TestAddonService_Lifecycle_CreateUpdateStatusDelete` |
+
+**Tests (unit, 40 total):** all `TestAddonService_*` functions in `lustia/services/auth/internal/service/addon_service_test.go`.
+
+Of the 40 tests: 29 were written by go-expert; 11 boundary/gap tests were added by qa-expert on 2026-04-24 (`TestAddonService_Create_EmptyName_Rejected`, `TestAddonService_Create_NameAt1Char_Accepted`, `TestAddonService_Create_Name120MultibyteRunes_Accepted`, `TestAddonService_Create_DescriptionExactly500_Accepted`, `TestAddonService_Create_LargePositivePrice_Accepted`, `TestAddonService_Create_SortOrderAt9999_Accepted`, `TestAddonService_Create_SortOrderAt10000_Rejected`, `TestAddonService_Create_NegativeSortOrder_Rejected`, `TestAddonService_Update_DuplicateName_Rejected`, `TestAddonService_ChangeStatus_OnSoftDeletedRow_ReturnsNotFound`, `TestAddonService_Reorder_SortOrderOutOfBounds_Rejected`).
+
+**Status: PASS** — all 40 unit tests green as of 2026-04-24.
+
+**Flakiness check:** `stubAddonRepo.FindByTenant` sorts results by (sort_order, created_at, id) before returning. No map-iteration order-dependency in any assertion path. All list assertions use set membership or sorted-index checks. Verdict: no flakiness risk identified.
+
+**Integration gap:** HTTP-level integration tests not yet written; deferred per Phase 4 precedent (§6). Must be added before Phase 5 booking integration that consumes add-ons.
+
+---
+
 ### T14 — Seed data integrity
 
 **Rationale:** Sanity check that migration 14 produced exactly the expected rows for acme-spa, and that those rows are correctly visible via the API to Alice (tenant isolation + RLS verification).
@@ -204,6 +280,7 @@ These 8 paths must all be green before Phase 3 is signed off. Each maps to one o
 
 - [ ] BUG-P4-A resolved — `therapist.specialties` NOT NULL violation on INSERT (blocks T9–T13)
 - [ ] BUG-P4-B resolved — `service.code` NOT NULL + `price_idr` column name mismatch (blocks T10)
+- [ ] BUG-P4-C resolved — `TestMappingReconcile_*` stub fixture stores empty `TenantID` (see §4 BUG-P4-C)
 - [ ] T9 `TestTherapistCRUD`: PASS
 - [ ] T10 `TestServiceCRUD`: PASS
 - [ ] T11 `TestTherapistServiceMapping`: PASS
@@ -213,6 +290,19 @@ These 8 paths must all be green before Phase 3 is signed off. Each maps to one o
 - [ ] All Phase 3 tests still green after Phase 4 migration
 - [ ] `go test -race ./...` passes in auth-service CI
 - [ ] Migrations 1–14 tested on a clean Postgres 17 instance
+
+---
+
+## 3c. Release Readiness Checklist — Tenant-wide Add-on Catalog (ADR 0010 revised)
+
+- [ ] BUG-P4-A and BUG-P4-B resolved (parallel Phase 4 bugs; add-ons themselves have no dependency on therapist/service write paths, but the shared migration chain must be clean)
+- [x] 40 unit tests in `addon_service_test.go` all PASS (29 go-expert + 11 added by qa-expert 2026-04-24) — verified 2026-04-24
+- [ ] Integration test for add-on HTTP endpoints deferred (see §6 gap entry) — acceptable per Phase 4 precedent; must be added before Phase 5 booking integration
+- [ ] No frontend E2E coverage (Phase 4 has zero Playwright tests; deferral documented in §6)
+- [ ] Migration `000018` (`addon` table — tenant-wide, no service FK) tested on a clean Postgres 17 instance
+- [ ] Migration `000019` (dev seed add-ons for `acme-spa`) tested on a clean Postgres 17 instance
+- [ ] RLS on `addon` confirmed — cross-tenant SELECT/INSERT/UPDATE blocked (unit tests cover service-layer IDOR; DB-level RLS spot-check recommended before production)
+- [ ] Permissions `addon.read` / `addon.create` / `addon.update` / `addon.delete` wired to `tenant_admin` role; `branch_admin` read-only wiring confirmed
 
 ---
 
@@ -275,6 +365,26 @@ null value in column "specialties" of relation "therapist" violates not-null con
 
 ---
 
+### BUG-P4-C — `TestMappingReconcile_*` unit tests fail: stub therapist has empty `TenantID`
+
+**Severity:** S3 (test fixture bug — production code correct; no user-visible defect)
+
+**File:line:** `lustia/services/auth/internal/service/mapping_service_test.go` — all 5 `TestMappingReconcile_*` test setup blocks.
+
+**Symptom:** All 5 `TestMappingReconcile_*` tests fail with "therapist not found". Error originates at `mapping_service.go:45`: `if t.TenantID != in.CallerTenantID`.
+
+**Root cause:** Every test seeds the therapist as `&model.Therapist{ID: "th1", BranchID: "b1", IsActive: true}` — `TenantID` is omitted, so it defaults to `""`. The tests pass `CallerTenantID: "t1"`, so the isolation check `"" != "t1"` is true and the service correctly returns `ErrTherapistNotFound`. The isolation logic is correct; the fixture is wrong.
+
+**Verification:** Introduced in commit `41cc0fe` (Phase 4). The mapping test file has exactly one commit in its history — predates the add-on feature entirely. Git stash / baseline check confirms no regression from ADR 0010 work.
+
+**Fix direction:** In each `TestMappingReconcile_*` test, change the stub seed line to include `TenantID: "t1"`:
+```go
+therapistRepo.rows["th1"] = &model.Therapist{ID: "th1", TenantID: "t1", BranchID: "b1", IsActive: true}
+```
+This is a 5-line fix across the 5 tests, owned by go-expert.
+
+---
+
 ### BUG-P4-B — `service` INSERT fails: `code` NOT NULL + `price_idr` column mismatch
 
 **Severity:** S1 (blocks all Phase 4 service write paths — no service can be created)
@@ -317,3 +427,7 @@ The following test categories are not implemented in Phase 3 and should be addre
 | Refresh token rotation — theft detection path | High | E-3 in threat model; no test coverage yet |
 | Password reset flow | Medium | `POST /auth/forgot-password` + `POST /auth/reset-password` — unit tests exist but no integration coverage |
 | Admin user create flow (`POST /admin/users`) | Medium | Phase 2 endpoint; not covered by Phase 3 integration suite |
+| Integration tests for add-on HTTP endpoints (tenant-wide, ADR 0010 revised) | Medium | Only service-layer unit tests (40) exist. HTTP-level coverage (`POST /tenant/addons`, `PATCH`, `DELETE`, `PUT /reorder`, cross-tenant 404, duplicate-name 409) deferred per Phase 4 precedent. Must be added before Phase 5 booking integration that consumes add-ons. |
+| `GET /api/v1/tenant/addons` permission wiring — integration smoke | Medium | Verify `branch_admin` JWT receives 403 on write endpoints and 200 on read endpoints. Unit tests do not exercise the auth middleware layer. One integration test covering the permission boundary is sufficient. |
+| E2E via Playwright — add-on CRUD in tenant-admin `/master/addons` | Low | No Playwright suite exists in Phase 4; defer to the same milestone that ships the Phase 4 registration→approval Playwright suite (§6 row 1). |
+| Reorder — maximum items (201) rejected | Low | `len > 200` guard exists in code but has no explicit unit test. Low risk — add alongside integration tests. |

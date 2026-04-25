@@ -1,10 +1,10 @@
-import { notFound, redirect } from "next/navigation";
 import type { Metadata } from "next";
 import type React from "react";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
-import { apiFetch, ApiError } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
+import { handleApiError } from "@/lib/auth-guard";
 import type { TenantRegistration } from "@/lib/types";
 import { relativeTime } from "@/lib/relative-time";
 import { Badge } from "@/components/ui/badge";
@@ -51,11 +51,9 @@ export default async function RegistrationDetailPage({ params }: Props) {
       { auth: true }
     );
   } catch (err) {
-    if (err instanceof ApiError) {
-      if (err.status === 401) redirect("/login");
-      if (err.status === 404) notFound();
-    }
-    throw err;
+    await handleApiError(err);
+    throw err; // unreachable — handleApiError redirects or throws; this line
+               // exists solely to help TS understand `reg` is definitely assigned.
   }
 
   const isPending = reg.status === "pending";

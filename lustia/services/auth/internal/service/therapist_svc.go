@@ -45,6 +45,76 @@ func NewTherapistSvc(
 	}
 }
 
+// UpdatePhotoKey atomically stores the new photo key and returns the old key
+// (so the caller can schedule a background delete). It enforces tenant
+// ownership and cross-branch rules.
+//
+// This method does NOT call storage — it only updates the DB row. The
+// controller handles the full pipeline (upload → quota → db → delete old).
+func (s *TherapistSvc) UpdatePhotoKey(ctx context.Context, in UploadTherapistPhotoInput) (oldKey *string, err error) {
+	t, err := s.therapists.FindByID(ctx, in.TherapistID)
+	if err != nil {
+		return nil, err
+	}
+	if t.TenantID != in.CallerTenantID {
+		return nil, constants.ErrTherapistNotFound
+	}
+	if !in.IsAdmin {
+		if !containsBranch(in.CallerBranches, t.BranchID) {
+			return nil, constants.ErrCrossBranchForbidden
+		}
+	}
+
+	newKey := in.NewKey
+	oldKey, err = s.therapists.UpdatePhotoKey(ctx, in.TherapistID, &newKey, in.CallerUserID)
+	if err != nil {
+		return nil, fmt.Errorf("update photo key: %w", err)
+	}
+
+	bgCtx := context.Background()
+	_ = s.audit.Append(bgCtx, AuditEntry{
+		TenantID:     &in.CallerTenantID,
+		ActorUserID:  &in.CallerUserID,
+		Action:       "therapist.photo_uploaded",
+		ResourceType: "therapist",
+		ResourceID:   in.TherapistID,
+		Meta:         map[string]interface{}{"new_key": newKey},
+	})
+	return oldKey, nil
+}
+
+// RemovePhotoKey clears the photo_key for a therapist row and returns the old
+// key for the caller to schedule a background storage delete.
+func (s *TherapistSvc) RemovePhotoKey(ctx context.Context, in RemoveTherapistPhotoInput) (oldKey *string, err error) {
+	t, err := s.therapists.FindByID(ctx, in.TherapistID)
+	if err != nil {
+		return nil, err
+	}
+	if t.TenantID != in.CallerTenantID {
+		return nil, constants.ErrTherapistNotFound
+	}
+	if !in.IsAdmin {
+		if !containsBranch(in.CallerBranches, t.BranchID) {
+			return nil, constants.ErrCrossBranchForbidden
+		}
+	}
+
+	oldKey, err = s.therapists.UpdatePhotoKey(ctx, in.TherapistID, nil, in.CallerUserID)
+	if err != nil {
+		return nil, fmt.Errorf("remove photo key: %w", err)
+	}
+
+	bgCtx := context.Background()
+	_ = s.audit.Append(bgCtx, AuditEntry{
+		TenantID:     &in.CallerTenantID,
+		ActorUserID:  &in.CallerUserID,
+		Action:       "therapist.photo_removed",
+		ResourceType: "therapist",
+		ResourceID:   in.TherapistID,
+	})
+	return oldKey, nil
+}
+
 // Create creates a new therapist profile. Cross-branch check applied for
 // branch_admin callers per §11.3 flag #1.
 func (s *TherapistSvc) Create(ctx context.Context, in CreateTherapistInput) (TherapistDetail, error) {
@@ -61,6 +131,17 @@ func (s *TherapistSvc) Create(ctx context.Context, in CreateTherapistInput) (The
 	}
 	if b.TenantID != in.CallerTenantID {
 		return TherapistDetail{}, constants.ErrBranchNotFound
+	}
+
+	// Validate new extended profile fields (ADR 0011 §2.3.2).
+	if in.HeightCm < 100 || in.HeightCm > 250 {
+		return TherapistDetail{}, fmt.Errorf("%w: height_cm must be 100–250", constants.ErrInvalidInput)
+	}
+	if in.WeightKg < 30 || in.WeightKg > 250 {
+		return TherapistDetail{}, fmt.Errorf("%w: weight_kg must be 30–250", constants.ErrInvalidInput)
+	}
+	if !validBuild(in.Build) {
+		return TherapistDetail{}, fmt.Errorf("%w: build must be one of langsing, sedang, atletis, tegap", constants.ErrInvalidInput)
 	}
 
 	var joinedAt *time.Time
@@ -82,7 +163,9 @@ func (s *TherapistSvc) Create(ctx context.Context, in CreateTherapistInput) (The
 		Phone:       in.Phone,
 		Email:       in.Email,
 		Bio:         in.Bio,
-		PhotoURL:    in.PhotoURL,
+		HeightCm:    in.HeightCm,
+		WeightKg:    in.WeightKg,
+		Build:       in.Build,
 		Specialties: "[]", // JSONB NOT NULL — explicit default (Phase 4 BUG-P4-A)
 		IsActive:    true,
 		JoinedAt:    joinedAt,
@@ -109,11 +192,20 @@ func (s *TherapistSvc) Create(ctx context.Context, in CreateTherapistInput) (The
 
 // List returns a paginated list of therapists for the caller's tenant.
 func (s *TherapistSvc) List(ctx context.Context, in ListTherapistsInput) (ListTherapistsOutput, error) {
+	limit := in.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	page := in.Page
+	if page < 1 {
+		page = 1
+	}
+
 	filter := TherapistFilter{
 		BranchID: in.BranchID,
 		IsActive: in.IsActive,
-		Cursor:   in.Cursor,
-		Limit:    in.Limit,
+		Page:     page,
+		Limit:    limit,
 	}
 
 	// branch_admin sees only their assigned branches.
@@ -121,7 +213,7 @@ func (s *TherapistSvc) List(ctx context.Context, in ListTherapistsInput) (ListTh
 		filter.BranchIDs = in.CallerBranches
 	}
 
-	rows, cursor, err := s.therapists.FindByTenant(ctx, in.CallerTenantID, filter)
+	rows, total, err := s.therapists.FindByTenant(ctx, in.CallerTenantID, filter)
 	if err != nil {
 		return ListTherapistsOutput{}, fmt.Errorf("list therapists: %w", err)
 	}
@@ -130,7 +222,12 @@ func (s *TherapistSvc) List(ctx context.Context, in ListTherapistsInput) (ListTh
 	for i, t := range rows {
 		details[i] = toTherapistDetail(t)
 	}
-	return ListTherapistsOutput{Therapists: details, NextCursor: cursor}, nil
+
+	totalPages := 0
+	if total > 0 {
+		totalPages = int((total + int64(limit) - 1) / int64(limit))
+	}
+	return ListTherapistsOutput{Therapists: details, Page: page, TotalCount: total, TotalPages: totalPages}, nil
 }
 
 // Get returns a single therapist with all service mappings (active + inactive).
@@ -175,6 +272,17 @@ func (s *TherapistSvc) Update(ctx context.Context, in UpdateTherapistInput) (The
 		}
 	}
 
+	// Validate new extended profile fields when provided (ADR 0011 §2.3.2).
+	if in.HeightCm != nil && (*in.HeightCm < 100 || *in.HeightCm > 250) {
+		return TherapistDetail{}, fmt.Errorf("%w: height_cm must be 100–250", constants.ErrInvalidInput)
+	}
+	if in.WeightKg != nil && (*in.WeightKg < 30 || *in.WeightKg > 250) {
+		return TherapistDetail{}, fmt.Errorf("%w: weight_kg must be 30–250", constants.ErrInvalidInput)
+	}
+	if in.Build != nil && !validBuild(*in.Build) {
+		return TherapistDetail{}, fmt.Errorf("%w: build must be one of langsing, sedang, atletis, tegap", constants.ErrInvalidInput)
+	}
+
 	if in.FullName != nil {
 		t.FullName = *in.FullName
 	}
@@ -190,8 +298,14 @@ func (s *TherapistSvc) Update(ctx context.Context, in UpdateTherapistInput) (The
 	if in.Bio != nil {
 		t.Bio = in.Bio
 	}
-	if in.PhotoURL != nil {
-		t.PhotoURL = in.PhotoURL
+	if in.HeightCm != nil {
+		t.HeightCm = *in.HeightCm
+	}
+	if in.WeightKg != nil {
+		t.WeightKg = *in.WeightKg
+	}
+	if in.Build != nil {
+		t.Build = *in.Build
 	}
 	if in.UserID != nil {
 		t.UserID = in.UserID
@@ -379,17 +493,20 @@ func (s *TherapistSvc) enrichMappings(ctx context.Context, tenantID string, rows
 // toTherapistDetail converts a model.Therapist to TherapistDetail.
 func toTherapistDetail(t *model.Therapist) TherapistDetail {
 	d := TherapistDetail{
-		ID:       t.ID,
-		TenantID: t.TenantID,
-		BranchID: t.BranchID,
-		UserID:   t.UserID,
-		FullName: t.FullName,
-		Gender:   t.Gender,
-		Phone:    t.Phone,
-		Email:    t.Email,
-		Bio:      t.Bio,
-		PhotoURL: t.PhotoURL,
-		IsActive: t.IsActive,
+		ID:        t.ID,
+		TenantID:  t.TenantID,
+		BranchID:  t.BranchID,
+		UserID:    t.UserID,
+		FullName:  t.FullName,
+		Gender:    t.Gender,
+		Phone:     t.Phone,
+		Email:     t.Email,
+		Bio:       t.Bio,
+		PhotoKey:  t.PhotoKey,
+		HeightCm:  t.HeightCm,
+		WeightKg:  t.WeightKg,
+		Build:     t.Build,
+		IsActive:  t.IsActive,
 		CreatedAt: t.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt: t.UpdatedAt.UTC().Format(time.RFC3339),
 	}
@@ -422,4 +539,15 @@ func HasTenantAdminRole(roles []string) bool {
 		}
 	}
 	return false
+}
+
+// validBuild returns true when v is one of the four allowed build categories
+// (ADR 0011 §2.3 — controlled vocabulary matches migration 000020 CHECK).
+func validBuild(v string) bool {
+	switch v {
+	case "langsing", "sedang", "atletis", "tegap":
+		return true
+	default:
+		return false
+	}
 }

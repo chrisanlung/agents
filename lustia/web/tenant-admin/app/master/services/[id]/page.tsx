@@ -70,7 +70,7 @@ export default async function ServiceDetailPage({ params, searchParams }: Props)
         </Badge>
       </div>
 
-      {/* Tabs */}
+      {/* Tabs — Detail and Terapis only */}
       <Tabs defaultValue={activeTab}>
         <TabsList>
           <TabsTrigger value="detail" asChild>

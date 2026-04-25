@@ -34,8 +34,8 @@ func (f *fakeUserRepo) FindByEmail(ctx context.Context, email string) (*model.Us
 func (f *fakeUserRepo) FindByID(_ context.Context, _ string) (*model.User, error) {
 	return &model.User{}, nil
 }
-func (f *fakeUserRepo) FindByTenant(_ context.Context, _ string, _ service.UserFilter) ([]*model.User, string, error) {
-	return nil, "", nil
+func (f *fakeUserRepo) FindByTenant(_ context.Context, _ string, _ service.UserFilter) ([]*model.User, int64, error) {
+	return nil, 0, nil
 }
 func (f *fakeUserRepo) Save(_ context.Context, _ *model.User) error                 { return nil }
 func (f *fakeUserRepo) Update(_ context.Context, _ *model.User) error               { return nil }
@@ -99,8 +99,8 @@ func (f *fakeTenantRepo) FindByID(_ context.Context, _ string) (*model.Tenant, e
 	return &model.Tenant{}, nil
 }
 func (f *fakeTenantRepo) Save(_ context.Context, _ *model.Tenant) error { return nil }
-func (f *fakeTenantRepo) List(_ context.Context, _ service.TenantFilter) ([]*service.TenantWithCounts, string, error) {
-	return nil, "", nil
+func (f *fakeTenantRepo) List(_ context.Context, _ service.TenantFilter) ([]*service.TenantWithCounts, int64, error) {
+	return nil, 0, nil
 }
 func (f *fakeTenantRepo) UpdateStatus(_ context.Context, _, _, _ string, _ *string) error {
 	return nil

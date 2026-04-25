@@ -73,14 +73,19 @@ func (r *RegistrationRepository) FindPendingBySlug(ctx context.Context, slug str
 	return &m, nil
 }
 
-// List returns a cursor-paginated list of registrations with an optional status
-// filter. When filter.Status is empty it defaults to "pending".
-func (r *RegistrationRepository) List(ctx context.Context, filter service.RegistrationFilter) ([]*model.TenantRegistration, string, error) {
+// List returns an offset-paginated list of registrations with an optional status
+// filter, plus the total matching count. When filter.Status is empty it defaults
+// to "pending".
+func (r *RegistrationRepository) List(ctx context.Context, filter service.RegistrationFilter) ([]*model.TenantRegistration, int64, error) {
 	db := dbFromContext(ctx, r.db)
 
 	limit := filter.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 50
+	}
+	page := filter.Page
+	if page < 1 {
+		page = 1
 	}
 
 	statusFilter := filter.Status
@@ -92,26 +97,25 @@ func (r *RegistrationRepository) List(ctx context.Context, filter service.Regist
 	if statusFilter != "all" {
 		q = q.Where("status = ?", statusFilter)
 	}
-	if filter.Cursor != "" {
-		q = q.Where("created_at < (SELECT created_at FROM tenant_registration WHERE id = ?)", filter.Cursor)
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("count registrations: %w", err)
 	}
 
 	var rows []model.TenantRegistration
-	if err := q.Order("created_at DESC").Limit(limit + 1).Find(&rows).Error; err != nil {
-		return nil, "", fmt.Errorf("list registrations: %w", err)
-	}
-
-	var nextCursor string
-	if len(rows) > limit {
-		rows = rows[:limit]
-		nextCursor = rows[len(rows)-1].ID
+	if err := q.Order("created_at DESC").
+		Offset((page - 1) * limit).
+		Limit(limit).
+		Find(&rows).Error; err != nil {
+		return nil, 0, fmt.Errorf("list registrations: %w", err)
 	}
 
 	out := make([]*model.TenantRegistration, len(rows))
 	for i := range rows {
 		out[i] = &rows[i]
 	}
-	return out, nextCursor, nil
+	return out, total, nil
 }
 
 // Update writes mutable columns on an existing registration row (used for

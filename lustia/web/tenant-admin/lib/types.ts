@@ -31,12 +31,15 @@ export interface Branch {
 
 export interface BranchListResponse {
   data: Branch[];
-  next_cursor: string | null;
+  page: number;
+  limit: number;
+  total_count: number;
+  total_pages: number;
 }
 
 // ─── Phase 4 — Master Operational Data (ADR 0009) ────────────────────────────
 
-/** TherapistResponse matches API §11.4 shape exactly. */
+/** TherapistResponse matches API §11.4 shape exactly (ADR 0011 §2.3). */
 export interface Therapist {
   id: string;
   tenant_id: string;
@@ -47,7 +50,17 @@ export interface Therapist {
   phone?: string | null;
   email?: string | null;
   bio: string | null;
+  /**
+   * Resolved public URL for the therapist photo (backend maps photo_key → URL
+   * at the controller boundary). Never `photo_key` directly — ADR 0011 §2.4.
+   */
   photo_url: string | null;
+  /** Height in centimetres. 100–250. ADR 0011 §2.3. */
+  height_cm: number;
+  /** Weight in kilograms. 30–250. ADR 0011 §2.3. */
+  weight_kg: number;
+  /** Customer-visible build category. ADR 0011 §2.3. */
+  build: "langsing" | "sedang" | "atletis" | "tegap";
   specialties: string[];
   is_active: boolean;
   joined_at: string | null;
@@ -59,7 +72,10 @@ export interface Therapist {
 
 export interface TherapistListResponse {
   data: Therapist[];
-  next_cursor: string | null;
+  page: number;
+  limit: number;
+  total_count: number;
+  total_pages: number;
 }
 
 /** One entry in the services array on TherapistResponse (§11.4.3). */
@@ -92,7 +108,10 @@ export interface Service {
 
 export interface ServiceListResponse {
   data: Service[];
-  next_cursor: string | null;
+  page: number;
+  limit: number;
+  total_count: number;
+  total_pages: number;
 }
 
 /** One entry in the therapists array on ServiceResponse (§11.5.3). */
@@ -122,6 +141,111 @@ export interface AvailabilityResponse {
 export interface ServiceMappingResponse {
   therapist_id: string;
   services: TherapistServiceMapping[];
+}
+
+// ─── Phase 4 — Tenant-wide Add-on Catalog (ADR 0010 revised) ─────────────────
+
+/** AddonResponse matches API §4.2.2 shape exactly (tenant-wide catalog).
+ * Deliberately omits `tenant_id` and `deleted_at` — the backend never emits
+ * these fields to the wire. */
+export interface Addon {
+  id: string;
+  name: string;
+  description: string | null;
+  price_idr: number;
+  is_active: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AddonListResponse {
+  data: Addon[];
+  page: number;
+  limit: number;
+  total_count: number;
+  total_pages: number;
+}
+
+/** Request DTOs for add-on mutations (tenant-wide, no service_id). */
+export interface CreateAddonInput {
+  name: string;
+  description?: string | null;
+  price_idr: number;
+  is_active?: boolean;
+}
+
+export interface UpdateAddonInput {
+  name?: string;
+  description?: string | null;
+  price_idr?: number;
+  is_active?: boolean;
+}
+
+/** One item in a bulk reorder request payload. */
+export interface AddonSortOrderItem {
+  id: string;
+  sort_order: number;
+}
+
+// ─── Phase 4 — Ruangan (Room) Catalog (ADR 0012) ─────────────────────────────
+
+export type RoomType = "single" | "couple" | "group" | "vip";
+
+/** RoomResponse matches API §13 shape exactly (ADR 0012 §2.3).
+ * Deliberately omits `tenant_id` and `photo_key` — the backend never emits
+ * these fields to the wire. */
+export interface Room {
+  id: string;
+  branch_id: string;
+  name: string;
+  description: string | null;
+  room_type: RoomType;
+  capacity: number;
+  amenities: string[];
+  /**
+   * Resolved public URL for the room photo (backend maps photo_key → URL
+   * at the controller boundary). Never `photo_key` directly — ADR 0011 §2.4.
+   */
+  photo_url: string | null;
+  is_active: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RoomListResponse {
+  data: Room[];
+  page: number;
+  limit: number;
+  total_count: number;
+  total_pages: number;
+}
+
+/** Request DTOs for room mutations. */
+export interface CreateRoomInput {
+  branch_id: string;
+  name: string;
+  description?: string | null;
+  room_type: RoomType;
+  capacity: number;
+  amenities: string[];
+  is_active: boolean;
+}
+
+export interface UpdateRoomInput {
+  name?: string;
+  description?: string | null;
+  room_type?: RoomType;
+  capacity?: number;
+  amenities?: string[];
+  is_active?: boolean;
+}
+
+/** One item in a bulk reorder request payload (rooms are branch-scoped). */
+export interface RoomSortOrderItem {
+  id: string;
+  sort_order: number;
 }
 
 // ─── Onboarding state (ADR 0008 §2.3.3) ─────────────────────────────────────

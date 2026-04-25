@@ -53,7 +53,7 @@ interface MeResponse {
 
 interface RegistrationListResponse {
   data: Array<{ id: string }>;
-  next_cursor: string | null;
+  total_count: number;
 }
 
 /**

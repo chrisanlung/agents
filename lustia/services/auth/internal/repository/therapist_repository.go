@@ -45,17 +45,21 @@ func (r *TherapistRepository) FindByID(ctx context.Context, id string) (*model.T
 	return &m, nil
 }
 
-// FindByTenant returns a cursor-paginated list of non-deleted therapists for
-// the given tenant, applying optional filters.
-func (r *TherapistRepository) FindByTenant(ctx context.Context, tenantID string, filter service.TherapistFilter) ([]*model.Therapist, string, error) {
+// FindByTenant returns an offset-paginated list of non-deleted therapists for
+// the given tenant, applying optional filters, plus the total matching count.
+func (r *TherapistRepository) FindByTenant(ctx context.Context, tenantID string, filter service.TherapistFilter) ([]*model.Therapist, int64, error) {
 	db := dbFromContext(ctx, r.db)
 
 	limit := filter.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
+	page := filter.Page
+	if page < 1 {
+		page = 1
+	}
 
-	q := db.Where("tenant_id = ? AND deleted_at IS NULL", tenantID)
+	q := db.Model(&model.Therapist{}).Where("tenant_id = ? AND deleted_at IS NULL", tenantID)
 
 	// is_active filter: nil → active-only (default), otherwise apply the flag.
 	if filter.IsActive != nil {
@@ -72,32 +76,28 @@ func (r *TherapistRepository) FindByTenant(ctx context.Context, tenantID string,
 		q = q.Where("branch_id = ?", *filter.BranchID)
 	}
 
-	if filter.Cursor != "" {
-		q = q.Where(
-			"(full_name, created_at) > (SELECT full_name, created_at FROM therapist WHERE id = ?)",
-			filter.Cursor,
-		)
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("count therapists by tenant: %w", err)
 	}
 
 	var rows []model.Therapist
-	if err := q.Order("full_name ASC, created_at ASC").Limit(limit + 1).Find(&rows).Error; err != nil {
-		return nil, "", fmt.Errorf("find therapists by tenant: %w", err)
-	}
-
-	var nextCursor string
-	if len(rows) > limit {
-		rows = rows[:limit]
-		nextCursor = rows[len(rows)-1].ID
+	if err := q.Order("full_name ASC, created_at ASC").
+		Offset((page - 1) * limit).
+		Limit(limit).
+		Find(&rows).Error; err != nil {
+		return nil, 0, fmt.Errorf("find therapists by tenant: %w", err)
 	}
 
 	out := make([]*model.Therapist, len(rows))
 	for i := range rows {
 		out[i] = &rows[i]
 	}
-	return out, nextCursor, nil
+	return out, total, nil
 }
 
 // Update writes the mutable profile columns of an existing therapist row.
+// photo_key is NOT updated here — use UpdatePhotoKey for that (ADR 0011 §2.4).
 func (r *TherapistRepository) Update(ctx context.Context, t *model.Therapist) error {
 	db := dbFromContext(ctx, r.db)
 	updates := map[string]interface{}{
@@ -106,7 +106,9 @@ func (r *TherapistRepository) Update(ctx context.Context, t *model.Therapist) er
 		"phone":       t.Phone,
 		"email":       t.Email,
 		"bio":         t.Bio,
-		"photo_url":   t.PhotoURL,
+		"height_cm":   t.HeightCm,
+		"weight_kg":   t.WeightKg,
+		"build":       t.Build,
 		"joined_at":   t.JoinedAt,
 		"user_id":     t.UserID,
 		"updated_by":  t.UpdatedBy,
@@ -115,6 +117,38 @@ func (r *TherapistRepository) Update(ctx context.Context, t *model.Therapist) er
 		return fmt.Errorf("update therapist: %w", translateDBError(err))
 	}
 	return nil
+}
+
+// UpdatePhotoKey atomically swaps the photo_key for a therapist row within
+// the caller's transaction context. Returns the old key (may be nil) so the
+// caller can schedule a background storage delete after the transaction commits.
+func (r *TherapistRepository) UpdatePhotoKey(ctx context.Context, id string, newKey *string, updatedBy string) (oldKey *string, err error) {
+	db := dbFromContext(ctx, r.db)
+
+	// Read the current key before overwriting it.
+	var current model.Therapist
+	if err := db.Select("photo_key").Where("id = ? AND deleted_at IS NULL", id).First(&current).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, constants.ErrTherapistNotFound
+		}
+		return nil, fmt.Errorf("read photo_key: %w", err)
+	}
+	oldKey = current.PhotoKey
+
+	updates := map[string]interface{}{
+		"photo_key":  newKey,
+		"updated_by": updatedBy,
+	}
+	result := db.Model(&model.Therapist{}).
+		Where("id = ? AND deleted_at IS NULL", id).
+		Updates(updates)
+	if result.Error != nil {
+		return nil, fmt.Errorf("update photo_key: %w", translateDBError(result.Error))
+	}
+	if result.RowsAffected == 0 {
+		return nil, constants.ErrTherapistNotFound
+	}
+	return oldKey, nil
 }
 
 // UpdateStatus sets is_active for a therapist row.

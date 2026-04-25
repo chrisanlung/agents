@@ -1,7 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
+import { AlertCircle, ArrowLeft, UserRound } from "lucide-react";
 
 import { apiFetch, ApiError } from "@/lib/api";
 import type {
@@ -16,6 +16,16 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { TherapistForm } from "../therapist-form";
 import { AvailabilityEditor } from "../availability-editor";
 import { ServiceMappingCombobox } from "./service-mapping-combobox";
+
+// TEP-7 — detect placeholder / migration-default data.
+function isPlaceholderProfile(t: Pick<Therapist, "height_cm" | "weight_kg" | "build" | "photo_url">): boolean {
+  return (
+    t.height_cm === 160 &&
+    t.weight_kg === 60 &&
+    t.build === "sedang" &&
+    t.photo_url === null
+  );
+}
 
 export const metadata: Metadata = {
   title: "Detail Terapis",
@@ -65,7 +75,7 @@ export default async function TherapistDetailPage({ params, searchParams }: Prop
     throw err;
   }
 
-  const activeTab = ["profil", "layanan", "ketersediaan"].includes(tab)
+  const activeTab = ["profil", "layanan", "jadwal"].includes(tab)
     ? tab
     : "profil";
 
@@ -79,15 +89,50 @@ export default async function TherapistDetailPage({ params, searchParams }: Prop
         Kembali ke Daftar Terapis
       </Link>
 
-      {/* Page header */}
+      {/* TEP-7 — amber banner when therapist has only migration-default data */}
+      {isPlaceholderProfile(therapist) && (
+        <div
+          role="status"
+          className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800"
+        >
+          <AlertCircle size={16} className="mt-0.5 shrink-0 text-amber-600" aria-hidden="true" />
+          <span>
+            Profil belum dilengkapi — lengkapi data postur dan foto sebelum meluncurkan ke pelanggan.
+          </span>
+        </div>
+      )}
+
+      {/* Page header — TEP-6: 48×48 avatar beside the title */}
       <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">
-            Detail Terapis
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {therapist.full_name}
-          </p>
+        <div className="flex items-center gap-3">
+          {/* 48×48 identity anchor (read-only, upload controls are in the form) */}
+          {therapist.photo_url ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={therapist.photo_url}
+              alt={`Foto ${therapist.full_name}`}
+              className="h-12 w-12 shrink-0 rounded-full object-cover"
+            />
+          ) : (
+            <div
+              aria-label={therapist.full_name}
+              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-semibold text-primary"
+            >
+              {therapist.full_name
+                .split(" ")
+                .slice(0, 2)
+                .map((w: string) => w[0]?.toUpperCase() ?? "")
+                .join("") || <UserRound size={20} aria-hidden="true" />}
+            </div>
+          )}
+          <div>
+            <h1 className="text-xl font-semibold text-foreground">
+              Detail Terapis
+            </h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {therapist.full_name}
+            </p>
+          </div>
         </div>
         <Badge variant={therapist.is_active ? "success" : "muted"}>
           {therapist.is_active ? "Aktif" : "Nonaktif"}
@@ -113,12 +158,12 @@ export default async function TherapistDetailPage({ params, searchParams }: Prop
               Layanan
             </Link>
           </TabsTrigger>
-          <TabsTrigger value="ketersediaan" asChild>
+          <TabsTrigger value="jadwal" asChild>
             <Link
-              href={`/master/therapists/${id}?tab=ketersediaan`}
+              href={`/master/therapists/${id}?tab=jadwal`}
               scroll={false}
             >
-              Ketersediaan
+              Jadwal
             </Link>
           </TabsTrigger>
         </TabsList>
@@ -145,8 +190,8 @@ export default async function TherapistDetailPage({ params, searchParams }: Prop
           </Card>
         </TabsContent>
 
-        {/* Ketersediaan tab */}
-        <TabsContent value="ketersediaan">
+        {/* Jadwal tab */}
+        <TabsContent value="jadwal">
           <Card>
             <CardContent className="p-6">
               <AvailabilityEditor

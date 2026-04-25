@@ -271,6 +271,37 @@ func (s *RegistrationService) SubmitRegistration(ctx context.Context, in Registr
 		Meta:         map[string]interface{}{"slug": resolvedSlug, "email_prefix": helper.SHA256Prefix(in.ContactEmail, 8)},
 	})
 
+	// Fire-and-forget acknowledgement email — non-fatal on SMTP failure.
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		body := fmt.Sprintf(
+			"Halo %s,\n\n"+
+				"Terima kasih telah mendaftarkan %s di Lustia. Registrasi Anda telah\n"+
+				"kami terima dan sedang menunggu peninjauan oleh tim Lustia.\n\n"+
+				"Detail registrasi:\n"+
+				"  ID Registrasi : %s\n"+
+				"  Nama          : %s\n"+
+				"  Slug          : %s\n"+
+				"  Paket         : %s\n\n"+
+				"Tim kami akan meninjau permohonan Anda dalam 1×24 jam pada hari\n"+
+				"kerja. Anda akan menerima email lanjutan ketika status registrasi\n"+
+				"berubah:\n"+
+				"  • Disetujui — Anda akan menerima kredensial login admin tenant.\n"+
+				"  • Ditolak  — Anda akan menerima alasan penolakan.\n\n"+
+				"Jika ada pertanyaan, balas email ini.\n\n"+
+				"Salam,\nTim %s",
+			reg.ContactName, reg.CompanyName, reg.ID, reg.CompanyName,
+			reg.RequestedSlug, reg.Package, s.senderName,
+		)
+		_ = s.email.Send(bgCtx, EmailMessage{
+			To:       reg.ContactEmail,
+			Subject:  "Registrasi perusahaan Anda telah diterima",
+			TextBody: body,
+		})
+	}()
+
 	return RegistrationOutput{
 		RegistrationID: reg.ID,
 		Status:         string(reg.Status),
@@ -288,10 +319,19 @@ func (s *RegistrationService) GetByID(ctx context.Context, id string) (Registrat
 
 // ListPending lists registrations (admin only).
 func (s *RegistrationService) ListPending(ctx context.Context, in ListRegistrationsInput) (ListRegistrationsOutput, error) {
-	regs, cursor, err := s.registrations.List(ctx, RegistrationFilter{
+	limit := in.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	page := in.Page
+	if page < 1 {
+		page = 1
+	}
+
+	regs, total, err := s.registrations.List(ctx, RegistrationFilter{
 		Status: in.Status,
-		Cursor: in.Cursor,
-		Limit:  in.Limit,
+		Page:   page,
+		Limit:  limit,
 	})
 	if err != nil {
 		return ListRegistrationsOutput{}, fmt.Errorf("list registrations: %w", err)
@@ -301,9 +341,16 @@ func (s *RegistrationService) ListPending(ctx context.Context, in ListRegistrati
 	for i, r := range regs {
 		details[i] = toRegistrationDetail(r)
 	}
+
+	totalPages := 0
+	if total > 0 {
+		totalPages = int((total + int64(limit) - 1) / int64(limit))
+	}
 	return ListRegistrationsOutput{
 		Registrations: details,
-		NextCursor:    cursor,
+		Page:          page,
+		TotalCount:    total,
+		TotalPages:    totalPages,
 	}, nil
 }
 

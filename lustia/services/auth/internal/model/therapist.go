@@ -2,8 +2,9 @@ package model
 
 import "time"
 
-// Therapist maps to the therapist table (migration 000013 added branch_id).
-// A therapist is scoped to exactly one branch within a tenant.
+// Therapist maps to the therapist table.
+// Migration 000020 (ADR 0011) renamed photo_url → photo_key and added
+// height_cm, weight_kg, build.
 type Therapist struct {
 	ID          string     `gorm:"column:id;primaryKey;type:uuid"`
 	TenantID    string     `gorm:"column:tenant_id;not null;type:uuid"`
@@ -14,7 +15,10 @@ type Therapist struct {
 	Phone       *string    `gorm:"column:phone"`
 	Email       *string    `gorm:"column:email"`
 	Bio         *string    `gorm:"column:bio"`
-	PhotoURL    *string    `gorm:"column:photo_url"`
+	PhotoKey    *string    `gorm:"column:photo_key"`
+	HeightCm    int16      `gorm:"column:height_cm;not null"`
+	WeightKg    int16      `gorm:"column:weight_kg;not null"`
+	Build       string     `gorm:"column:build;not null"`
 	Specialties string     `gorm:"column:specialties;type:jsonb;not null;default:'[]'"`
 	IsActive    bool       `gorm:"column:is_active;not null;default:true"`
 	JoinedAt    *time.Time `gorm:"column:joined_at"`

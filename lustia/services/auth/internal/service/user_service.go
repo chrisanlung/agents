@@ -265,16 +265,20 @@ func (s *UserService) ListUsers(ctx context.Context, in ListUsersInput) (ListUse
 	if limit <= 0 || limit > 200 {
 		limit = defaultListLimit
 	}
+	page := in.Page
+	if page < 1 {
+		page = 1
+	}
 
 	filter := UserFilter{
 		RoleID:   in.RoleID,
 		BranchID: in.BranchID,
 		IsActive: in.IsActive,
-		Cursor:   in.Cursor,
+		Page:     page,
 		Limit:    limit,
 	}
 
-	users, nextCursor, err := s.users.FindByTenant(ctx, in.CallerTenantID, filter)
+	users, total, err := s.users.FindByTenant(ctx, in.CallerTenantID, filter)
 	if err != nil {
 		return ListUsersOutput{}, fmt.Errorf("list users: %w", err)
 	}
@@ -284,7 +288,11 @@ func (s *UserService) ListUsers(ctx context.Context, in ListUsersInput) (ListUse
 		profiles[i] = toUserProfile(u)
 	}
 
-	return ListUsersOutput{Users: profiles, NextCursor: nextCursor}, nil
+	totalPages := 0
+	if total > 0 {
+		totalPages = int((total + int64(limit) - 1) / int64(limit))
+	}
+	return ListUsersOutput{Users: profiles, Page: page, TotalCount: total, TotalPages: totalPages}, nil
 }
 
 // GetUser fetches a single user who has an active membership in the caller's tenant.

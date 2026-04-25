@@ -4,7 +4,7 @@ _Owned by `devops-expert`. Every change that touches Docker images, compose,
 CI, deployment, or runtime infra updates this file in the same turn as the
 diff._
 
-_Last updated: 2026-04-18 — Phase 1 + Phase 2 (devops-expert)._
+_Last updated: 2026-04-25 — Phase 4 storage abstraction (ADR 0011, devops-expert)._
 
 ---
 
@@ -18,7 +18,14 @@ Phase 1+2 runs as **four containers** on one Docker network, composed from
 | `postgres` | `postgres:16-alpine`           | Single cluster, single database (`lustia`). Hosts `lustia_app` and `lustia_migrator` roles; enforces RLS for `lustia_app` traffic. Named volume `lustia_postgres_data`. First-boot init scripts in `deploy/init-db/` create the `lustia_app` role. | —                                           |
 | `migrator` | `migrate/migrate:v4.17.1`      | One-shot. Runs `/migrations` forward (`up`) and exits 0. Pinned image tag. Restart policy `no`. For Phase 2 dev, runs as the Postgres superuser (the dedicated `lustia_migrator` role is itself created inside migration 000001). | `postgres` healthy                          |
 | `mailpit`  | `axllent/mailpit:v1.20`        | Local SMTP catcher + web UI. Accepts any credentials; no persistence (inbox cleared on restart). Exposes SMTP on `${MAILPIT_SMTP_PORT:-1025}` and UI on `${MAILPIT_UI_PORT:-8025}`. Swap to a real provider (AWS SES, SendGrid, Postmark) for staging/prod by pointing `SMTP_HOST`/credentials elsewhere. | —                                           |
-| `auth`    | `lustia-auth:dev` (built local) | Gin + GORM Go service. Listens on `${AUTH_PORT}`. Connects as `lustia_app`. Loads JWT private key from a mounted PEM file. Dispatches password-reset emails via SMTP (Mailpit in dev). | `migrator` completed successfully; `postgres` healthy; `mailpit` healthy |
+| `auth`    | `lustia-auth:dev` (built local) | Gin + GORM Go service. Listens on `${AUTH_PORT}`. Connects as `lustia_app`. Loads JWT private key from a mounted PEM file. Dispatches password-reset emails via SMTP (Mailpit in dev). Serves uploaded files at `GET /uploads/*` when `STORAGE_DRIVER=local`. | `migrator` completed successfully; `postgres` healthy; `mailpit` healthy |
+
+**Named volumes:**
+
+| Volume                  | Container path   | Purpose                                                        |
+| ----------------------- | ---------------- | -------------------------------------------------------------- |
+| `lustia_postgres_data`  | `/var/lib/postgresql/data` | Postgres WAL + data files. Persistent across restarts.  |
+| `lustia_uploads_data`   | `/app/uploads`   | Local-driver upload storage for the auth-service. Must be included in any DB snapshot that captures `photo_key` values (see §11). Owned by uid 65532 (distroless nonroot). |
 
 Shape: health endpoints (`/healthz`, `/readyz`), structured logs, graceful
 shutdown, background refresh-token cleanup goroutine. Resource limits are
@@ -31,10 +38,16 @@ intentionally not set in the dev compose file — the host picks defaults.
          │                         │
     ┌────┴────────┐                │
     │             │                │
-┌───▼──────┐  ┌───▼──────────┐     │
-│ migrator │  │     auth     │◄────┘  auth sends password-reset mail via SMTP
-└──────────┘  └──────────────┘        :${AUTH_PORT} published
-     (exits 0)
+┌───▼──────┐  ┌───▼──────────────────────┐
+│ migrator │  │           auth           │◄── SMTP (password-reset mail)
+└──────────┘  │  :${AUTH_PORT} published │
+  (exits 0)   │  GET /uploads/* (local)  │
+              └───────────┬──────────────┘
+                          │
+                 ┌────────▼──────────┐
+                 │  lustia_uploads_  │   named volume (uid 65532)
+                 │      data         │   /app/uploads
+                 └───────────────────┘
 ```
 
 Open `http://localhost:8025` during development to view any email the
@@ -60,6 +73,27 @@ for the VM setup + ongoing-operations runbook.
 
 `staging` and `prod` are deferred to the phase that introduces a real
 deployment target (see ADR 0006 for the graduation path).
+
+### 2.2 Storage env vars per environment (ADR 0011)
+
+| Var | dev-local / dev-vm | staging | prod |
+| --- | --- | --- | --- |
+| `STORAGE_DRIVER` | `local` | `r2` or `supabase` — **TBD; see prod-flip checklist §10.4** | same as staging |
+| `STORAGE_LOCAL_PATH` | `/app/uploads` (compose) / `$(pwd)/storage-data/uploads` (run-local.sh) | — (local driver not used) | — |
+| `STORAGE_PUBLIC_BASE_URL` | `http://localhost:8080/uploads` | — | — |
+| `STORAGE_R2_ACCOUNT_ID` | — | see §8 | see §8 |
+| `STORAGE_R2_ACCESS_KEY_ID` | — | see §8 | see §8 |
+| `STORAGE_R2_SECRET_ACCESS_KEY` | — | see §8 | see §8 |
+| `STORAGE_R2_BUCKET` | — | see §8 | see §8 |
+| `STORAGE_SUPABASE_URL` | — | see §8 | see §8 |
+| `STORAGE_SUPABASE_SERVICE_KEY` | — | see §8 | see §8 |
+| `UPLOAD_MAX_MB` | `5` | `5` (review before flip) | `5` (review before flip) |
+| `UPLOAD_TENANT_HOURLY_LIMIT` | `30` | `30` (review before flip) | `30` (review before flip) |
+
+`STORAGE_DRIVER` has **no default** — it is a fail-fast required var. An
+unset or unknown value causes the service to exit at startup. Switching
+staging or prod from `local` to `r2` / `supabase` requires the prod-flip
+checklist (§10.4) to be completed first.
 
 ### 2.1 Secret handling per environment
 
@@ -247,6 +281,20 @@ exceptional operation that requires a runbook review.
 | JWT RS256 private key                     | `deploy/secrets/jwt_private.pem` (dev only)      | `auth` container                 | Annually; immediately on compromise |
 | Super-admin bootstrap email               | `deploy/.env` → `SUPER_ADMIN_EMAIL`              | post-migration SQL step          | Replace before staging (one-time)   |
 | Super-admin initial password              | `deploy/.env` → `SUPER_ADMIN_INITIAL_PASSWORD`   | post-migration SQL step          | On first login (forced — see flag below) |
+| `STORAGE_R2_ACCOUNT_ID`                   | **TBD — not yet provisioned** (see note below)   | `auth` container (r2 adapter)    | On compromise; annually             |
+| `STORAGE_R2_ACCESS_KEY_ID`                | **TBD — not yet provisioned** (see note below)   | `auth` container (r2 adapter)    | On compromise; annually             |
+| `STORAGE_R2_SECRET_ACCESS_KEY`            | **TBD — not yet provisioned** (see note below)   | `auth` container (r2 adapter)    | On compromise; annually             |
+| `STORAGE_R2_BUCKET`                       | **TBD — not yet provisioned** (see note below)   | `auth` container (r2 adapter)    | Static (rename requires migration)  |
+| `STORAGE_SUPABASE_URL`                    | **TBD — not yet provisioned** (see note below)   | `auth` container (supabase adapter) | On compromise; annually          |
+| `STORAGE_SUPABASE_SERVICE_KEY`            | **TBD — not yet provisioned** (see note below)   | `auth` container (supabase adapter) | On compromise; annually          |
+
+**Storage credential note (ADR 0011):** the six R2 / Supabase vars above are
+required only when `STORAGE_DRIVER=r2` or `=supabase`. They are not yet
+provisioned because the prod-flip checklist (§10.4) has not been completed.
+When provisioned, they follow the same ADR 0006 two-step path as other
+secrets: `.env` on dev-vm, then secret manager for staging/prod. Service
+credentials must be scoped to `PutObject` + `DeleteObject` only (no list, no
+global read).
 
 **Dev rules** (enforced here; staging/prod has its own inventory):
 
@@ -278,6 +326,34 @@ Phase 2 baseline — every item below exists today; depth is deferred.
   (readiness — can reach the DB). Both are served at the root. Compose relies
   on process liveness + the `depends_on` chain; host-side consumers should
   call `/readyz` directly (the port is published).
+
+### 9.1 Storage metrics (ADR 0011)
+
+Three Prometheus metrics prepared by the storage layer (emitted now;
+scraped once open item #6 lands):
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `storage_upload_total` | Counter | `driver`, `tenant_id`, `status` (`ok`/`fail`) | Incremented once per upload attempt. Alert on `status="fail"` rate. |
+| `storage_upload_bytes_bucket` | Histogram | `driver` | Bytes written per upload. Standard Prometheus buckets. |
+| `storage_delete_total` | Counter | `driver`, `tenant_id`, `status` (`ok`/`fail`) | Incremented per delete attempt (fire-and-forget; failure is non-fatal but tracked here). |
+
+### 9.2 Required structured-log fields on every upload event
+
+Every upload event emitted by `internal/helper/storage/` and the upload
+handler must carry these fields. Missing fields block code review.
+
+| Field | Example | Notes |
+| --- | --- | --- |
+| `tenant_id` | `"acme-spa"` | From the request context. |
+| `photo_key` | `"therapists/abc123/7f3a2b1c.jpg"` | Opaque key written to DB. Never a presigned URL. |
+| `size_bytes` | `204800` | After EXIF stripping; the bytes actually written to storage. |
+| `driver` | `"local"` | Value of `STORAGE_DRIVER` at startup. |
+| `duration_ms` | `47` | Wall-clock time for the `Storage.Upload` call only. |
+| `trace_id` | `"4bf92f3577b34da6..."` | Propagated from OTel context. |
+
+**Never log** file contents, presigned URLs with embedded credentials, or
+raw multipart bodies.
 
 ---
 
@@ -360,6 +436,109 @@ remains whatever was set by the last post-migration UPDATE.
    the operator's identifier and reason. (Phase 2 does this via the login
    flow's standard audit writes; for an out-of-band reset, insert manually.)
 
+### 10.4 Prod-flip checklist — switching `STORAGE_DRIVER` to `r2` or `supabase`
+
+All ten items must be true before `STORAGE_DRIVER=r2` or `=supabase` is set
+in any non-dev environment. The operator completing this checklist signs off
+in the commit message referencing this section.
+
+1. **Bucket denies public `ListObjects` / `ListBucket`.** Verify via the
+   provider console or CLI before deploying.
+2. **Service credential permissions limited to `PutObject` + `DeleteObject`.**
+   No list, no global read. Scope the IAM key / API token to the bucket only.
+3. **Bucket CORS explicitly allowlists frontend origins.** Not `*`. List each
+   expected origin (`https://admin.lustia.id`, etc.).
+4. **Credentials stored in Vault or cloud secret manager per ADR 0006.**
+   The six R2 / Supabase vars in §8 must come from the secret manager, not a
+   plain `.env` file, for staging/prod.
+5. **Observability collecting.** `/metrics` endpoint exposed and Prometheus is
+   scraping `storage_upload_total`, `storage_upload_bytes_bucket`,
+   `storage_delete_total`. Log shipper is forwarding upload events with all
+   fields from §9.2.
+6. **`/readyz` validates storage health at startup.** The go-expert must wire
+   a storage reachability check into the readiness probe before the flip.
+   (This is a flag to go-expert — see downstream notes.)
+7. **Multi-replica guard active.** `STORAGE_DRIVER=local` with
+   `KUBERNETES_SERVICE_HOST` set must still cause a startup hard-fail
+   (ADR 0011 §2.2). Confirm this check is in place before deploying to any
+   orchestrated environment.
+8. **`UPLOAD_MAX_MB` and `UPLOAD_TENANT_HOURLY_LIMIT` reviewed** and committed
+   in the environment config. Default values (5 MB, 30/hr) may be too tight or
+   too loose for production tenants.
+9. **Alert wired on `storage_upload_total{status="fail"}` rate > X%.**
+   Agree on the threshold (suggested: > 5% over 5 minutes) and confirm the
+   alert fires in the staging alerting stack before promoting to prod.
+10. **Runbooks §10.5 and §10.6 tested end-to-end** in staging. At least one
+    operator has walked through each runbook against a real storage failure
+    scenario (use a deliberately mis-configured credential to simulate §10.5).
+
+### 10.5 Photo missing in API response (DB has `photo_key`, storage returns 404)
+
+**Symptom:** therapist DTO has `photo_url` set (non-null) but the URL returns
+HTTP 404. Or `Storage.URL()` logs an error during DTO mapping.
+
+1. Check `STORAGE_DRIVER` in the running container:
+   ```bash
+   docker compose exec auth env | grep STORAGE_DRIVER
+   ```
+2. If `driver=local`, verify the file exists on the volume:
+   ```bash
+   docker compose exec auth ls /app/uploads/<photo_key>
+   ```
+   If missing, the volume was wiped or the container was recreated without
+   reattaching the named volume. See the split-brain note below.
+3. If `driver=r2` or `supabase`, check object presence via the provider CLI
+   or console using the exact `photo_key` value from the DB:
+   ```sql
+   SELECT photo_key FROM therapist WHERE id = '<id>';
+   ```
+4. Verify `STORAGE_PUBLIC_BASE_URL` (local) or the R2/Supabase endpoint
+   (`STORAGE_R2_*` / `STORAGE_SUPABASE_URL`) matches the environment. A URL
+   resolver misconfiguration produces structurally valid but wrong URLs.
+5. **Split-brain scenario:** the DB was restored from backup but the storage
+   volume / bucket was not restored to the same point in time. `photo_key`
+   values in the DB reference objects that no longer exist.
+   - For `local`: restore the `lustia_uploads_data` volume from the same
+     snapshot as the DB restore (see §11).
+   - For R2/Supabase: run the storage consistency check in §11 to enumerate
+     dangling keys.
+6. **Remediation:** if the file is unrecoverable, null the `photo_key`:
+   ```sql
+   UPDATE therapist SET photo_key = NULL WHERE id = '<id>';
+   ```
+   The admin can then re-upload via the UI. Notify the tenant.
+
+### 10.6 Tenant upload volume spike (quota hit or unexpected cost)
+
+**Symptom:** a tenant is hitting 429 responses on `POST /tenant/therapists/:id/photo`,
+or storage costs are spiking unexpectedly.
+
+1. Identify the tenant by querying `storage_upload_total{status="ok"}` grouped
+   by `tenant_id` over the last hour in your metrics backend (Prometheus /
+   Grafana / CloudWatch). Sort descending by count.
+2. Inspect recent upload log events for the tenant to understand the pattern:
+   ```bash
+   docker compose logs auth --tail=500 | grep '"tenant_id":"<slug>"' | grep photo_key
+   ```
+3. Verify that `UPLOAD_TENANT_HOURLY_LIMIT` is set to the expected value:
+   ```bash
+   docker compose exec auth env | grep UPLOAD_TENANT_HOURLY_LIMIT
+   ```
+   The in-memory window resets on service restart. A recent restart may have
+   cleared an earlier quota hit.
+4. Engage with the tenant to understand the root cause — bulk import, scripted
+   upload loop, or a misbehaving client.
+5. If the spike is intentional and the product team approves a higher limit,
+   update `UPLOAD_TENANT_HOURLY_LIMIT` in the env config and redeploy. A
+   per-tenant override is not implemented in Phase 4; treat this as a global
+   limit change.
+6. If the uploads are abusive or credential-compromised, revoke the tenant's
+   API tokens via the admin UI (or directly: `DELETE FROM refresh_token WHERE
+   user_id IN (SELECT id FROM "user" WHERE tenant_id = '<slug>')`). Contact
+   the tenant.
+7. Document the incident in `docs/DECISIONS/` or the incident log so the
+   per-tenant quota feature (Phase 5 backlog) is prioritized correctly.
+
 ---
 
 ## 11. Backups & DR
@@ -371,6 +550,59 @@ migrations plus the bootstrap runbook.
 Staging/prod backup strategy (PITR, retention, tested restores) is
 deferred — see open item #3 (the secret manager work and backups are the
 same milestone).
+
+### 11.1 Storage backup implications (ADR 0011)
+
+The introduction of `photo_key` in `therapist` creates a cross-store
+dependency that backup and DR procedures must respect.
+
+**Local driver (`STORAGE_DRIVER=local`):**
+- The `lustia_uploads_data` named volume is the authoritative store for all
+  uploaded files. It is logically coupled to the Postgres `lustia_postgres_data`
+  volume: a `photo_key` value in the DB references an object in the volume.
+- **Any DB snapshot must be co-snapshotted with the uploads volume at the
+  same point in time.** Restoring the DB without restoring the uploads volume
+  (or vice versa) produces a split-brain state where `photo_key` values
+  reference missing files (runbook §10.5).
+- In `dev-local` this is disposable by design; `docker compose down -v`
+  wipes both. For `dev-vm`, if the VM disk is snapshotted, snapshot both
+  volumes in a single consistent operation.
+
+**R2 / Supabase driver:**
+- Cloud object storage is independently durable (multi-AZ by default). No
+  additional snapshot job is required for the objects themselves.
+- **DR exercises must verify key-to-object integrity.** After any DB restore,
+  run the storage consistency check below to confirm that every `photo_key`
+  in the DB resolves to an existing object in the bucket.
+- Bucket versioning (R2: object versioning; Supabase: not natively supported)
+  is a future decision. Accepted risk in Phase 4.
+
+### 11.2 Storage consistency check (manual procedure)
+
+Run after any DB restore or storage migration. Automation is a future task.
+
+```bash
+# 1. Export all non-null photo_key values from the DB.
+docker compose exec -T postgres psql \
+    -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+    -t -A -c "SELECT photo_key FROM therapist WHERE photo_key IS NOT NULL;" \
+    > /tmp/photo_keys.txt
+
+# 2a. For local driver: verify each file exists on the volume.
+while IFS= read -r key; do
+    docker compose exec auth test -f "/app/uploads/$key" \
+        || echo "MISSING: $key"
+done < /tmp/photo_keys.txt
+
+# 2b. For R2: use the AWS CLI (R2 is S3-compatible).
+#   aws s3api head-object --bucket "$STORAGE_R2_BUCKET" --key "$key"
+#   (Wrap in the same loop; a 404 response means MISSING.)
+
+# 2c. For Supabase: use the Supabase CLI or REST API to HEAD each key.
+```
+
+Any `MISSING` output means a `photo_key` in the DB has no backing object.
+Remediate per runbook §10.5 step 6 (null the key; re-upload via admin UI).
 
 ---
 

@@ -50,12 +50,12 @@ func serviceCode(name, id string) string {
 // CatalogService handles service-catalog CRUD (tenant-scoped).
 // Named CatalogService to avoid the "service_service" stutter mentioned in ADR 0009.
 type CatalogService struct {
-	services  ServiceCatalogRepository
-	mappings  TherapistServiceRepository
+	services   ServiceCatalogRepository
+	mappings   TherapistServiceRepository
 	therapists TherapistRepository
 	branches   BranchRepository
-	audit     AuditRepository
-	clock     Clock
+	audit      AuditRepository
+	clock      Clock
 }
 
 // NewCatalogService constructs a CatalogService.
@@ -115,11 +115,20 @@ func (s *CatalogService) Create(ctx context.Context, in CreateServiceInput) (Ser
 
 // List returns a paginated list of services for the caller's tenant.
 func (s *CatalogService) List(ctx context.Context, in ListServicesInput) (ListServicesOutput, error) {
-	rows, cursor, err := s.services.FindByTenant(ctx, in.CallerTenantID, ServiceFilter{
+	limit := in.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	page := in.Page
+	if page < 1 {
+		page = 1
+	}
+
+	rows, total, err := s.services.FindByTenant(ctx, in.CallerTenantID, ServiceFilter{
 		IsActive: in.IsActive,
 		Category: in.Category,
-		Cursor:   in.Cursor,
-		Limit:    in.Limit,
+		Page:     page,
+		Limit:    limit,
 	})
 	if err != nil {
 		return ListServicesOutput{}, fmt.Errorf("list services: %w", err)
@@ -129,10 +138,17 @@ func (s *CatalogService) List(ctx context.Context, in ListServicesInput) (ListSe
 	for i, sv := range rows {
 		details[i] = toServiceDetail(sv)
 	}
-	return ListServicesOutput{Services: details, NextCursor: cursor}, nil
+
+	totalPages := 0
+	if total > 0 {
+		totalPages = int((total + int64(limit) - 1) / int64(limit))
+	}
+	return ListServicesOutput{Services: details, Page: page, TotalCount: total, TotalPages: totalPages}, nil
 }
 
-// Get returns a single service with active therapist mappings per §11.3 flag #6.
+// Get returns a single service with active therapist mappings (§11.3 flag #6).
+// Add-ons are a separate tenant-wide resource accessed via /tenant/addons
+// (ADR 0010 rewrite 2026-04-24).
 func (s *CatalogService) Get(ctx context.Context, callerTenantID, serviceID string) (ServiceDetailWithTherapists, error) {
 	sv, err := s.services.FindByID(ctx, serviceID)
 	if err != nil {
@@ -148,14 +164,14 @@ func (s *CatalogService) Get(ctx context.Context, callerTenantID, serviceID stri
 		return ServiceDetailWithTherapists{}, fmt.Errorf("load therapist mappings: %w", err)
 	}
 
-	items, err := s.enrichTherapistMappings(ctx, mappingRows)
+	therapistItems, err := s.enrichTherapistMappings(ctx, mappingRows)
 	if err != nil {
 		return ServiceDetailWithTherapists{}, err
 	}
 
 	return ServiceDetailWithTherapists{
 		ServiceDetail: toServiceDetail(sv),
-		Therapists:    items,
+		Therapists:    therapistItems,
 	}, nil
 }
 

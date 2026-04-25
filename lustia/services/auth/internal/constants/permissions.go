@@ -37,4 +37,16 @@ const (
 	PermAvailabilityCreate = "availability.create"
 	PermAvailabilityUpdate = "availability.update"
 	PermAvailabilityDelete = "availability.delete"
+
+	// ADR 0010 — Tenant-wide add-on catalog.
+	PermAddonRead   = "addon.read"
+	PermAddonCreate = "addon.create"
+	PermAddonUpdate = "addon.update"
+	PermAddonDelete = "addon.delete"
+
+	// ADR 0012 — Room (Ruangan) catalog.
+	PermRoomRead   = "room.read"
+	PermRoomCreate = "room.create"
+	PermRoomUpdate = "room.update"
+	PermRoomDelete = "room.delete"
 )

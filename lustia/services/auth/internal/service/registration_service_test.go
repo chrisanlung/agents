@@ -47,8 +47,8 @@ func (r *stubRegistrationRepo) FindPendingBySlug(ctx context.Context, slug strin
 	}
 	return nil, constants.ErrRegistrationNotFound
 }
-func (r *stubRegistrationRepo) List(_ context.Context, _ service.RegistrationFilter) ([]*model.TenantRegistration, string, error) {
-	return nil, "", nil
+func (r *stubRegistrationRepo) List(_ context.Context, _ service.RegistrationFilter) ([]*model.TenantRegistration, int64, error) {
+	return nil, 0, nil
 }
 func (r *stubRegistrationRepo) Update(_ context.Context, reg *model.TenantRegistration) error {
 	r.updated = append(r.updated, reg)
@@ -73,8 +73,8 @@ func (r *stubTenantRepoForReg) Save(_ context.Context, t *model.Tenant) error {
 	r.saved = append(r.saved, t)
 	return nil
 }
-func (r *stubTenantRepoForReg) List(_ context.Context, _ service.TenantFilter) ([]*service.TenantWithCounts, string, error) {
-	return nil, "", nil
+func (r *stubTenantRepoForReg) List(_ context.Context, _ service.TenantFilter) ([]*service.TenantWithCounts, int64, error) {
+	return nil, 0, nil
 }
 func (r *stubTenantRepoForReg) UpdateStatus(_ context.Context, _, _, _ string, _ *string) error {
 	return nil
@@ -93,8 +93,8 @@ func (r *stubUserRepoForReg) FindByEmail(_ context.Context, _ string) (*model.Us
 func (r *stubUserRepoForReg) FindByID(_ context.Context, _ string) (*model.User, error) {
 	return &model.User{}, nil
 }
-func (r *stubUserRepoForReg) FindByTenant(_ context.Context, _ string, _ service.UserFilter) ([]*model.User, string, error) {
-	return nil, "", nil
+func (r *stubUserRepoForReg) FindByTenant(_ context.Context, _ string, _ service.UserFilter) ([]*model.User, int64, error) {
+	return nil, 0, nil
 }
 func (r *stubUserRepoForReg) Save(_ context.Context, u *model.User) error {
 	r.saved = append(r.saved, u)

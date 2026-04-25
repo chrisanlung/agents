@@ -39,7 +39,7 @@ func (r *stubServiceCatalogRepo) FindByID(_ context.Context, id string) (*model.
 	}
 	return s, nil
 }
-func (r *stubServiceCatalogRepo) FindByTenant(_ context.Context, tenantID string, f service.ServiceFilter) ([]*model.ServiceCatalog, string, error) {
+func (r *stubServiceCatalogRepo) FindByTenant(_ context.Context, tenantID string, f service.ServiceFilter) ([]*model.ServiceCatalog, int64, error) {
 	var out []*model.ServiceCatalog
 	for _, s := range r.rows {
 		if s.TenantID != tenantID {
@@ -59,7 +59,7 @@ func (r *stubServiceCatalogRepo) FindByTenant(_ context.Context, tenantID string
 		}
 		out = append(out, s)
 	}
-	return out, "", nil
+	return out, int64(len(out)), nil
 }
 func (r *stubServiceCatalogRepo) Update(_ context.Context, s *model.ServiceCatalog) error {
 	r.rows[s.ID] = s
@@ -115,14 +115,17 @@ func (r *stubTherapistRepoForCatalog) Save(_ context.Context, _ *model.Therapist
 func (r *stubTherapistRepoForCatalog) FindByID(_ context.Context, _ string) (*model.Therapist, error) {
 	return nil, constants.ErrTherapistNotFound
 }
-func (r *stubTherapistRepoForCatalog) FindByTenant(_ context.Context, _ string, _ service.TherapistFilter) ([]*model.Therapist, string, error) {
-	return nil, "", nil
+func (r *stubTherapistRepoForCatalog) FindByTenant(_ context.Context, _ string, _ service.TherapistFilter) ([]*model.Therapist, int64, error) {
+	return nil, 0, nil
 }
 func (r *stubTherapistRepoForCatalog) Update(_ context.Context, _ *model.Therapist) error { return nil }
 func (r *stubTherapistRepoForCatalog) UpdateStatus(_ context.Context, _ string, _ bool) error {
 	return nil
 }
 func (r *stubTherapistRepoForCatalog) SoftDelete(_ context.Context, _ string) error { return nil }
+func (r *stubTherapistRepoForCatalog) UpdatePhotoKey(_ context.Context, _ string, _ *string, _ string) (*string, error) {
+	return nil, nil
+}
 
 func newTestCatalogSvc(svcRepo *stubServiceCatalogRepo) *service.CatalogService {
 	return service.NewCatalogService(

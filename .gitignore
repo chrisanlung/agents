@@ -15,3 +15,10 @@ bash.exe.stackdump
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Local storage uploads (ADR 0011) — runtime data, never committed.
+# Production uses Cloudflare R2 / Supabase Storage.
+lustia/services/auth/storage-data/
+
+# Compiled Go binary (rebuilt via `go build`).
+lustia/services/auth/bin/

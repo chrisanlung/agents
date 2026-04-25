@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/chrisanlung/common-configs/log"
 	"github.com/chrisanlung/lustia-auth/internal/controller"
 	"github.com/chrisanlung/lustia-auth/internal/helper"
+	helperStorage "github.com/chrisanlung/lustia-auth/internal/helper/storage"
 	"github.com/chrisanlung/lustia-auth/internal/repository"
 	"github.com/chrisanlung/lustia-auth/internal/route"
 	"github.com/chrisanlung/lustia-auth/internal/service"
@@ -110,6 +112,10 @@ func main() {
 	serviceCatalogRepo := repository.NewServiceCatalogRepository(gormDB)
 	therapistServiceRepo := repository.NewTherapistServiceRepository(gormDB)
 	therapistAvailabilityRepo := repository.NewTherapistAvailabilityRepository(gormDB)
+	// ADR 0010 — Tenant-wide add-on catalog.
+	addonRepo := repository.NewAddonRepository(gormDB)
+	// ADR 0012 — Room (Ruangan) catalog.
+	roomRepo := repository.NewRoomRepository(gormDB)
 
 	// -------------------------------------------------------------------------
 	// Services (ADR 0007 wiring — all three services now take MembershipRepository)
@@ -172,12 +178,66 @@ func main() {
 		serviceCatalogRepo, therapistServiceRepo, therapistRepo,
 		branchRepo, auditRepo, clock,
 	)
+
 	availabilitySvc := service.NewAvailabilitySvc(
 		therapistAvailabilityRepo, therapistRepo, auditRepo, clock,
 	)
 	mappingSvc := service.NewMappingService(
 		therapistRepo, serviceCatalogRepo, therapistServiceRepo, auditRepo, txManager,
 	)
+
+	// ADR 0010 — Tenant-wide add-on catalog.
+	addonSvc := service.NewAddonService(addonRepo, auditRepo, clock, txManager)
+	// ADR 0012 — Room (Ruangan) catalog.
+	roomSvc := service.NewRoomSvc(roomRepo, branchRepo, auditRepo, clock, txManager)
+
+	// -------------------------------------------------------------------------
+	// ADR 0011 — Storage adapter (fail-fast per §2.2)
+	// -------------------------------------------------------------------------
+	storageDriver := envStr("STORAGE_DRIVER", "")
+	if storageDriver == "" {
+		log.Fatal(ctx, fmt.Errorf("STORAGE_DRIVER is required"), "set STORAGE_DRIVER to one of: local, r2, supabase")
+	}
+
+	rawLocalPath := envStr("STORAGE_LOCAL_PATH", "./storage-data/uploads")
+	absLocalPath, err := filepath.Abs(rawLocalPath)
+	if err != nil {
+		log.Fatal(ctx, err, "cannot resolve STORAGE_LOCAL_PATH")
+	}
+	if rawLocalPath != absLocalPath {
+		log.Infof(ctx, "STORAGE_LOCAL_PATH resolved: %q → %q", rawLocalPath, absLocalPath)
+	}
+
+	storageAdapter, err := helperStorage.NewStorageAdapter(helperStorage.Config{
+		Driver:        storageDriver,
+		LocalPath:     absLocalPath,
+		PublicBaseURL: envStr("STORAGE_PUBLIC_BASE_URL", "http://localhost:8080/uploads"),
+	})
+	if err != nil {
+		log.Fatal(ctx, err, "storage adapter init failed")
+	}
+
+	// The concrete adapter satisfies service.Storage (identical method set).
+	// We assert this at the type boundary here; main.go is the composition root.
+	stor, ok := storageAdapter.(service.Storage)
+	if !ok {
+		log.Fatal(ctx, fmt.Errorf("storage adapter does not implement service.Storage"), "wiring error")
+	}
+
+	// Per-tenant hourly upload quota (ADR 0011 §2.4.6).
+	uploadHourlyLimit := envInt("UPLOAD_TENANT_HOURLY_LIMIT", 30)
+	uploadQuota := helperStorage.NewTenantQuota(time.Hour, uploadHourlyLimit)
+
+	// Upload size cap in bytes (default 5 MiB).
+	uploadMaxMB := envInt("UPLOAD_MAX_MB", 5)
+	uploadMaxBytes := int64(uploadMaxMB) * 1024 * 1024
+
+	// localStoragePath is only passed to route.Deps when driver=local so the
+	// StaticFS route is conditionally registered (ADR 0011 §2.5).
+	localStoragePath := ""
+	if storageDriver == "local" {
+		localStoragePath = absLocalPath
+	}
 
 	// -------------------------------------------------------------------------
 	// Controllers
@@ -189,7 +249,7 @@ func main() {
 	if err != nil {
 		log.Fatal(ctx, err, "failed to access underlying sql.DB")
 	}
-	healthCtrl := controller.NewHealthController(sqlDB)
+	healthCtrl := controller.NewHealthController(sqlDB, storageAdapter)
 
 	// Phase 3 controllers.
 	registrationCtrl := controller.NewRegistrationController(registrationSvc)
@@ -197,10 +257,14 @@ func main() {
 	branchCtrl := controller.NewBranchController(branchSvc)
 
 	// Phase 4 controllers (ADR 0009).
-	therapistCtrl := controller.NewTherapistController(therapistSvc)
+	therapistCtrl := controller.NewTherapistController(therapistSvc, stor, uploadQuota, uploadMaxBytes)
 	serviceCtrl := controller.NewServiceController(catalogSvc)
 	availabilityCtrl := controller.NewAvailabilityController(availabilitySvc)
 	therapistMappingCtrl := controller.NewTherapistMappingController(mappingSvc, therapistSvc)
+	// ADR 0010 — Tenant-wide add-on catalog.
+	addonCtrl := controller.NewAddonController(addonSvc)
+	// ADR 0012 — Room (Ruangan) catalog.
+	roomCtrl := controller.NewRoomController(roomSvc, stor, uploadQuota, uploadMaxBytes)
 
 	// -------------------------------------------------------------------------
 	// Gin engine + routes
@@ -237,6 +301,12 @@ func main() {
 		Service:          serviceCtrl,
 		Availability:     availabilityCtrl,
 		TherapistMapping: therapistMappingCtrl,
+		// ADR 0010 — Tenant-wide add-on catalog.
+		Addon: addonCtrl,
+		// ADR 0012 — Room (Ruangan) catalog.
+		Room: roomCtrl,
+		// ADR 0011 — Static file serving (driver=local only; empty = skip).
+		LocalStoragePath: localStoragePath,
 	})
 
 	// -------------------------------------------------------------------------

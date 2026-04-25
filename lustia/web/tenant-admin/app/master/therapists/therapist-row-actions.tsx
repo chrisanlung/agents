@@ -65,40 +65,52 @@ export function TherapistRowActions({ therapist }: TherapistRowActionsProps) {
 
   return (
     <>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon"
-            disabled={isPending}
-            aria-label="Menu tindakan terapis"
-          >
-            {isPending ? (
-              <Loader2 size={14} className="animate-spin" aria-hidden="true" />
-            ) : (
-              <MoreHorizontal size={14} aria-hidden="true" />
-            )}
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-44">
-          <DropdownMenuItem asChild>
-            <Link href={`/master/therapists/${therapist.id}`}>
-              <Pencil size={14} className="mr-2" aria-hidden="true" />
-              Lihat / Edit
-            </Link>
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={handleToggleStatus}>
-            {therapist.is_active ? "Nonaktifkan" : "Aktifkan"}
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem
-            onClick={() => setDeleteOpen(true)}
-            className="text-destructive focus:text-destructive"
-          >
-            Hapus
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <div className="flex items-center justify-end gap-1">
+        {/* Visible Edit button — explicit affordance for non-technical users
+            per UX review 2026-04-24. Secondary actions (toggle, delete) stay
+            in the dropdown to avoid row-action sprawl. */}
+        <Button
+          asChild
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          aria-label={`Buka detail ${therapist.full_name}`}
+        >
+          <Link href={`/master/therapists/${therapist.id}`}>
+            <Pencil size={14} aria-hidden="true" />
+          </Link>
+        </Button>
+
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              disabled={isPending}
+              aria-label={`Tindakan lainnya untuk ${therapist.full_name}`}
+            >
+              {isPending ? (
+                <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+              ) : (
+                <MoreHorizontal size={14} aria-hidden="true" />
+              )}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-44">
+            <DropdownMenuItem onClick={handleToggleStatus}>
+              {therapist.is_active ? "Nonaktifkan" : "Aktifkan"}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={() => setDeleteOpen(true)}
+              className="text-destructive focus:text-destructive"
+            >
+              Hapus
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
 
       <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <AlertDialogContent>

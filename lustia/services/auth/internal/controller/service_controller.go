@@ -73,12 +73,21 @@ func (h *ServiceController) handleList(c *gin.Context) {
 		return
 	}
 
+	page := q.Page
+	if page < 1 {
+		page = 1
+	}
+	limit := q.Limit
+	if limit < 1 {
+		limit = 10
+	}
+
 	out, err := h.svc.List(c.Request.Context(), service.ListServicesInput{
 		CallerTenantID: claims.TenantID,
 		IsActive:       q.IsActive,
 		Category:       q.Category,
-		Cursor:         q.Cursor,
-		Limit:          q.Limit,
+		Page:           page,
+		Limit:          limit,
 	})
 	if err != nil {
 		helper.RespondDomainError(c, err)
@@ -89,7 +98,13 @@ func (h *ServiceController) handleList(c *gin.Context) {
 	for i, sv := range out.Services {
 		items[i] = toServiceResponse(sv)
 	}
-	c.JSON(http.StatusOK, ListServicesResponse{Data: items, NextCursor: out.NextCursor})
+	c.JSON(http.StatusOK, ListServicesResponse{
+		Data:       items,
+		Page:       out.Page,
+		Limit:      limit,
+		TotalCount: out.TotalCount,
+		TotalPages: out.TotalPages,
+	})
 }
 
 func (h *ServiceController) handleGet(c *gin.Context) {
@@ -204,9 +219,9 @@ func toServiceResponse(d service.ServiceDetail) ServiceResponse {
 }
 
 func toServiceDetailResponse(d service.ServiceDetailWithTherapists) ServiceDetailResponse {
-	items := make([]ServiceTherapistItemResponse, len(d.Therapists))
+	therapists := make([]ServiceTherapistItemResponse, len(d.Therapists))
 	for i, t := range d.Therapists {
-		items[i] = ServiceTherapistItemResponse{
+		therapists[i] = ServiceTherapistItemResponse{
 			TherapistID: t.TherapistID,
 			FullName:    t.FullName,
 			BranchID:    t.BranchID,
@@ -216,6 +231,6 @@ func toServiceDetailResponse(d service.ServiceDetailWithTherapists) ServiceDetai
 	}
 	return ServiceDetailResponse{
 		ServiceResponse: toServiceResponse(d.ServiceDetail),
-		Therapists:      items,
+		Therapists:      therapists,
 	}
 }

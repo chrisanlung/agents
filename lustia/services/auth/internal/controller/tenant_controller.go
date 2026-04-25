@@ -36,10 +36,21 @@ func (h *TenantController) handleList(c *gin.Context) {
 		return
 	}
 
+	page := q.Page
+	if page < 1 {
+		page = 1
+	}
+	limit := q.Limit
+	if limit < 1 {
+		limit = 10
+	}
+
 	out, err := h.svc.List(c.Request.Context(), service.ListTenantsInput{
-		Status: q.Status,
-		Cursor: q.Cursor,
-		Limit:  q.Limit,
+		Status:  q.Status,
+		Q:       q.Q,
+		Package: q.Package,
+		Page:    page,
+		Limit:   limit,
 	})
 	if err != nil {
 		helper.RespondDomainError(c, err)
@@ -52,7 +63,10 @@ func (h *TenantController) handleList(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, ListTenantsResponse{
 		Data:       items,
-		NextCursor: out.NextCursor,
+		Page:       out.Page,
+		Limit:      limit,
+		TotalCount: out.TotalCount,
+		TotalPages: out.TotalPages,
 	})
 }
 

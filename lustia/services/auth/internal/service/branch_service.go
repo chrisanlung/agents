@@ -103,10 +103,19 @@ func (s *BranchService) Create(ctx context.Context, in CreateBranchInput) (Branc
 
 // ListByTenant returns a paginated list of branches for the caller's tenant.
 func (s *BranchService) ListByTenant(ctx context.Context, in ListBranchesInput) (ListBranchesOutput, error) {
-	rows, cursor, err := s.branches.FindByTenant(ctx, in.CallerTenantID, BranchFilter{
+	limit := in.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	page := in.Page
+	if page < 1 {
+		page = 1
+	}
+
+	rows, total, err := s.branches.FindByTenant(ctx, in.CallerTenantID, BranchFilter{
 		Status: in.Status,
-		Cursor: in.Cursor,
-		Limit:  in.Limit,
+		Page:   page,
+		Limit:  limit,
 	})
 	if err != nil {
 		return ListBranchesOutput{}, fmt.Errorf("list branches: %w", err)
@@ -115,7 +124,12 @@ func (s *BranchService) ListByTenant(ctx context.Context, in ListBranchesInput) 
 	for i, b := range rows {
 		details[i] = toBranchDetail(b)
 	}
-	return ListBranchesOutput{Branches: details, NextCursor: cursor}, nil
+
+	totalPages := 0
+	if total > 0 {
+		totalPages = int((total + int64(limit) - 1) / int64(limit))
+	}
+	return ListBranchesOutput{Branches: details, Page: page, TotalCount: total, TotalPages: totalPages}, nil
 }
 
 // GetBranch returns a single branch by ID, scoped to the caller's tenant.

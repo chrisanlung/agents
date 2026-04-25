@@ -212,7 +212,7 @@ export function AvailabilityEditor({
         toast.error(result.error);
         return;
       }
-      toast.success("Jadwal ketersediaan disimpan.");
+      toast.success("Jadwal disimpan.");
     });
   }
 
@@ -223,7 +223,7 @@ export function AvailabilityEditor({
       <div className="rounded-lg border bg-card p-4">
         <div className="mb-3 flex items-center justify-between gap-2">
           <p className="text-xs text-muted-foreground">
-            Atur jadwal ketersediaan mingguan. Setiap hari dapat memiliki
+            Atur jadwal kerja mingguan. Setiap hari dapat memiliki
             hingga 3 jendela waktu.
           </p>
           <Button
@@ -361,7 +361,7 @@ export function AvailabilityEditor({
         {isPending && (
           <Loader2 size={14} className="animate-spin" aria-hidden="true" />
         )}
-        Simpan Ketersediaan
+        Simpan Jadwal
       </Button>
     </div>
   );

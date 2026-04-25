@@ -81,11 +81,20 @@ func (h *BranchController) handleList(c *gin.Context) {
 		return
 	}
 
+	page := q.Page
+	if page < 1 {
+		page = 1
+	}
+	limit := q.Limit
+	if limit < 1 {
+		limit = 10
+	}
+
 	out, err := h.svc.ListByTenant(c.Request.Context(), service.ListBranchesInput{
 		CallerTenantID: claims.TenantID,
 		Status:         q.Status,
-		Cursor:         q.Cursor,
-		Limit:          q.Limit,
+		Page:           page,
+		Limit:          limit,
 	})
 	if err != nil {
 		helper.RespondDomainError(c, err)
@@ -98,7 +107,10 @@ func (h *BranchController) handleList(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, ListBranchesResponse{
 		Data:       items,
-		NextCursor: out.NextCursor,
+		Page:       out.Page,
+		Limit:      limit,
+		TotalCount: out.TotalCount,
+		TotalPages: out.TotalPages,
 	})
 }
 

@@ -43,7 +43,7 @@ func (r *stubTherapistRepo) FindByID(_ context.Context, id string) (*model.Thera
 	}
 	return t, nil
 }
-func (r *stubTherapistRepo) FindByTenant(_ context.Context, tenantID string, f service.TherapistFilter) ([]*model.Therapist, string, error) {
+func (r *stubTherapistRepo) FindByTenant(_ context.Context, tenantID string, f service.TherapistFilter) ([]*model.Therapist, int64, error) {
 	var out []*model.Therapist
 	for _, t := range r.rows {
 		if t.TenantID != tenantID {
@@ -72,7 +72,7 @@ func (r *stubTherapistRepo) FindByTenant(_ context.Context, tenantID string, f s
 		}
 		out = append(out, t)
 	}
-	return out, "", nil
+	return out, int64(len(out)), nil
 }
 func (r *stubTherapistRepo) Update(_ context.Context, t *model.Therapist) error {
 	r.rows[t.ID] = t
@@ -98,6 +98,15 @@ func (r *stubTherapistRepo) SoftDelete(_ context.Context, id string) error {
 	r.deleted = append(r.deleted, id)
 	delete(r.rows, id) // mimic FindByID returning not-found after delete
 	return nil
+}
+func (r *stubTherapistRepo) UpdatePhotoKey(_ context.Context, id string, newKey *string, _ string) (*string, error) {
+	t, ok := r.rows[id]
+	if !ok {
+		return nil, constants.ErrTherapistNotFound
+	}
+	old := t.PhotoKey
+	t.PhotoKey = newKey
+	return old, nil
 }
 
 type stubTherapistServiceRepo struct {
@@ -126,8 +135,8 @@ func (r *stubServiceCatalogRepoForTherapist) Save(_ context.Context, _ *model.Se
 func (r *stubServiceCatalogRepoForTherapist) FindByID(_ context.Context, id string) (*model.ServiceCatalog, error) {
 	return nil, constants.ErrServiceNotFound
 }
-func (r *stubServiceCatalogRepoForTherapist) FindByTenant(_ context.Context, _ string, _ service.ServiceFilter) ([]*model.ServiceCatalog, string, error) {
-	return nil, "", nil
+func (r *stubServiceCatalogRepoForTherapist) FindByTenant(_ context.Context, _ string, _ service.ServiceFilter) ([]*model.ServiceCatalog, int64, error) {
+	return nil, 0, nil
 }
 func (r *stubServiceCatalogRepoForTherapist) Update(_ context.Context, _ *model.ServiceCatalog) error {
 	return nil
@@ -161,8 +170,8 @@ func (r *stubBranchRepoForTherapist) FindByID(_ context.Context, id string) (*mo
 	}
 	return b, nil
 }
-func (r *stubBranchRepoForTherapist) FindByTenant(_ context.Context, _ string, _ service.BranchFilter) ([]*model.Branch, string, error) {
-	return nil, "", nil
+func (r *stubBranchRepoForTherapist) FindByTenant(_ context.Context, _ string, _ service.BranchFilter) ([]*model.Branch, int64, error) {
+	return nil, 0, nil
 }
 func (r *stubBranchRepoForTherapist) Save(_ context.Context, _ *model.Branch) error { return nil }
 func (r *stubBranchRepoForTherapist) Update(_ context.Context, _ *model.Branch) error { return nil }
@@ -208,6 +217,9 @@ func TestTherapistCreate_Success(t *testing.T) {
 		IsAdmin:        true, // tenant_admin — no cross-branch check
 		BranchID:       "b1",
 		FullName:       "Siti Rahma",
+		HeightCm:       165,
+		WeightKg:       55,
+		Build:          "sedang",
 	})
 
 	require.NoError(t, err)

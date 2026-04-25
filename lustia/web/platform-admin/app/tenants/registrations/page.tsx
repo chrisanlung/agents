@@ -1,9 +1,9 @@
-import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ClipboardList, Inbox } from "lucide-react";
 
-import { apiFetch, ApiError } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
+import { handleApiError } from "@/lib/auth-guard";
 import {
   type RegistrationListResponse,
   type TenantRegistration,
@@ -26,6 +26,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import { Pagination } from "@/components/pagination";
+
+const PAGE_SIZE = 10;
 
 export const metadata: Metadata = {
   title: "Antrian Registrasi",
@@ -37,21 +40,37 @@ const PACKAGE_LABELS: Record<string, string> = {
   enterprise: "Enterprise",
 };
 
-export default async function RegistrationsPage() {
+interface PageProps {
+  searchParams: Promise<{ page?: string }>;
+}
+
+export default async function RegistrationsPage({ searchParams }: PageProps) {
+  const { page: pageParam } = await searchParams;
+  const pageNum = Math.max(1, Number(pageParam) || 1);
+
   let registrations: TenantRegistration[] = [];
+  let totalCount = 0;
+  let totalPages = 0;
+  let currentPage = pageNum;
+
+  const params = new URLSearchParams({
+    status: "pending",
+    page: String(pageNum),
+    limit: String(PAGE_SIZE),
+  });
 
   try {
     const res = await apiFetch<RegistrationListResponse>(
-      "/admin/tenant-registrations?status=pending&limit=50",
+      `/admin/tenant-registrations?${params.toString()}`,
       {},
       { auth: true }
     );
     registrations = res.data;
+    totalCount = res.total_count;
+    totalPages = res.total_pages;
+    currentPage = res.page;
   } catch (err) {
-    if (err instanceof ApiError && err.status === 401) {
-      redirect("/login");
-    }
-    throw err;
+    await handleApiError(err);
   }
 
   return (
@@ -74,8 +93,8 @@ export default async function RegistrationsPage() {
             <CardTitle className="text-base">
               Menunggu Peninjauan
             </CardTitle>
-            <Badge variant={registrations.length > 0 ? "default" : "muted"}>
-              {registrations.length} pending
+            <Badge variant={totalCount > 0 ? "default" : "muted"}>
+              {totalCount} pending
             </Badge>
           </div>
           <CardDescription>
@@ -111,6 +130,15 @@ export default async function RegistrationsPage() {
           )}
         </CardContent>
       </Card>
+
+      <Pagination
+        pathname="/tenants/registrations"
+        searchParams={{}}
+        page={currentPage}
+        totalPages={totalPages}
+        totalCount={totalCount}
+        pageSize={PAGE_SIZE}
+      />
     </div>
   );
 }

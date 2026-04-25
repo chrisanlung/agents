@@ -57,17 +57,21 @@ func (r *UserRepository) FindByID(ctx context.Context, id string) (*model.User, 
 }
 
 // FindByTenant lists users who have a membership in the given tenant, with
-// optional filters and cursor pagination.
-func (r *UserRepository) FindByTenant(ctx context.Context, tenantID string, filter service.UserFilter) ([]*model.User, string, error) {
+// optional filters and offset pagination. Returns rows and total matching count.
+func (r *UserRepository) FindByTenant(ctx context.Context, tenantID string, filter service.UserFilter) ([]*model.User, int64, error) {
 	db := dbFromContext(ctx, r.db)
 
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
 	}
+	page := filter.Page
+	if page < 1 {
+		page = 1
+	}
 
 	// Base: users that have a membership in this tenant.
-	q := db.Where(`deleted_at IS NULL AND id IN (
+	q := db.Model(&model.User{}).Where(`deleted_at IS NULL AND id IN (
 		SELECT user_id FROM membership WHERE tenant_id = ? AND status = 'active'
 	)`, tenantID)
 
@@ -88,29 +92,26 @@ func (r *UserRepository) FindByTenant(ctx context.Context, tenantID string, filt
 			WHERE m.tenant_id = ? AND ub.branch_id = ?
 		)`, tenantID, *filter.BranchID)
 	}
-	if filter.Cursor != "" {
-		q = q.Where("id > ?", filter.Cursor)
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("count users: %w", err)
 	}
 
 	var models []model.User
 	if err := q.
 		Order("id ASC").
-		Limit(limit + 1).
+		Offset((page - 1) * limit).
+		Limit(limit).
 		Find(&models).Error; err != nil {
-		return nil, "", fmt.Errorf("list users: %w", err)
-	}
-
-	var nextCursor string
-	if len(models) > limit {
-		models = models[:limit]
-		nextCursor = models[len(models)-1].ID
+		return nil, 0, fmt.Errorf("list users: %w", err)
 	}
 
 	users := make([]*model.User, len(models))
 	for i := range models {
 		users[i] = &models[i]
 	}
-	return users, nextCursor, nil
+	return users, total, nil
 }
 
 // Save inserts a new user row.

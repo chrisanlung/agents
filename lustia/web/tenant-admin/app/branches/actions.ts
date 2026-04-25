@@ -9,15 +9,7 @@ import type { Branch, BranchStatus } from "@/lib/types";
 
 // ─── Shared schema ───────────────────────────────────────────────────────────
 
-const DEFAULT_OPERATIONAL_HOURS = JSON.stringify({
-  mon: "09:00-17:00",
-  tue: "09:00-17:00",
-  wed: "09:00-17:00",
-  thu: "09:00-17:00",
-  fri: "09:00-17:00",
-  sat: "09:00-14:00",
-  sun: null,
-});
+// DEFAULT_OPERATIONAL_HOURS removed — was unused in server action (used in client form only)
 
 const branchSchema = z.object({
   name: z.string().min(1, "Nama cabang wajib diisi.").max(200),

@@ -92,13 +92,22 @@ func (h *AdminController) handleListUsers(c *gin.Context) {
 		branchID = &q.BranchID
 	}
 
+	page := q.Page
+	if page < 1 {
+		page = 1
+	}
+	limit := q.Limit
+	if limit < 1 {
+		limit = 10
+	}
+
 	out, err := h.users.ListUsers(c.Request.Context(), service.ListUsersInput{
 		CallerTenantID: claims.TenantID,
 		RoleID:         roleID,
 		BranchID:       branchID,
 		IsActive:       q.IsActive,
-		Cursor:         q.Cursor,
-		Limit:          q.Limit,
+		Page:           page,
+		Limit:          limit,
 	})
 	if err != nil {
 		helper.RespondDomainError(c, err)
@@ -112,7 +121,10 @@ func (h *AdminController) handleListUsers(c *gin.Context) {
 
 	c.JSON(http.StatusOK, ListUsersResponse{
 		Data:       profiles,
-		NextCursor: out.NextCursor,
+		Page:       out.Page,
+		Limit:      limit,
+		TotalCount: out.TotalCount,
+		TotalPages: out.TotalPages,
 	})
 }
 

@@ -37,4 +37,19 @@ const (
 	CodeTherapistHasActiveBookings = "THERAPIST_HAS_ACTIVE_BOOKINGS"
 	CodeAvailabilityOverlap        = "AVAILABILITY_OVERLAP"
 	CodeCrossBranchForbidden       = "CROSS_BRANCH_FORBIDDEN"
+
+	// ADR 0010 — Tenant-wide add-on catalog (rewritten 2026-04-24).
+	CodeAddonNotFound      = "ADDON_NOT_FOUND"
+	CodeDuplicateAddonName = "DUPLICATE_ADDON_NAME"
+
+	// ADR 0012 — Room (Ruangan) catalog.
+	CodeRoomNotFound      = "ROOM_NOT_FOUND"
+	CodeDuplicateRoomName = "DUPLICATE_ROOM_NAME"
+	CodeRoomBranchImmutable = "ROOM_BRANCH_IMMUTABLE"
+
+	// ADR 0011 — Storage abstraction + therapist extended profile.
+	CodeUploadQuotaExceeded    = "UPLOAD_QUOTA_EXCEEDED"
+	CodeInvalidImageFormat     = "INVALID_IMAGE_FORMAT"
+	CodeImageTooLarge          = "IMAGE_TOO_LARGE"
+	CodeImageDimensionsTooLarge = "IMAGE_DIMENSIONS_TOO_LARGE"
 )

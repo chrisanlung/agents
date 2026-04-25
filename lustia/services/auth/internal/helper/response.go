@@ -108,6 +108,30 @@ func RespondDomainError(c *gin.Context, err error) {
 	case errors.Is(err, constants.ErrCrossBranchForbidden):
 		RespondError(c, http.StatusForbidden, constants.CodeCrossBranchForbidden, "cross-branch access is not permitted for branch_admin callers")
 
+	// ADR 0010 — Tenant-wide add-on catalog (rewritten 2026-04-24).
+	case errors.Is(err, constants.ErrAddonNotFound):
+		RespondError(c, http.StatusNotFound, constants.CodeAddonNotFound, "add-on not found")
+	case errors.Is(err, constants.ErrDuplicateAddonName):
+		RespondError(c, http.StatusConflict, constants.CodeDuplicateAddonName, "add-on name already exists for this tenant")
+
+	// ADR 0012 — Room (Ruangan) catalog.
+	case errors.Is(err, constants.ErrRoomNotFound):
+		RespondError(c, http.StatusNotFound, constants.CodeRoomNotFound, "room not found")
+	case errors.Is(err, constants.ErrDuplicateRoomName):
+		RespondError(c, http.StatusConflict, constants.CodeDuplicateRoomName, err.Error())
+	case errors.Is(err, constants.ErrRoomBranchImmutable):
+		RespondError(c, http.StatusBadRequest, constants.CodeRoomBranchImmutable, err.Error())
+
+	// ADR 0011 — Storage abstraction + therapist extended profile.
+	case errors.Is(err, constants.ErrUploadQuotaExceeded):
+		RespondError(c, http.StatusTooManyRequests, constants.CodeUploadQuotaExceeded, err.Error())
+	case errors.Is(err, constants.ErrInvalidImageFormat):
+		RespondError(c, http.StatusBadRequest, constants.CodeInvalidImageFormat, err.Error())
+	case errors.Is(err, constants.ErrImageTooLarge):
+		RespondError(c, http.StatusBadRequest, constants.CodeImageTooLarge, err.Error())
+	case errors.Is(err, constants.ErrImageDimensionsTooLarge):
+		RespondError(c, http.StatusBadRequest, constants.CodeImageDimensionsTooLarge, err.Error())
+
 	// Generic service-layer validation error — 400 VALIDATION with the
 	// service's message so the caller sees what went wrong.
 	case errors.Is(err, constants.ErrInvalidInput):

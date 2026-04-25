@@ -1,5 +1,4 @@
 import { redirect } from "next/navigation";
-import { cookies } from "next/headers";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Building2, MapPin, ArrowRight } from "lucide-react";

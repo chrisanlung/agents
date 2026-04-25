@@ -29,6 +29,16 @@ type Deps struct {
 	Service          *controller.ServiceController
 	Availability     *controller.AvailabilityController
 	TherapistMapping *controller.TherapistMappingController
+
+	// ADR 0010 — Tenant-wide add-on catalog (rewritten 2026-04-24).
+	Addon *controller.AddonController
+
+	// ADR 0012 — Room (Ruangan) catalog.
+	Room *controller.RoomController
+
+	// ADR 0011 — Local static file serving (driver=local only).
+	// When non-empty, a StaticFS route is registered at /uploads.
+	LocalStoragePath string
 }
 
 // Register builds the full Gin route tree on r.
@@ -104,4 +114,31 @@ func Register(r *gin.Engine, deps Deps) {
 	deps.Service.Register(tenantGroup, rbacMW)
 	deps.Availability.Register(tenantGroup, rbacMW)
 	deps.TherapistMapping.Register(tenantGroup, rbacMW)
+
+	// ADR 0010 — Tenant-wide add-on catalog under /tenant/addons.
+	if deps.Addon != nil {
+		deps.Addon.Register(tenantGroup, rbacMW)
+	}
+
+	// ADR 0012 — Room (Ruangan) catalog under /tenant/rooms.
+	if deps.Room != nil {
+		deps.Room.Register(tenantGroup, rbacMW)
+	}
+
+	// ADR 0011 — Static file serving for local storage driver only.
+	// Not registered for r2/supabase (CDN URLs are returned directly).
+	// Middleware chain: CORS (re-applied explicitly per DO-3) +
+	// X-Content-Type-Options: nosniff + Cache-Control: immutable.
+	if deps.LocalStoragePath != "" {
+		uploads := r.Group("/uploads")
+		if len(deps.CORSAllowedOrigins) > 0 {
+			uploads.Use(middleware.CORS(deps.CORSAllowedOrigins))
+		}
+		uploads.Use(func(c *gin.Context) {
+			c.Header("X-Content-Type-Options", "nosniff")
+			c.Header("Cache-Control", "public, max-age=31536000, immutable")
+			c.Next()
+		})
+		uploads.StaticFS("", gin.Dir(deps.LocalStoragePath, false))
+	}
 }

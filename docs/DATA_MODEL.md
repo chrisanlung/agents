@@ -2,7 +2,7 @@
 
 _Owned by `db-designer`. Every schema change — new table, column, index, or constraint — must update this file in the same turn as the migration._
 
-_Last updated: 2026-04-22 — ADR 0008 Tenant Onboarding & Branch Setup (migration 000011)_
+_Last updated: 2026-04-25 — ADR 0012 Room catalog / Ruangan (migration 000021)_
 
 ---
 
@@ -258,6 +258,20 @@ erDiagram
         JSONB meta
     }
 
+    room {
+        UUID id PK
+        UUID tenant_id FK
+        UUID branch_id FK
+        TEXT name
+        TEXT room_type
+        SMALLINT capacity
+        TEXT[] amenities
+        TEXT photo_key
+        BOOLEAN is_active
+        INT sort_order
+        TIMESTAMPTZ deleted_at
+    }
+
     tenant ||--o{ customer : "owns"
     tenant ||--o{ service : "defines"
     tenant ||--o{ therapist : "employs"
@@ -265,11 +279,13 @@ erDiagram
     tenant ||--o{ booking : "records"
     tenant ||--o{ invoice : "issues"
     tenant ||--o{ payment : "processes"
+    tenant ||--o{ room : "has"
     branch ||--o{ service : "branch-specific"
     branch ||--o{ therapist_availability : "at"
     branch ||--o{ booking : "at"
     branch ||--o{ invoice : "at"
     branch ||--o{ payment : "at"
+    branch ||--o{ room : "has"
     therapist }o--o{ service : "therapist_service"
     therapist ||--o{ therapist_availability : "has"
     therapist ||--o{ booking : "assigned to"
@@ -623,19 +639,29 @@ _Updated 2026-04-21: ADR 0007 — `tenant_id` column removed; `is_super_admin` c
 |---|---|---|---|
 | `id` | `UUID` | PK | |
 | `tenant_id` | `UUID` | NOT NULL, FK → `tenant(id)` RESTRICT | |
+| `branch_id` | `UUID` | NOT NULL, FK → `branch(id)` RESTRICT | Branch assignment (migration 000013) |
 | `user_id` | `UUID` | NULL, FK → `"user"(id)` SET NULL | Portal login link |
 | `full_name` | `TEXT` | NOT NULL, length 1–200 | |
 | `gender` | `TEXT` | NULL, CHECK in (`male`,`female`,`other`) | |
 | `bio` | `TEXT` | NULL | |
-| `photo_url` | `TEXT` | NULL, length ≤ 2048 | |
+| `photo_key` | `TEXT` | NULL, length ≤ 512 | Opaque storage key — see ADR 0011 (migration 000020) |
 | `specialties` | `JSONB` | NOT NULL, DEFAULT `[]` | Array of string tags |
 | `is_active` | `BOOLEAN` | NOT NULL, DEFAULT true | |
+| `height_cm` | `SMALLINT` | NOT NULL, CHECK 100–250 | Customer-visible (migration 000020) |
+| `weight_kg` | `SMALLINT` | NOT NULL, CHECK 30–250 | Customer-visible (migration 000020) |
+| `build` | `TEXT` | NOT NULL, CHECK IN (`langsing`,`sedang`,`atletis`,`tegap`) | Customer-visible (migration 000020) |
+| `phone` | `TEXT` | NULL | Contact phone (migration 000015) |
+| `email` | `TEXT` | NULL | Contact email, distinct from linked user.email (migration 000015) |
 | `metadata` | `JSONB` | NOT NULL, DEFAULT `{}` | |
 | `deleted_at` | `TIMESTAMPTZ` | NULL | |
 | _audit columns_ | | | |
 
-**Indexes:** `therapist_tenant_id_idx`, `therapist_user_id_idx`, `therapist_is_active_idx`, `therapist_specialties_gin` (GIN).
+**Indexes:** `therapist_tenant_id_idx`, `therapist_user_id_idx`, `therapist_is_active_idx`, `therapist_specialties_gin` (GIN), `therapist_branch_id_idx` (migration 000013), `therapist_tenant_branch_active_idx` (migration 000013).
 **RLS:** Standard `tenant_id` policy.
+
+**`photo_key` semantics:** stores the opaque storage key produced by `Storage.Upload()` (e.g. `therapists/{id}/{16-hex}.ext`). The `Storage` interface resolves this to a public URL at read time (`Storage.URL(ctx, key)`) — see ADR 0011 §2.1. The column never holds a scheme or hostname. `NULL` means no photo has been uploaded.
+
+**`height_cm`, `weight_kg`, `build`:** customer-facing fields displayed in the Phase 5 booking picker so customers can select a preferred therapist. Existing rows were back-filled with placeholder values (`160`, `60`, `sedang`) during migration 000020; the admin UI renders a curation banner on rows that still carry placeholder values.
 
 ---
 
@@ -842,10 +868,19 @@ _Updated 2026-04-21: ADR 0007 — `tenant_id` column removed; `is_super_admin` c
 | `payment.record` | Y | Y | — | Y | — | — |
 | `report.read` | Y | Y | — | Y | — | — |
 | `report.export` | Y | Y | — | Y | — | — |
+| `addon.read` | Y | Y | Y | — | — | — |
+| `addon.create` | Y | Y | — | — | — | — |
+| `addon.update` | Y | Y | — | — | — | — |
+| `addon.delete` | Y | Y | — | — | — | — |
+| `room.read` | Y | Y | Y | — | — | — |
+| `room.create` | Y | Y | Y† | — | — | — |
+| `room.update` | Y | Y | Y† | — | — | — |
+| `room.delete` | Y | Y | Y† | — | — | — |
 
 _Notes:_
 - `branch_admin` scope is limited to their assigned branch(es) — enforced at the application layer after the permission check.
 - `therapist` and `customer` "own" access is an application-layer filter on top of the permission check (e.g. `WHERE therapist_id = current_user_id`).
+- † `branch_admin` holds all 4 `room.*` permissions at the DB level. The service layer (`RoomService`) enforces that mutations are restricted to rooms whose `branch_id` is in the caller's assigned branches. This matches the `TherapistService` pattern from Phase 4. See ADR 0012 §2.2.
 
 ---
 
@@ -1020,17 +1055,19 @@ Phase 3 introduces `tenant_registration` as a public-facing queue separate from 
 
 The `tenant_status` and `branch_status` state machines (§5.2, §5.3) are NOT enforced via `CHECK` constraints because Postgres `CHECK` constraints cannot compare `NEW` and `OLD` values. The service layer (`go-expert` scope) implements an explicit transition table that returns `409 INVALID_STATUS_TRANSITION` for illegal moves. Deactivation of a tenant cascades membership status to `suspended` — this cascade is also service-layer logic, not a DB trigger, because it crosses two tables and benefits from transactional error handling. See ADR 0008 §5, answer #4.
 
-### Dev-only seed migration (000010 and 000012)
+### Dev-only seed migrations (000010, 000012, 000014, 000019)
 
-Migration `000010_seed_dev_data.up.sql` inserts the `acme-spa` tenant and `alice@acme-spa.example` with `tenant_admin` membership. Migration `000012_seed_dev_registrations.up.sql` inserts one sample `pending` registration (Zen Wellness) for testing the platform-admin approval queue. Both migrations are **dev-only** and must not be applied in staging or production. In those environments, stop the migration runner at step 11:
+Migration `000010_seed_dev_data.up.sql` inserts the `acme-spa` tenant (`d0000000-0000-0000-0001-000000000001`) and `alice@acme-spa.example` with `tenant_admin` membership. Migration `000012_seed_dev_registrations.up.sql` inserts one sample `pending` registration (Zen Wellness) for testing the platform-admin approval queue. Migration `000014_seed_dev_master_data.up.sql` seeds one branch, three services, two therapists, and their availability windows under acme-spa. Migration `000019_seed_dev_addons.up.sql` seeds four tenant-level add-ons under acme-spa. Migration `000022_seed_dev_rooms.up.sql` seeds three rooms (VIP 1, Couple A, Single 1) for acme-spa Cabang Utama.
+
+All five seed migrations are **dev-only** and must not be applied in staging or production. In those environments, stop the migration runner at step 21:
 
 ```
-migrate -database "$DATABASE_URL" -path ./migrations up 11
+migrate -database "$DATABASE_URL" -path ./migrations up 21
 ```
 
-Or omit the `000010_*.sql` and `000012_*.sql` files from the production image.
+Or omit the `000010_*.sql`, `000012_*.sql`, `000014_*.sql`, `000019_*.sql`, and `000022_*.sql` files from the production image.
 
-The seed migrations are idempotent (`ON CONFLICT DO NOTHING`) and use fixed UUIDs (`d0000000-…` for migration 010, `e0000000-…` for migration 012). The Argon2id hash for `Staff2026!` is stored as a literal constant in migration 010; regenerate with `go run ./cmd/argon2hash 'Staff2026!'`.
+All seed migrations are idempotent (`ON CONFLICT DO NOTHING`) and use fixed UUIDs (`d0000000-…` for migration 010, `e0000000-…` for migrations 012 and 022, `f0000000-…` for migrations 014 and 019). The Argon2id hash for `Staff2026!` is stored as a literal constant in migration 010; regenerate with `go run ./cmd/argon2hash 'Staff2026!'`.
 
 ### `"user"` table separate from `customer` table
 
@@ -1067,6 +1104,22 @@ The seed migration inserts the platform super admin with an unusable placeholder
 ### `INET` type for IP address in `refresh_token`
 
 PostgreSQL's native `INET` type stores IPv4 and IPv6 addresses efficiently and enables subnet containment queries. It is preferable to storing IPs as `TEXT`.
+
+### Room catalog — `amenities` as `TEXT[]` not a lookup table (ADR 0012 §3.1)
+
+`room.amenities` is a `TEXT[]` column rather than a separate `room_amenity` lookup table or an `amenity` entity with FKs. Rationale: amenity labels are operator-defined (tenant-specific), vary freely, and are always read/written as a complete set with no per-row metadata. A lookup table would add a join on every room read and require a management UI just to define tags. The Postgres array type with GIN indexing is sufficient for any future array-contains queries. If standardized amenity codes with multilingual labels become a requirement, a lookup table can be added without breaking the array column (which can be retained or migrated).
+
+### Room `branch_id` FK is `RESTRICT`, not `CASCADE` (ADR 0012 §2.1)
+
+Rooms are physical assets: if a branch is removed while rooms still exist, silently deleting the rooms (and potentially future bookings attached to them) would cause data loss without operator awareness. `RESTRICT` forces an explicit resolution — the operator must soft-delete or reassign all rooms before the branch can be removed. This is the same reasoning as `therapist.branch_id ON DELETE RESTRICT`.
+
+### No `resource` abstraction in Phase 4 (ADR 0012 §2.6)
+
+A generic `resource` super-type table was considered (to unify rooms, equipment, stations) but deferred as YAGNI. `room.id` is sufficient as the booking-engine resource handle for Phase 5. Adding a `resource` abstraction in a later phase is additive — the FK on `booking.room_id` would migrate to `booking.resource_id` when and if the abstraction is needed.
+
+### Room UUID permission namespace `c0000000-0000-0000-0021-*` (ADR 0012 §2.2)
+
+The `0021` suffix matches the migration number. Before writing migration 000021, the entire `lustia/migrations/` directory was grepped for the prefix — zero matches confirmed. The lesson from migration 000018 (where `c0000000-0000-0000-0010-*` collided with existing `booking.*` permissions) is applied here by always verifying the namespace before use.
 
 ---
 
@@ -1122,9 +1175,12 @@ erDiagram
         TEXT full_name
         TEXT gender
         TEXT bio
-        TEXT photo_url
+        TEXT photo_key
         JSONB specialties
         BOOLEAN is_active
+        SMALLINT height_cm
+        SMALLINT weight_kg
+        TEXT build
         TIMESTAMPTZ deleted_at
     }
     service {
@@ -1157,11 +1213,37 @@ erDiagram
         DATE effective_from
         DATE effective_until
     }
+    addon {
+        UUID id PK
+        UUID tenant_id FK
+        TEXT name
+        TEXT description
+        BIGINT price_idr
+        BOOLEAN is_active
+        INT sort_order
+        TIMESTAMPTZ deleted_at
+    }
+    room {
+        UUID id PK
+        UUID tenant_id FK
+        UUID branch_id FK
+        TEXT name
+        TEXT room_type
+        SMALLINT capacity
+        TEXT[] amenities
+        TEXT photo_key
+        BOOLEAN is_active
+        INT sort_order
+        TIMESTAMPTZ deleted_at
+    }
 
     tenant ||--o{ therapist : "employs"
     tenant ||--o{ service : "offers"
+    tenant ||--o{ addon : "offers"
+    tenant ||--o{ room : "has"
     branch ||--o{ therapist : "hosts"
     branch ||--o{ therapist_availability : "schedules at"
+    branch ||--o{ room : "has"
     user o|--o{ therapist : "optional portal login"
     therapist }o--o{ service : "therapist_service"
     therapist ||--o{ therapist_availability : "has schedule"
@@ -1171,6 +1253,7 @@ erDiagram
 - `service.branch_id` is nullable — NULL means the service is tenant-wide (the normal Phase 4 case). A non-null value would indicate a branch-specific override (reserved for future phases).
 - `therapist.user_id` is nullable — a therapist without a portal account has no `user` row. When set, it links to the global `user` table; same-tenant enforcement is at the service layer (see Q3 resolution below).
 - `therapist_service` is a true business entity, not just a junction: it carries `is_active` to model temporary suspension of an offering without destroying the mapping.
+- `addon` is tenant-wide — no relationship to `service` at the catalog level. Phase 5 booking engine records selected add-ons on the booking row; the catalog itself carries no per-service restriction.
 
 ---
 
@@ -1229,6 +1312,48 @@ New column added to the table created in migration 000003:
 
 ---
 
+#### therapist (extended — migration 000015)
+
+Two optional contact columns added (BUG-P4 — fields were in the Go model but missing from the schema):
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `phone` | `TEXT` | NULL | Optional contact phone. Distinct from any user account. |
+| `email` | `TEXT` | NULL | Optional contact email. Distinct from `user.email` via `therapist.user_id`. |
+
+---
+
+#### therapist (extended — migration 000020)
+
+Storage abstraction + customer-facing profile columns. Implements ADR 0011 §2.3.
+
+**Rename:**
+- `photo_url` (TEXT NULL, length ≤ 2048) → `photo_key` (TEXT NULL, length ≤ 512).
+- Existing values were nulled on migration (full URLs are not valid storage keys — ADR 0011 §2.3.1). The old inline CHECK `therapist_photo_url_check` (auto-named by Postgres from migration 000003) was dropped before the rename and replaced with `therapist_photo_key_length`.
+
+**New columns:**
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `photo_key` | `TEXT` | NULL, `therapist_photo_key_length` CHECK length ≤ 512 | Replaces `photo_url`. Opaque storage key (ADR 0011 §2.1). |
+| `height_cm` | `SMALLINT` | NOT NULL, `therapist_height_cm_check` CHECK 100–250 | Customer-visible. Placeholder `160` for pre-existing rows. |
+| `weight_kg` | `SMALLINT` | NOT NULL, `therapist_weight_kg_check` CHECK 30–250 | Customer-visible. Placeholder `60` for pre-existing rows. |
+| `build` | `TEXT` | NOT NULL, `therapist_build_check` CHECK IN (`langsing`,`sedang`,`atletis`,`tegap`) | Customer-visible. Placeholder `'sedang'` for pre-existing rows. |
+
+**`photo_key` storage semantics:** `photo_key` holds the opaque key returned by `Storage.Upload()`. The `Storage` interface (ADR 0011 §2.1) resolves it to a public URL at the controller boundary (`Storage.URL(ctx, key)`). This decouples the schema from any particular storage backend (local disk, Cloudflare R2, Supabase Storage) — swapping backends requires only an env-var change, not a migration.
+
+**`height_cm`, `weight_kg`, `build`:** customer-visible in the Phase 5 booking picker. Pre-existing rows received within-range placeholder values (`160`, `60`, `'sedang'`) so the NOT NULL + CHECK invariants were immediately satisfiable. Defaults were dropped after the NOT NULL promotion so new rows must supply real values from the application layer. The admin UI renders a curation banner for rows still carrying placeholder values (application-layer concern, not a DB constraint).
+
+**Why TEXT + CHECK for `build`, not a Postgres ENUM:** adding a new allowed build category in future requires only an `ALTER TABLE … DROP CONSTRAINT … ADD CONSTRAINT` — no `ALTER TYPE … ADD VALUE`, which requires an `ACCESS EXCLUSIVE` lock and cannot be rolled back in Postgres 16. This matches the project's convention for small controlled vocabularies (see `gender` on the same table).
+
+**Constraint names dropped / added (migration 000020):**
+- Dropped: `therapist_photo_url_check` (anonymous inline CHECK from migration 000003 on the old `photo_url` column; had to be removed before the RENAME).
+- Added: `therapist_photo_key_length`, `therapist_height_cm_check`, `therapist_weight_kg_check`, `therapist_build_check`.
+
+**No new indexes:** `photo_key` is not queried by predicate (only fetched as a column value); the three new scalar columns are not expected to be filtering predicates in Phase 4 or Phase 5 queries. Indexes can be added in a future migration if the booking picker introduces "filter by build" search.
+
+---
+
 #### service (extended — migration 000013)
 
 New column added to the table created in migration 000003:
@@ -1273,6 +1398,117 @@ New column added to the table created in migration 000003:
 
 ---
 
+#### addon (new — migration 000018)
+
+Tenant-wide add-on catalog. One row per optional paid extra offered by the tenant. Not tied to any specific service — any add-on is available with any service. Full rationale in `docs/DECISIONS/0010-per-service-addons.md`.
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | `UUID` | PK, DEFAULT gen_random_uuid() | Surrogate key. |
+| `tenant_id` | `UUID` | NOT NULL, FK → `tenant(id)` RESTRICT | RLS anchor. |
+| `name` | `TEXT` | NOT NULL, length 1–120 | Display name, e.g. "Aromaterapi", "Handuk Panas". |
+| `description` | `TEXT` | NULL, length ≤ 500 | Optional detail shown in booking UI (Phase 5). |
+| `price_idr` | `BIGINT` | NOT NULL, CHECK ≥ 0 | Price in whole Rupiah. BIGINT consistent with `service.price` (BIGINT after migration 000016). Named `price_idr` to make the currency explicit at the column level. |
+| `is_active` | `BOOLEAN` | NOT NULL, DEFAULT true | Temporarily remove from the catalog without deleting the row. |
+| `sort_order` | `INT` | NOT NULL, DEFAULT 0, CHECK 0–9999 | Display order in the admin catalog list and Phase 5 customer picker. Mutated atomically by the reorder endpoint. |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL, DEFAULT now() | |
+| `updated_at` | `TIMESTAMPTZ` | NOT NULL, DEFAULT now() | Maintained by `trg_addon_updated_at` trigger. |
+| `created_by` | `UUID` | NULL, FK → `"user"(id)` SET NULL | |
+| `updated_by` | `UUID` | NULL, FK → `"user"(id)` SET NULL | |
+| `deleted_at` | `TIMESTAMPTZ` | NULL | Soft-delete flag. Hard DELETE blocked at DB level (no DELETE grant). |
+
+**Constraints:**
+- `CONSTRAINT chk_addon_name_length CHECK (char_length(name) BETWEEN 1 AND 120)`
+- `CONSTRAINT chk_addon_description_length CHECK (description IS NULL OR char_length(description) <= 500)`
+- `CONSTRAINT chk_addon_price_non_negative CHECK (price_idr >= 0)`
+- `CONSTRAINT chk_addon_sort_order_range CHECK (sort_order BETWEEN 0 AND 9999)`
+- `CREATE UNIQUE INDEX addon_tenant_name_uidx ON addon (tenant_id, name) WHERE deleted_at IS NULL` — partial unique: duplicate name within the same tenant rejected; deleted rows excluded so a name can be reused after soft-deletion.
+
+**FK rationale:**
+- `tenant_id ON DELETE RESTRICT` — prevents a tenant from being deleted while it still owns add-on rows; consistent with every other operational table. Soft-delete of the tenant is the intended path.
+- `created_by / updated_by ON DELETE SET NULL` — user deletion nullifies the audit reference but never deletes the business row.
+
+**RLS:**
+- Policies mirror `service` (migration 000004): direct `tenant_id` equality check. No `__platform__` sentinel bypass needed — `addon` rows are always tenant-scoped (no NULL-tenant rows).
+- SELECT policy: `tenant_id::text = current_setting('app.current_tenant', true)`
+- INSERT policy: same expression in `WITH CHECK`
+- UPDATE policy: same expression in both `USING` and `WITH CHECK`
+- No DELETE policy — hard DELETE is blocked at the DB level (`lustia_app` has no DELETE grant).
+- `FORCE ROW LEVEL SECURITY` is set so the owning role (`lustia_migrator`) also hits the policy, consistent with all Phase 4 tables.
+
+**Grant:** `GRANT SELECT, INSERT, UPDATE ON addon TO lustia_app;` — no DELETE (soft-delete only).
+
+**Indexes:**
+- `addon_tenant_active_idx`: `(tenant_id, sort_order)` WHERE `is_active = true AND deleted_at IS NULL` — primary list scan for both the admin catalog UI and Phase 5 customer picker.
+- `addon_tenant_id_idx`: `(tenant_id)` — RLS predicate scan.
+- `addon_tenant_name_uidx`: partial unique index (listed under Constraints above).
+
+**`updated_at` trigger:** `trg_addon_updated_at` — `BEFORE UPDATE`, calls `set_updated_at()` (defined in migration 000001), matching the convention on all tables with `updated_at`.
+
+**Dev seed (migration 000019, DEV-ONLY):** 4 tenant-level add-ons for acme-spa. Fixed UUIDs prefixed `f0000000-0000-0000-0005-*`.
+
+---
+
+### room (new — migration 000021)
+
+Branch-scoped physical room catalog. Each row represents one bookable room. The booking engine (Phase 5) will enforce no-double-booking by adding a `(room_id, tstzrange)` exclusion constraint on the `booking` table. This migration ships the catalog CRUD only. Full rationale in `docs/DECISIONS/0012-rooms.md`.
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | `UUID` | PK, DEFAULT gen_random_uuid() | Surrogate key. |
+| `tenant_id` | `UUID` | NOT NULL, FK → `tenant(id)` RESTRICT | RLS anchor. Denormalized copy of `branch.tenant_id` — avoids a join on every RLS predicate evaluation. |
+| `branch_id` | `UUID` | NOT NULL, FK → `branch(id)` RESTRICT | Room belongs to exactly one branch. RESTRICT prevents silent deletion when a branch is removed — operator must reassign or delete rooms first. |
+| `name` | `TEXT` | NOT NULL, length 1–120 | Display name, e.g. "VIP 1", "Couple Room A". |
+| `description` | `TEXT` | NULL, length ≤ 500 | Optional detail shown on customer booking screen (Phase 5). |
+| `room_type` | `TEXT` | NOT NULL, CHECK IN (`single`,`couple`,`group`,`vip`) | Customer-facing category. Stored as TEXT + CHECK, not native ENUM, so new values can be added via a non-blocking CHECK update. |
+| `capacity` | `SMALLINT` | NOT NULL, DEFAULT 1, CHECK 1–20 | Maximum simultaneous occupants. Booking engine uses this as a hard upper bound. SMALLINT (2 bytes) vs INT (4 bytes) is justified because the value range is narrow and this column appears in every room list scan. |
+| `amenities` | `TEXT[]` | NOT NULL, DEFAULT `'{}'` | Operator-defined free-text feature tags (e.g. "shower", "aromaterapi", "tv"). TEXT array — no FK lookup needed because amenity labels are tenant-specific and vary freely. Always read/written as a whole set. GIN index available if array-contains queries are needed in Phase 5. |
+| `photo_key` | `TEXT` | NULL, length ≤ 512 | Opaque storage key (ADR 0011 §2.1). Format: `rooms/{room_id}/{hex16}.{ext}`. Set only via the upload endpoint. Never holds a URL. |
+| `is_active` | `BOOLEAN` | NOT NULL, DEFAULT true | Temporarily hide without deleting. |
+| `sort_order` | `INT` | NOT NULL, DEFAULT 0, CHECK 0–9999 | Display order in admin list and Phase 5 customer picker. Mutated atomically by `PUT /tenant/rooms/reorder` (scoped to one branch per request). |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL, DEFAULT now() | |
+| `updated_at` | `TIMESTAMPTZ` | NOT NULL, DEFAULT now() | Maintained by `trg_room_updated_at` trigger. |
+| `created_by` | `UUID` | NULL, FK → `"user"(id)` SET NULL | |
+| `updated_by` | `UUID` | NULL, FK → `"user"(id)` SET NULL | |
+| `deleted_at` | `TIMESTAMPTZ` | NULL | Soft-delete flag. Hard DELETE blocked at DB level (no DELETE grant). |
+
+**Constraints:**
+- `CONSTRAINT chk_room_name_length CHECK (char_length(name) BETWEEN 1 AND 120)`
+- `CONSTRAINT chk_room_description_length CHECK (description IS NULL OR char_length(description) <= 500)`
+- `CONSTRAINT chk_room_type CHECK (room_type IN ('single','couple','group','vip'))`
+- `CONSTRAINT chk_room_capacity_range CHECK (capacity BETWEEN 1 AND 20)`
+- `CONSTRAINT chk_room_photo_key_length CHECK (photo_key IS NULL OR char_length(photo_key) <= 512)`
+- `CONSTRAINT chk_room_sort_order_range CHECK (sort_order BETWEEN 0 AND 9999)`
+- `CREATE UNIQUE INDEX room_branch_name_uidx ON room (branch_id, name) WHERE deleted_at IS NULL` — no duplicate active names within the same branch; different branches may share names; deleted rows excluded so a name can be reused after soft-deletion.
+
+**FK rationale:**
+- `tenant_id ON DELETE RESTRICT` — consistent with all other operational tables.
+- `branch_id ON DELETE RESTRICT` — rooms are physical assets tied to a location; RESTRICT forces the operator to explicitly reassign or soft-delete rooms before removing a branch. Same pattern as `therapist.branch_id`. CASCADE would silently remove bookable resources, which is worse than a visible rejection.
+- `created_by / updated_by ON DELETE SET NULL` — nullifies the audit reference without deleting the business row.
+
+**Branch-scope service-layer enforcement:** RLS enforces tenant isolation only. `branch_admin` callers see all rooms across their tenant (filtered by RLS). The service layer (`RoomService`) must additionally reject mutations where the caller is `branch_admin` and `room.branch_id ∉ caller.branch_ids`. Same pattern as `TherapistService` (Phase 4). This is not a DB-level constraint because the set of caller branches is a runtime JWT claim, not a static value the DB can evaluate without a dynamic policy or function.
+
+**RLS:**
+- Policies mirror `addon` (migration 000018): direct `tenant_id` equality check.
+- SELECT: `USING (tenant_id::text = current_setting('app.current_tenant', true))`
+- INSERT: `WITH CHECK (tenant_id::text = current_setting('app.current_tenant', true))`
+- UPDATE: both `USING` and `WITH CHECK` with the same expression
+- No DELETE policy — hard DELETE blocked at DB level.
+- `FORCE ROW LEVEL SECURITY` is set, consistent with all operational tables.
+
+**Grant:** `GRANT SELECT, INSERT, UPDATE ON room TO lustia_app;` — no DELETE (soft-delete only).
+
+**Indexes:**
+- `room_tenant_branch_idx`: `(tenant_id, branch_id, sort_order)` WHERE `is_active = true AND deleted_at IS NULL` — primary list scan for both admin UI and Phase 5 customer room picker.
+- `room_tenant_id_idx`: `(tenant_id)` — RLS predicate scan.
+- `room_branch_name_uidx`: partial unique (listed under Constraints above).
+
+**`updated_at` trigger:** `trg_room_updated_at` — `BEFORE UPDATE`, calls `set_updated_at()` (migration 000001).
+
+**Dev seed (migration 000022, DEV-ONLY):** 3 rooms for acme-spa Cabang Utama. Fixed UUIDs prefixed `e0000000-0000-0000-0021-*`. Covers VIP (cap=2), couple (cap=2), and single (cap=1) types for Phase 5 booking engine development.
+
+---
+
 #### therapist_availability (no structural change in migration 000013)
 
 Full schema already specified in migration 000003. Documented here for completeness:
@@ -1304,6 +1540,21 @@ Full schema already specified in migration 000003. Documented here for completen
 - `therapist_avail_therapist_id_idx`: `(therapist_id)`
 - `therapist_avail_branch_id_idx`: `(branch_id)`
 - `therapist_avail_day_idx`: `(therapist_id, day_of_week)` — the booking engine's hot path: "what windows does therapist X have on day D?"
+
+---
+
+### Phase 4 — Migration Log
+
+| Migration | Date | Summary |
+|---|---|---|
+| 000013 | 2026-04-22 | Phase 4 master data: `therapist.branch_id`, `service.category`, `therapist_service.is_active`. Guard-insert Phase 4 permissions. |
+| 000014 | 2026-04-22 | Dev-only seed: acme-spa branch, therapist, service, availability rows. |
+| 000015 | 2026-04-23 | Phase 4 fixes: `therapist.phone` + `.email`; `service.code` nullable; `therapist_service` UPDATE/DELETE RLS policies. |
+| 000016 | 2026-04-23 | Phase 4 more fixes (see migration header). |
+| 000017 | 2026-04-23 | `therapist_service` audit columns. |
+| 000018 | 2026-04-24 | Phase 4 add-ons: `addon` table, RLS, permissions (ADR 0010). |
+| 000019 | 2026-04-24 | Dev-only seed: 4 acme-spa add-on rows. |
+| 000020 | 2026-04-25 | Storage abstraction + therapist extended profile: rename `photo_url` → `photo_key`; add `height_cm`, `weight_kg`, `build` (ADR 0011 §2.3). |
 
 ---
 
@@ -1346,3 +1597,29 @@ Full schema already specified in migration 000003. Documented here for completen
 #### For `qa-expert`
 
 8. **Integration test: cross-branch isolation regression:** create two branches under the same tenant. Create a therapist at Branch A. Attempt to read/mutate that therapist's availability as a `branch_admin` authenticated to Branch B. Assert 403. This is the critical Phase 4 security regression test — see ADR 0009 §2.7.
+
+---
+
+### Phase 4 — Add-on Extension (ADR 0010, migration 000018)
+
+_Revised 2026-04-24: the original per-service `service_addon` design was replaced with a tenant-wide `addon` catalog in the same session. See `docs/DECISIONS/0010-per-service-addons.md` §6 (change log) for the design trail._
+
+#### For `go-expert`
+
+9. **`addon` top-level endpoints (ADR 0010 §4.2):** implement `GET/POST /api/v1/tenant/addons`, `GET /api/v1/tenant/addons/:id`, `PATCH .../addons/:id`, `PATCH .../addons/:id/status`, `DELETE .../addons/:id` (soft-delete = UPDATE setting `deleted_at = now()`), and `PUT /api/v1/tenant/addons/reorder` (bulk `sort_order` update, atomic transaction). Use new permissions `addon.read` / `addon.create` / `addon.update` / `addon.delete` (seeded in migration 000018). No dependency on the `service` resource — `addon` is a top-level tenant resource.
+
+10. **`branch_admin` read-only scope:** ADR 0010 §4.2.1 grants `addon.read` to `branch_admin` but no write permissions. The service layer must reject mutating requests from a `branch_admin` with `403 FORBIDDEN`. No schema change required — the permission wiring is in migration 000018.
+
+11. **Reorder endpoint atomicity:** `PUT /api/v1/tenant/addons/reorder` accepts `{"items": [{"id", "sort_order"}]}` (max 200 items). All `sort_order` updates must be committed in a single transaction. Recommended: `UPDATE addon SET sort_order = v.sort_order FROM (VALUES ...) AS v(id, sort_order) WHERE addon.id = v.id::uuid AND addon.tenant_id::text = current_setting('app.current_tenant', true)`.
+
+12. **`service.price` vs `addon.price_idr` naming:** `service.price` was defined in migration 000003 and intentionally left unchanged. `addon.price_idr` follows ADR 0010 §4.1 which explicitly names the column `price_idr` for currency clarity. No schema action required; document the discrepancy in `API_CONTRACT.md` so DTO field names are consistent.
+
+#### For `security-expert`
+
+13. **`addon` cross-tenant isolation:** RLS uses a direct `tenant_id` equality check (same as `service`). A malicious INSERT specifying a foreign `tenant_id` is blocked at the DB level by the `WITH CHECK` policy. Verify this blocks the cross-tenant write vector in the threat model and document in `SECURITY.md`. There is no parent-service lookup to cross-check (the design intentionally removes the service dependency), so the `tenant_id` supplied by the caller must match the session's `app.current_tenant` — enforced by RLS.
+
+14. **`branch_admin` scope on add-ons:** add-ons are tenant-scoped; a `branch_admin` gets `addon.read` only. Verify the permission seeding in migration 000018 is correct and that the service layer returns `403` on write attempts from `branch_admin`. Document in `SECURITY.md`.
+
+#### For `qa-expert`
+
+15. **Add-on integration tests (ADR 0010 §4.5):** CRUD lifecycle (create / read / update / status toggle / soft-delete) + cross-tenant isolation (add-on from Tenant A is not visible under Tenant B's session) + duplicate-name rejection within a tenant (should return `409 CONFLICT`) + reorder atomicity (`PUT /reorder` with 4 add-ons; verify all `sort_order` values persisted atomically) + cursor pagination on list endpoint (page size 10, verify `next_cursor` and last page) + `branch_admin` write rejection (`POST /addons` as branch_admin returns 403).

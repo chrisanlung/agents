@@ -108,8 +108,8 @@ func (r *stubServiceCatalogRepoForMapping) FindByID(_ context.Context, id string
 	}
 	return s, nil
 }
-func (r *stubServiceCatalogRepoForMapping) FindByTenant(_ context.Context, _ string, _ service.ServiceFilter) ([]*model.ServiceCatalog, string, error) {
-	return nil, "", nil
+func (r *stubServiceCatalogRepoForMapping) FindByTenant(_ context.Context, _ string, _ service.ServiceFilter) ([]*model.ServiceCatalog, int64, error) {
+	return nil, 0, nil
 }
 func (r *stubServiceCatalogRepoForMapping) Update(_ context.Context, _ *model.ServiceCatalog) error {
 	return nil
@@ -146,7 +146,7 @@ func TestMappingReconcile_AddedIDsInserted(t *testing.T) {
 	t.Parallel()
 
 	therapistRepo := newStubTherapistRepo()
-	therapistRepo.rows["th1"] = &model.Therapist{ID: "th1", BranchID: "b1", IsActive: true}
+	therapistRepo.rows["th1"] = &model.Therapist{ID: "th1", TenantID: "t1", BranchID: "b1", IsActive: true}
 	mappingRepo := newTrackingMappingRepo()
 	svcRepo := newStubServiceCatalogRepoForMapping("t1", "s1", "s2")
 
@@ -176,7 +176,7 @@ func TestMappingReconcile_RemovedIDsSetInactive(t *testing.T) {
 	t.Parallel()
 
 	therapistRepo := newStubTherapistRepo()
-	therapistRepo.rows["th1"] = &model.Therapist{ID: "th1", BranchID: "b1", IsActive: true}
+	therapistRepo.rows["th1"] = &model.Therapist{ID: "th1", TenantID: "t1", BranchID: "b1", IsActive: true}
 	mappingRepo := newTrackingMappingRepo()
 	// Pre-populate: th1 currently has s1 and s2.
 	mappingRepo.rows["th1:s1"] = &model.TherapistService{TherapistID: "th1", ServiceID: "s1", IsActive: true}
@@ -203,7 +203,7 @@ func TestMappingReconcile_ReactivatesPreviouslyDeactivated(t *testing.T) {
 	t.Parallel()
 
 	therapistRepo := newStubTherapistRepo()
-	therapistRepo.rows["th1"] = &model.Therapist{ID: "th1", BranchID: "b1", IsActive: true}
+	therapistRepo.rows["th1"] = &model.Therapist{ID: "th1", TenantID: "t1", BranchID: "b1", IsActive: true}
 	mappingRepo := newTrackingMappingRepo()
 	// s1 was previously deactivated.
 	mappingRepo.rows["th1:s1"] = &model.TherapistService{TherapistID: "th1", ServiceID: "s1", IsActive: false}
@@ -227,7 +227,7 @@ func TestMappingReconcile_NoHardDeletes(t *testing.T) {
 	t.Parallel()
 
 	therapistRepo := newStubTherapistRepo()
-	therapistRepo.rows["th1"] = &model.Therapist{ID: "th1", BranchID: "b1", IsActive: true}
+	therapistRepo.rows["th1"] = &model.Therapist{ID: "th1", TenantID: "t1", BranchID: "b1", IsActive: true}
 	mappingRepo := newTrackingMappingRepo()
 	mappingRepo.rows["th1:s1"] = &model.TherapistService{TherapistID: "th1", ServiceID: "s1", IsActive: true}
 
@@ -254,7 +254,7 @@ func TestMappingReconcile_ServiceNotFound(t *testing.T) {
 	t.Parallel()
 
 	therapistRepo := newStubTherapistRepo()
-	therapistRepo.rows["th1"] = &model.Therapist{ID: "th1", BranchID: "b1", IsActive: true}
+	therapistRepo.rows["th1"] = &model.Therapist{ID: "th1", TenantID: "t1", BranchID: "b1", IsActive: true}
 	mappingRepo := newTrackingMappingRepo()
 	// Only s1 exists; s99 does not.
 	svcRepo := newStubServiceCatalogRepoForMapping("t1", "s1")

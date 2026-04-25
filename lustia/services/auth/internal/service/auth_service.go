@@ -14,7 +14,7 @@ import (
 const (
 	maxFailedLogins = 5
 	lockoutDuration = 15 * time.Minute
-	accessTokenTTL  = 15 * time.Minute
+	accessTokenTTL  = 30 * time.Minute
 	refreshTokenTTL = 14 * 24 * time.Hour
 )
 
