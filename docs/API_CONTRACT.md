@@ -2207,3 +2207,402 @@ Clears `photo_key` on the room row; schedules async deletion of the old storage 
 **Response `204 No Content`**
 
 **Errors:** `403 CROSS_BRANCH_FORBIDDEN`, `404 ROOM_NOT_FOUND`.
+
+---
+
+## §14 — Booking Engine (ADR 0014)
+
+_Last updated: 2026-04-25_
+
+### Security notes (inline)
+
+- **C-1:** `total_price_idr` is NEVER accepted from the request body on any booking-create endpoint. It is computed server-side from DB-fetched `service.price_idr` + sum of `addon.price_idr`. Any client-supplied value is ignored by design (field is absent from the DTO).
+- **H-2:** All `/public/*` booking endpoints are rate-limited per IP. Limits: `POST /public/bookings` 5 req/min; `GET /public/bookings/:code` 20 req/min; `GET /public/branches/:id/availability` 30 req/min; `GET /public/branches` 60 req/min. Webhook is not rate-limited.
+- **H-7:** `GET /public/bookings/:code` always scopes the DB query to `WHERE code = $1`. No unbounded public booking scan is possible.
+
+---
+
+### 14.1 Public endpoints (no JWT)
+
+#### 14.1.1 List branches (public)
+
+`GET /api/v1/public/branches`
+
+**Query params:**
+
+| Param | Type | Description |
+|---|---|---|
+| `q` | string | Substring search on branch name or city |
+| `lat` | float | Caller latitude — enables distance sorting |
+| `lng` | float | Caller longitude — enables distance sorting |
+| `category` | string | Filter by service category |
+| `open_now` | bool | Filter to branches open right now |
+| `page` | int | Page number (default 1) |
+| `limit` | int | Page size (default 10, max 50) |
+
+**Response `200 OK`:**
+```json
+{
+  "data": [
+    {
+      "id": "uuid",
+      "name": "Lustia Utama",
+      "city": "Jakarta",
+      "province": "DKI Jakarta",
+      "address_line1": "Jl. Sudirman No. 1",
+      "contact_phone": "021-1234567",
+      "contact_email": "info@lustia.local",
+      "latitude": -6.2088,
+      "longitude": 106.8456,
+      "distance_meters": 1234.5,
+      "categories": ["Pijat", "Facial"]
+    }
+  ],
+  "page": 1,
+  "limit": 10,
+  "total_count": 42
+}
+```
+
+Only returns branches with `branch.status = 'active'` AND `tenant.status = 'active'`. `distance_meters` is `null` when `lat`/`lng` are not provided.
+
+**Errors:** `400 VALIDATION`.
+
+---
+
+#### 14.1.2 Branch availability slots
+
+`GET /api/v1/public/branches/:id/availability`
+
+**Query params:**
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `service_id` | UUID | yes | Service to book |
+| `date` | string | yes | Date in `YYYY-MM-DD` |
+
+**Response `200 OK`:**
+```json
+{
+  "branch_id": "uuid",
+  "service_id": "uuid",
+  "date": "2026-04-26",
+  "slots": [
+    {
+      "start": "2026-04-26T09:00:00Z",
+      "end": "2026-04-26T10:00:00Z",
+      "therapists_available_count": 3,
+      "rooms_available_count": 2
+    }
+  ]
+}
+```
+
+Calls the lazy expiry sweep before computing slots. Slots with `therapists_available_count = 0` are omitted.
+
+**Errors:** `400 VALIDATION`, `404 NOT_FOUND` (branch or service not found).
+
+---
+
+#### 14.1.3 Create booking (customer)
+
+`POST /api/v1/public/bookings`
+
+**Rate limit:** 5 req/min per IP.
+
+**Request body:**
+```json
+{
+  "branch_id": "uuid",
+  "service_id": "uuid",
+  "addon_ids": ["uuid"],
+  "room_id": "uuid",
+  "therapist_id": "uuid",
+  "scheduled_start": "2026-04-26T10:00:00Z",
+  "customer_name": "Budi Santoso",
+  "customer_phone": "081234567890",
+  "customer_email": "budi@example.com"
+}
+```
+
+`room_id` and `therapist_id` are optional — server auto-assigns if omitted. `addon_ids` may be empty. `total_price_idr` is intentionally absent (C-1).
+
+**Response `201 Created`:**
+```json
+{
+  "id": "uuid",
+  "code": "B7K3-M2QF",
+  "status": "pending_payment",
+  "total_price_idr": 180000,
+  "snap_token": "dummy-snap-token-B7K3-M2QF",
+  "redirect_url": "http://localhost:8080/dummy-payment?order=B7K3-M2QF",
+  "scheduled_start": "2026-04-26T10:00:00Z",
+  "scheduled_end": "2026-04-26T11:00:00Z",
+  "addons": [
+    { "addon_id": "uuid", "name": "Aromaterapi", "price_idr": 30000 }
+  ]
+}
+```
+
+Calls lazy expiry sweep before INSERT. On DB GiST exclusion constraint violation → `409 BOOKING_SLOT_CONFLICT`.
+
+**Errors:**
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `VALIDATION` | 400 | Missing/invalid fields |
+| `NOT_FOUND` | 404 | branch_id, service_id, addon_id, room_id, or therapist_id not found or cross-tenant |
+| `BOOKING_SLOT_CONFLICT` | 409 | Therapist or room already booked for this slot (DB exclusion constraint) |
+| `NO_THERAPIST_AVAILABLE` | 409 | Auto-assign: no therapist available for slot |
+| `THERAPIST_NOT_FOR_SERVICE` | 409 | Specified therapist not mapped to service |
+| `RATE_LIMITED` | 429 | IP rate limit exceeded |
+
+---
+
+#### 14.1.4 Get booking by code (public)
+
+`GET /api/v1/public/bookings/:code`
+
+**Rate limit:** 20 req/min per IP.
+
+**Response `200 OK`:**
+```json
+{
+  "code": "B7K3-M2QF",
+  "branch_name": "Lustia Utama",
+  "service_name": "Pijat Relaksasi",
+  "scheduled_start": "2026-04-26T10:00:00Z",
+  "scheduled_end": "2026-04-26T11:00:00Z",
+  "status": "paid",
+  "total_price_idr": 180000,
+  "customer_name": "Budi Santoso",
+  "customer_phone": "****7890",
+  "customer_email": "bu**@example.com",
+  "addons": []
+}
+```
+
+`customer_phone` masked to last 4 digits; `customer_email` masked to first 2 chars + domain (M-2). Query is always `WHERE code = $1` — never unbounded (H-7).
+
+**Errors:** `400 BOOKING_CODE_INVALID`, `404 BOOKING_NOT_FOUND`, `429 RATE_LIMITED`.
+
+---
+
+#### 14.1.5 Payment webhook
+
+`POST /api/v1/public/payments/webhook`
+
+Not rate-limited (Midtrans retries on non-200). Always returns `200 OK` even on internal errors to suppress retry storms.
+
+**Request body (Midtrans notification shape):**
+```json
+{
+  "order_id": "B7K3-M2QF",
+  "transaction_status": "settlement",
+  "status_code": "200",
+  "gross_amount": "180000.00",
+  "signature_key": "<sha512>",
+  "payment_type": "credit_card"
+}
+```
+
+**Behaviour:**
+- Real adapter: verifies SHA-512 signature (`subtle.ConstantTimeCompare`) before any DB read (H-3).
+- Validates `gross_amount >= booking.total_price_idr`; underpayment → audit log `payment.amount_mismatch`, return 200, do NOT mark paid (H-4).
+- Conditional UPDATE `WHERE status = 'pending_payment'`; `rowsAffected = 0` distinguishes already-paid (idempotent) vs expired (H-5 alert to ops).
+
+**Response `200 OK`:** `{"status": "ok"}`
+
+---
+
+### 14.2 Operator endpoints (tenant JWT required)
+
+All operator endpoints require `Authorization: Bearer <token>` with `scope=tenant`.
+
+#### 14.2.1 List bookings
+
+`GET /api/v1/tenant/bookings`  **Permission:** `booking.read`
+
+**Query params:** `branch_id`, `status`, `service_id`, `from` (YYYY-MM-DD), `to` (YYYY-MM-DD), `page`, `limit`.
+
+**Response `200 OK`:**
+```json
+{
+  "data": [ /* BookingResponse array */ ],
+  "page": 1, "limit": 10, "total_count": 47, "total_pages": 5
+}
+```
+
+branch_admin callers are automatically restricted to their JWT `branches` claim.
+
+---
+
+#### 14.2.2 Get booking detail
+
+`GET /api/v1/tenant/bookings/:id`  **Permission:** `booking.read`
+
+Returns full `BookingResponse` including unmasked `customer_phone` and `customer_email`.
+
+**Errors:** `404 BOOKING_NOT_FOUND`, `403 CROSS_BRANCH_FORBIDDEN`.
+
+---
+
+#### 14.2.3 Get booking by code (operator)
+
+`GET /api/v1/tenant/bookings/by-code/:code`  **Permission:** `booking.read`
+
+Returns full `BookingResponse`. Used by ops scan flow as an alternative to `:id`.
+
+---
+
+#### 14.2.4 Create concierge booking
+
+`POST /api/v1/tenant/bookings`  **Permission:** `booking.create`
+
+Same request shape as `POST /public/bookings`. Payment method is always `paid_at_venue`; booking starts as `paid` immediately (no Midtrans transaction). H-6: all FK resources validated against caller's branch scope.
+
+**Response `201 Created`:** `CreateBookingResponse` (snap_token and redirect_url are empty).
+
+---
+
+#### 14.2.5 Check in
+
+`POST /api/v1/tenant/bookings/:id/checkin`  **Permission:** `booking.checkin`
+
+**Request body (optional):**
+```json
+{ "code": "B7K3-M2QF" }
+```
+
+Transitions `paid → checked_in`. If `code` is provided, it must match `booking.code`. Returns updated `BookingResponse`.
+
+**Errors:** `404 BOOKING_NOT_FOUND`, `409 BOOKING_INVALID_STATUS_TRANSITION`, `400 BOOKING_CODE_INVALID`.
+
+---
+
+#### 14.2.6 Complete
+
+`POST /api/v1/tenant/bookings/:id/complete`  **Permission:** `booking.complete`
+
+Transitions `checked_in → completed`. Returns updated `BookingResponse`.
+
+**Errors:** `404 BOOKING_NOT_FOUND`, `409 BOOKING_INVALID_STATUS_TRANSITION`.
+
+---
+
+#### 14.2.7 No-show
+
+`POST /api/v1/tenant/bookings/:id/no-show`  **Permission:** `booking.no_show`
+
+Transitions `paid` or `checked_in → no_show`. Returns updated `BookingResponse`.
+
+**Errors:** `404 BOOKING_NOT_FOUND`, `409 BOOKING_INVALID_STATUS_TRANSITION`.
+
+---
+
+#### 14.2.8 Cancel (ops force-cancel)
+
+`POST /api/v1/tenant/bookings/:id/cancel`  **Permission:** `booking.cancel`
+
+**Request body:**
+```json
+{ "reason": "Customer tidak bisa hadir" }
+```
+
+Transitions `paid` or `checked_in → cancelled`. `reason` is required (max 1000 chars). No refund path in Phase 5. Returns updated `BookingResponse`.
+
+**Errors:** `400 VALIDATION`, `404 BOOKING_NOT_FOUND`, `409 BOOKING_INVALID_STATUS_TRANSITION`.
+
+---
+
+#### 14.2.9 Report summary
+
+`GET /api/v1/tenant/reports/bookings/summary`  **Permission:** `booking.read`
+
+**Query params:** `branch_id` (optional), `from` (YYYY-MM-DD, required), `to` (YYYY-MM-DD, required).
+
+**Response `200 OK`:**
+```json
+{
+  "total_bookings": 142,
+  "total_paid_idr": 21300000,
+  "completed_count": 98,
+  "cancelled_count": 12,
+  "no_show_count": 8,
+  "expired_count": 24,
+  "no_show_rate": 0.0755
+}
+```
+
+`no_show_rate = no_show_count / (completed_count + no_show_count)`, 0 when denominator is 0.
+
+---
+
+### 14.3 Booking status lifecycle
+
+```
+pending_payment ──pay (webhook)──▶ paid ──checkin──▶ checked_in ──complete──▶ completed
+       │                            │
+       └──expire (15 min sweep)──▶ expired
+                                    │
+                                    ├──ops cancel──▶ cancelled
+                                    └──slot ends, ops flags──▶ no_show
+```
+
+The lazy expiry sweep runs on `POST /public/bookings` and `GET /public/branches/:id/availability` before the main operation.
+
+---
+
+### 14.4 Booking error codes
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `BOOKING_NOT_FOUND` | 404 | Booking ID or code does not resolve |
+| `BOOKING_CODE_INVALID` | 400 | Code format is invalid |
+| `BOOKING_SLOT_CONFLICT` | 409 | DB GiST exclusion constraint fired (double-booking) |
+| `BOOKING_EXPIRED` | 409 | Booking has expired (15-min TTL elapsed) |
+| `BOOKING_INVALID_STATUS_TRANSITION` | 409 | Status transition not valid for current booking state |
+| `NO_THERAPIST_AVAILABLE` | 409 | Auto-assign: no therapist available for slot |
+| `NO_ROOM_AVAILABLE` | 409 | Auto-assign: no room available for slot |
+| `THERAPIST_NOT_FOR_SERVICE` | 409 | Therapist not mapped to requested service |
+
+---
+
+### 14.5 `BookingResponse` shape (operator)
+
+```json
+{
+  "id": "uuid",
+  "branch_id": "uuid",
+  "branch_name": "Lustia Utama",
+  "service_id": "uuid",
+  "service_name": "Pijat Relaksasi",
+  "room_id": "uuid",
+  "room_name": "Ruangan A",
+  "therapist_id": "uuid",
+  "therapist_name": "Sari Dewi",
+  "customer_name": "Budi Santoso",
+  "customer_phone": "081234567890",
+  "customer_email": "budi@example.com",
+  "code": "B7K3-M2QF",
+  "scheduled_start": "2026-04-26T10:00:00Z",
+  "scheduled_end": "2026-04-26T11:00:00Z",
+  "total_price_idr": 180000,
+  "payment_method": "midtrans",
+  "payment_reference": "snap-token-xyz",
+  "paid_at": "2026-04-26T09:55:00Z",
+  "status": "paid",
+  "cancelled_at": null,
+  "cancelled_by": null,
+  "cancel_reason": null,
+  "checked_in_at": null,
+  "checked_in_by": null,
+  "completed_at": null,
+  "completed_by": null,
+  "addons": [
+    { "addon_id": "uuid", "name": "Aromaterapi", "price_idr": 30000 }
+  ],
+  "created_at": "2026-04-26T09:50:00Z",
+  "updated_at": "2026-04-26T09:55:00Z"
+}
+```

@@ -482,3 +482,202 @@ func toMembershipSummaryResponses(summaries []service.MembershipSummary) []Membe
 	}
 	return out
 }
+
+// ---------------------------------------------------------------------------
+// ADR 0014 — Phase 5 Booking Engine.
+// ---------------------------------------------------------------------------
+
+// AddonSnapshotResponse is a single add-on snapshot in a booking response.
+type AddonSnapshotResponse struct {
+	AddonID  string `json:"addon_id"`
+	Name     string `json:"name"`
+	PriceIDR int64  `json:"price_idr"`
+}
+
+// BookingResponse is the full operator-visible booking detail.
+type BookingResponse struct {
+	ID               string                  `json:"id"`
+	BranchID         string                  `json:"branch_id"`
+	BranchName       string                  `json:"branch_name"`
+	ServiceID        string                  `json:"service_id"`
+	ServiceName      string                  `json:"service_name"`
+	RoomID           *string                 `json:"room_id"`
+	RoomName         *string                 `json:"room_name"`
+	TherapistID      *string                 `json:"therapist_id"`
+	TherapistName    *string                 `json:"therapist_name"`
+	CustomerName     string                  `json:"customer_name"`
+	CustomerPhone    string                  `json:"customer_phone"`
+	CustomerEmail    string                  `json:"customer_email"`
+	Code             string                  `json:"code"`
+	ScheduledStart   string                  `json:"scheduled_start"`
+	ScheduledEnd     string                  `json:"scheduled_end"`
+	TotalPriceIDR    int64                   `json:"total_price_idr"`
+	PaymentMethod    *string                 `json:"payment_method"`
+	PaymentReference *string                 `json:"payment_reference"`
+	PaidAt           *string                 `json:"paid_at"`
+	Status           string                  `json:"status"`
+	CancelledAt      *string                 `json:"cancelled_at"`
+	CancelledBy      *string                 `json:"cancelled_by"`
+	CancelReason     *string                 `json:"cancel_reason"`
+	CheckedInAt      *string                 `json:"checked_in_at"`
+	CheckedInBy      *string                 `json:"checked_in_by"`
+	CompletedAt      *string                 `json:"completed_at"`
+	CompletedBy      *string                 `json:"completed_by"`
+	Addons           []AddonSnapshotResponse `json:"addons"`
+	CreatedAt        string                  `json:"created_at"`
+	UpdatedAt        string                  `json:"updated_at"`
+}
+
+// CreateBookingResponse is returned by POST /public/bookings and
+// POST /tenant/bookings. Includes the snap token for payment initiation.
+type CreateBookingResponse struct {
+	BookingResponse
+	SnapToken   string `json:"snap_token"`
+	RedirectURL string `json:"redirect_url"`
+}
+
+// PublicBookingResponse is the masked view returned by GET /public/bookings/:code.
+// Phone and email are partially masked per SECURITY.md M-2.
+type PublicBookingResponse struct {
+	Code           string                  `json:"code"`
+	BranchName     string                  `json:"branch_name"`
+	ServiceName    string                  `json:"service_name"`
+	ScheduledStart string                  `json:"scheduled_start"`
+	ScheduledEnd   string                  `json:"scheduled_end"`
+	Status         string                  `json:"status"`
+	TotalPriceIDR  int64                   `json:"total_price_idr"`
+	CustomerName   string                  `json:"customer_name"`
+	CustomerPhone  string                  `json:"customer_phone"` // masked: "****XXXX"
+	CustomerEmail  string                  `json:"customer_email"` // masked: "fi**@domain.com"
+	Addons         []AddonSnapshotResponse `json:"addons"`
+}
+
+// ListBookingsResponse is the response for GET /tenant/bookings.
+type ListBookingsResponse struct {
+	Data       []BookingResponse `json:"data"`
+	Page       int               `json:"page"`
+	Limit      int               `json:"limit"`
+	TotalCount int64             `json:"total_count"`
+	TotalPages int               `json:"total_pages"`
+}
+
+// SlotResponse is a single available slot in the availability response.
+type SlotResponse struct {
+	Start                    string `json:"start"`
+	End                      string `json:"end"`
+	TherapistsAvailableCount int    `json:"therapists_available_count"`
+	RoomsAvailableCount      int    `json:"rooms_available_count"`
+}
+
+// AvailableSlotsResponse is the response for GET /public/branches/:id/availability.
+type AvailableSlotsResponse struct {
+	BranchID  string         `json:"branch_id"`
+	ServiceID string         `json:"service_id"`
+	Date      string         `json:"date"`
+	Slots     []SlotResponse `json:"slots"`
+}
+
+// BookingReportSummaryResponse is the response for GET /tenant/reports/bookings/summary.
+type BookingReportSummaryResponse struct {
+	TotalBookings  int64   `json:"total_bookings"`
+	TotalPaidIDR   int64   `json:"total_paid_idr"`
+	CompletedCount int64   `json:"completed_count"`
+	CancelledCount int64   `json:"cancelled_count"`
+	NoShowCount    int64   `json:"no_show_count"`
+	ExpiredCount   int64   `json:"expired_count"`
+	NoShowRate     float64 `json:"no_show_rate"`
+}
+
+// PublicBranchSummaryResponse is a single item in the public branch list.
+type PublicBranchSummaryResponse struct {
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	City           *string  `json:"city"`
+	Province       *string  `json:"province"`
+	AddressLine1   *string  `json:"address_line1"`
+	ContactPhone   *string  `json:"contact_phone"`
+	ContactEmail   *string  `json:"contact_email"`
+	Latitude       *float64 `json:"latitude"`
+	Longitude      *float64 `json:"longitude"`
+	DistanceMeters *float64 `json:"distance_meters"`
+	Categories     []string `json:"categories"`
+}
+
+// ListPublicBranchesResponse is the response for GET /public/branches.
+type ListPublicBranchesResponse struct {
+	Data       []PublicBranchSummaryResponse `json:"data"`
+	Page       int                           `json:"page"`
+	Limit      int                           `json:"limit"`
+	TotalCount int64                         `json:"total_count"`
+}
+
+// ---------------------------------------------------------------------------
+// Booking mapping helpers
+// ---------------------------------------------------------------------------
+
+func toBookingResponse(d service.BookingDetail) BookingResponse {
+	addons := make([]AddonSnapshotResponse, len(d.Addons))
+	for i, a := range d.Addons {
+		addons[i] = AddonSnapshotResponse{
+			AddonID:  a.AddonID,
+			Name:     a.Name,
+			PriceIDR: a.PriceIDR,
+		}
+	}
+	return BookingResponse{
+		ID:               d.ID,
+		BranchID:         d.BranchID,
+		BranchName:       d.BranchName,
+		ServiceID:        d.ServiceID,
+		ServiceName:      d.ServiceName,
+		RoomID:           d.RoomID,
+		RoomName:         d.RoomName,
+		TherapistID:      d.TherapistID,
+		TherapistName:    d.TherapistName,
+		CustomerName:     d.CustomerName,
+		CustomerPhone:    d.CustomerPhone,
+		CustomerEmail:    d.CustomerEmail,
+		Code:             d.Code,
+		ScheduledStart:   d.ScheduledStart,
+		ScheduledEnd:     d.ScheduledEnd,
+		TotalPriceIDR:    d.TotalPriceIDR,
+		PaymentMethod:    d.PaymentMethod,
+		PaymentReference: d.PaymentReference,
+		PaidAt:           d.PaidAt,
+		Status:           d.Status,
+		CancelledAt:      d.CancelledAt,
+		CancelledBy:      d.CancelledBy,
+		CancelReason:     d.CancelReason,
+		CheckedInAt:      d.CheckedInAt,
+		CheckedInBy:      d.CheckedInBy,
+		CompletedAt:      d.CompletedAt,
+		CompletedBy:      d.CompletedBy,
+		Addons:           addons,
+		CreatedAt:        d.CreatedAt,
+		UpdatedAt:        d.UpdatedAt,
+	}
+}
+
+func toPublicBookingResponse(v service.PublicBookingView) PublicBookingResponse {
+	addons := make([]AddonSnapshotResponse, len(v.Addons))
+	for i, a := range v.Addons {
+		addons[i] = AddonSnapshotResponse{
+			AddonID:  a.AddonID,
+			Name:     a.Name,
+			PriceIDR: a.PriceIDR,
+		}
+	}
+	return PublicBookingResponse{
+		Code:           v.Code,
+		BranchName:     v.BranchName,
+		ServiceName:    v.ServiceName,
+		ScheduledStart: v.ScheduledStart,
+		ScheduledEnd:   v.ScheduledEnd,
+		Status:         v.Status,
+		TotalPriceIDR:  v.TotalPriceIDR,
+		CustomerName:   v.CustomerName,
+		CustomerPhone:  v.CustomerPhone,
+		CustomerEmail:  v.CustomerEmail,
+		Addons:         addons,
+	}
+}

@@ -27,6 +27,17 @@ export LOG_LEVEL=info
 export CONFIG_PATH="$(pwd)/config/app.yaml"
 export APP_DISPLAY_NAME="Lustia"
 
+# --- Phase 5: Payment adapter (ADR 0014, SECURITY.md C-2) ---
+# APP_ENV must be "dev" or "local" when PAYMENT_ADAPTER=dummy.
+# The service will log.Fatal at startup if PAYMENT_ADAPTER=dummy and
+# APP_ENV is anything else (production safety gate).
+export APP_ENV=dev
+export PAYMENT_ADAPTER=dummy
+# Real Midtrans keys — leave blank until keys are provisioned.
+export MIDTRANS_SERVER_KEY=${MIDTRANS_SERVER_KEY:-}
+export MIDTRANS_CLIENT_KEY=${MIDTRANS_CLIENT_KEY:-}
+export MIDTRANS_ENVIRONMENT=sandbox
+
 # --- Database (local Postgres 17) ---
 #
 # Connects as `lustia_app` with full RLS enforced. The tenant middleware

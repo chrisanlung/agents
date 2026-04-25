@@ -41,6 +41,11 @@ type Branch struct {
 	ContactPhone *string `gorm:"column:contact_phone"`
 	ContactEmail *string `gorm:"column:contact_email"`
 
+	// Geo coordinates (added in migration 000024 — Phase 5 ADR 0014 §3.9).
+	// NULL when not yet set by tenant admin.
+	Latitude  *float64 `gorm:"column:latitude"`
+	Longitude *float64 `gorm:"column:longitude"`
+
 	// Lifecycle timestamp (added in migration 000011).
 	ActivatedAt *time.Time `gorm:"column:activated_at"`
 

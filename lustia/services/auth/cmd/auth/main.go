@@ -20,6 +20,7 @@ import (
 	"github.com/chrisanlung/common-configs/log"
 	"github.com/chrisanlung/lustia-auth/internal/controller"
 	"github.com/chrisanlung/lustia-auth/internal/helper"
+	helperPayment "github.com/chrisanlung/lustia-auth/internal/helper/payment"
 	helperStorage "github.com/chrisanlung/lustia-auth/internal/helper/storage"
 	"github.com/chrisanlung/lustia-auth/internal/repository"
 	"github.com/chrisanlung/lustia-auth/internal/route"
@@ -191,6 +192,46 @@ func main() {
 	// ADR 0012 — Room (Ruangan) catalog.
 	roomSvc := service.NewRoomSvc(roomRepo, branchRepo, auditRepo, clock, txManager)
 
+	// ADR 0014 — Phase 5 Booking Engine.
+	// C-2 (SECURITY.md): payment adapter selection with fail-fast guard.
+	// If PAYMENT_ADAPTER=dummy and APP_ENV is not dev/local, NewClient returns
+	// an error and we log.Fatal — an accidental dummy adapter in staging/prod
+	// is a critical security hole (free paid bookings).
+	appEnv := envStr("APP_ENV", "dev")
+	paymentAdapter := envStr("PAYMENT_ADAPTER", "dummy")
+	paymentClient, err := helperPayment.NewClient(helperPayment.Config{
+		Adapter:             paymentAdapter,
+		AppEnv:              appEnv,
+		MidtransServerKey:   os.Getenv("MIDTRANS_SERVER_KEY"),
+		MidtransClientKey:   os.Getenv("MIDTRANS_CLIENT_KEY"),
+		MidtransEnvironment: envStr("MIDTRANS_ENVIRONMENT", "sandbox"),
+	})
+	if err != nil {
+		log.Fatal(ctx, err, "payment adapter misconfiguration (C-2)")
+	}
+	log.Infof(ctx, "payment adapter: %s (APP_ENV=%s)", paymentAdapter, appEnv)
+
+	// paymentAdapter bridges helper/payment.MidtransClientIface → service.MidtransClient
+	// so the service package does not import the helper package (layering rule).
+	paymentBridge := &paymentAdapterBridge{inner: paymentClient}
+
+	bookingRepo := repository.NewBookingRepository(gormDB)
+	bookingSvc := service.NewBookingService(
+		bookingRepo,
+		branchRepo,
+		serviceCatalogRepo,
+		addonRepo,
+		roomRepo,
+		therapistRepo,
+		therapistServiceRepo,
+		therapistAvailabilityRepo,
+		paymentBridge,
+		auditRepo,
+		mailer,
+		clock,
+		txManager,
+	)
+
 	// -------------------------------------------------------------------------
 	// ADR 0011 — Storage adapter (fail-fast per §2.2)
 	// -------------------------------------------------------------------------
@@ -266,6 +307,9 @@ func main() {
 	// ADR 0012 — Room (Ruangan) catalog.
 	roomCtrl := controller.NewRoomController(roomSvc, stor, uploadQuota, uploadMaxBytes)
 
+	// ADR 0014 — Phase 5 Booking Engine.
+	bookingCtrl := controller.NewBookingController(bookingSvc)
+
 	// -------------------------------------------------------------------------
 	// Gin engine + routes
 	// -------------------------------------------------------------------------
@@ -305,6 +349,8 @@ func main() {
 		Addon: addonCtrl,
 		// ADR 0012 — Room (Ruangan) catalog.
 		Room: roomCtrl,
+		// ADR 0014 — Phase 5 Booking Engine.
+		Booking: bookingCtrl,
 		// ADR 0011 — Static file serving (driver=local only; empty = skip).
 		LocalStoragePath: localStoragePath,
 	})
@@ -382,6 +428,44 @@ func (a emailAdapter) Send(ctx context.Context, msg service.EmailMessage) error 
 		TextBody: msg.TextBody,
 		HTMLBody: msg.HTMLBody,
 	})
+}
+
+// paymentAdapterBridge bridges helper/payment.MidtransClientIface →
+// service.MidtransClient so the service package does not import the helper
+// package (layering rule). The two interface shapes are identical.
+type paymentAdapterBridge struct {
+	inner helperPayment.MidtransClientIface
+}
+
+func (b *paymentAdapterBridge) CreateTransaction(ctx context.Context, req service.MidtransPaymentRequest) (service.MidtransPaymentResponse, error) {
+	resp, err := b.inner.CreateTransaction(ctx, helperPayment.PaymentRequest{
+		OrderID:       req.OrderID,
+		GrossAmount:   req.GrossAmount,
+		CustomerName:  req.CustomerName,
+		CustomerEmail: req.CustomerEmail,
+		CustomerPhone: req.CustomerPhone,
+		Description:   req.Description,
+	})
+	if err != nil {
+		return service.MidtransPaymentResponse{}, err
+	}
+	return service.MidtransPaymentResponse{
+		SnapToken:   resp.SnapToken,
+		RedirectURL: resp.RedirectURL,
+		Status:      service.MidtransPaymentStatus(resp.Status),
+	}, nil
+}
+
+func (b *paymentAdapterBridge) HandleNotification(ctx context.Context, n service.MidtransWebhookNotification) (service.MidtransPaymentStatus, error) {
+	status, err := b.inner.HandleNotification(ctx, helperPayment.WebhookNotification{
+		OrderID:           n.OrderID,
+		TransactionStatus: n.TransactionStatus,
+		StatusCode:        n.StatusCode,
+		GrossAmount:       n.GrossAmount,
+		SignatureKey:      n.SignatureKey,
+		PaymentType:       n.PaymentType,
+	})
+	return service.MidtransPaymentStatus(status), err
 }
 
 // ---------------------------------------------------------------------------

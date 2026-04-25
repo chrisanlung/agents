@@ -1,0 +1,83 @@
+name: lustia_mobile
+description: "Lustia — pesan layanan spa & wellness"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI
+  cupertino_icons: ^1.0.8
+  cached_network_image: ^3.4.1
+  qr_flutter: ^4.1.0
+
+  # State management
+  flutter_riverpod: ^2.6.1
+  riverpod_annotation: ^2.3.5
+
+  # Navigation
+  go_router: ^14.6.2
+
+  # HTTP
+  dio: ^5.7.0
+
+  # Local storage
+  shared_preferences: ^2.3.2
+
+  # Geolocation
+  geolocator: ^13.0.2
+  permission_handler: ^11.3.1
+
+  # Data classes
+  freezed_annotation: ^2.4.4
+  json_annotation: ^4.9.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  # Lint
+  flutter_lints: ^4.0.0
+
+  # Code generation
+  build_runner: ^2.4.12
+  riverpod_generator: ^2.4.3
+  freezed: ^2.5.7
+  json_serializable: ^6.8.0
+  go_router_builder: ^2.7.1
+
+  # App icon + splash (run manually after real brand asset arrives)
+  flutter_launcher_icons: ^0.14.1
+  flutter_native_splash: ^2.4.1
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/icon/
+    - assets/images/
+
+# ---------------------------------------------------------------------------
+# flutter_launcher_icons — run: dart run flutter_launcher_icons
+# (replace assets/icon/lustia_icon_source.png with real 1024×1024 asset first)
+# ---------------------------------------------------------------------------
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/lustia_icon_source.png"
+  adaptive_icon_background: "#0D9488"   # Teal-600 (brand primary)
+  adaptive_icon_foreground: "assets/icon/lustia_icon_source.png"
+
+# ---------------------------------------------------------------------------
+# flutter_native_splash — run: dart run flutter_native_splash:create
+# ---------------------------------------------------------------------------
+flutter_native_splash:
+  color: "#0D9488"   # Teal-600 — brand primary
+  image: assets/icon/lustia_icon_source.png
+  android: true
+  ios: true
+  fullscreen: false

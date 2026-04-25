@@ -953,6 +953,253 @@ type ReorderRoomsInput struct {
 	Items          []RoomSortOrderItem
 }
 
+// ---------------------------------------------------------------------------
+// ADR 0014 — Phase 5 Booking Engine.
+// ---------------------------------------------------------------------------
+
+// AddonSnapshot is an add-on with its snapshotted price as recorded at booking
+// creation time.
+type AddonSnapshot struct {
+	AddonID  string
+	Name     string
+	PriceIDR int64
+}
+
+// BookingDetail is the full operator-visible projection of a Booking row.
+// Includes all audit fields. Never returned on the public endpoint — use
+// PublicBookingView for that.
+type BookingDetail struct {
+	ID              string
+	TenantID        string
+	BranchID        string
+	BranchName      string
+	ServiceID       string
+	ServiceName     string
+	RoomID          *string
+	RoomName        *string
+	TherapistID     *string
+	TherapistName   *string
+	CustomerName    string
+	CustomerPhone   string
+	CustomerEmail   string
+	Code            string
+	ScheduledStart  string // RFC3339
+	ScheduledEnd    string // RFC3339
+	TotalPriceIDR   int64
+	PaymentMethod   *string
+	PaymentReference *string
+	PaidAt          *string // RFC3339 or nil
+	Status          string
+	CancelledAt     *string
+	CancelledBy     *string
+	CancelReason    *string
+	CheckedInAt     *string
+	CheckedInBy     *string
+	CompletedAt     *string
+	CompletedBy     *string
+	Addons          []AddonSnapshot
+	CreatedAt       string
+	UpdatedAt       string
+}
+
+// PublicBookingView is the limited, masked booking projection returned by
+// GET /public/bookings/:code. Phone and email are partially masked per M-2
+// (SECURITY.md) to prevent PII exposure when a booking code is shared.
+type PublicBookingView struct {
+	Code           string
+	BranchName     string
+	ServiceName    string
+	ScheduledStart string // RFC3339
+	ScheduledEnd   string // RFC3339
+	Status         string
+	TotalPriceIDR  int64
+	CustomerName   string
+	CustomerPhone  string // masked: "****XXXX" (last 4 digits only)
+	CustomerEmail  string // masked: "fi**@domain.com"
+	Addons         []AddonSnapshot
+}
+
+// Slot represents a single available time slot for a service on a given date.
+type Slot struct {
+	Start                   string // RFC3339
+	End                     string // RFC3339
+	TherapistsAvailableCount int
+	RoomsAvailableCount      int
+}
+
+// PublicCreateBookingInput carries data for the customer-facing booking creation.
+//
+// C-1 (SECURITY.md): TotalPriceIDR is NOT a field here. It is computed
+// server-side by summing service.price + addon prices fetched from the DB.
+// Any client-supplied total would be ignored; this struct makes it impossible
+// to accidentally pass one through.
+type PublicCreateBookingInput struct {
+	BranchID       string
+	ServiceID      string
+	AddonIDs       []string
+	RoomID         *string  // nil = auto-assign
+	TherapistID    *string  // nil = auto-assign
+	ScheduledStart string   // RFC3339
+	CustomerName   string
+	CustomerPhone  string
+	CustomerEmail  string
+	ClientIP       string   // for rate-limit audit
+}
+
+// ConciergeCreateBookingInput carries data for the ops-staff booking creation.
+// Payment is flagged paid_at_venue — no Midtrans transaction is created.
+//
+// H-6 (SECURITY.md): CallerBranches and IsAdmin are used to validate that
+// the caller's JWT branch scope includes the requested BranchID.
+type ConciergeCreateBookingInput struct {
+	CallerUserID   string
+	CallerTenantID string
+	CallerBranches []string
+	IsAdmin        bool
+	BranchID       string
+	ServiceID      string
+	AddonIDs       []string
+	RoomID         *string
+	TherapistID    *string
+	ScheduledStart string // RFC3339
+	CustomerName   string
+	CustomerPhone  string
+	CustomerEmail  string
+}
+
+// GetBookingInput identifies a single booking for the operator detail view.
+type GetBookingInput struct {
+	CallerTenantID string
+	CallerBranches []string
+	IsAdmin        bool
+	BookingID      string
+}
+
+// ListBookingsInput carries filter + pagination for the operator booking list.
+type ListBookingsInput struct {
+	CallerTenantID string
+	CallerBranches []string
+	IsAdmin        bool
+	BranchID       *string
+	Status         *string
+	ServiceID      *string
+	FromDate       *string // YYYY-MM-DD
+	ToDate         *string // YYYY-MM-DD
+	Page           int
+	Limit          int
+}
+
+// ListBookingsOutput carries a page of bookings and pagination metadata.
+type ListBookingsOutput struct {
+	Bookings   []BookingDetail
+	Page       int
+	TotalCount int64
+	TotalPages int
+}
+
+// CheckInInput carries data for the check-in operation.
+type CheckInInput struct {
+	CallerUserID   string
+	CallerTenantID string
+	CallerBranches []string
+	IsAdmin        bool
+	BookingID      string
+	Code           string // must match booking.code (verification)
+}
+
+// CompleteInput carries data for the complete operation.
+type CompleteInput struct {
+	CallerUserID   string
+	CallerTenantID string
+	CallerBranches []string
+	IsAdmin        bool
+	BookingID      string
+}
+
+// NoShowInput carries data for the no-show flagging operation.
+type NoShowInput struct {
+	CallerUserID   string
+	CallerTenantID string
+	CallerBranches []string
+	IsAdmin        bool
+	BookingID      string
+}
+
+// CancelInput carries data for the ops force-cancel operation.
+type CancelInput struct {
+	CallerUserID   string
+	CallerTenantID string
+	CallerBranches []string
+	IsAdmin        bool
+	BookingID      string
+	Reason         string
+}
+
+// GetReportInput carries parameters for the booking summary report.
+type GetReportInput struct {
+	CallerTenantID string
+	BranchID       *string
+	FromDate       string // YYYY-MM-DD
+	ToDate         string // YYYY-MM-DD
+}
+
+// AvailableSlotsInput carries parameters for the availability query.
+type AvailableSlotsInput struct {
+	BranchID   string
+	ServiceID  string
+	Date       string // YYYY-MM-DD
+}
+
+// PublicBranchFilter carries parameters for the public branch listing.
+type PublicBranchFilter struct {
+	Q        string   // substring search on name/city
+	Lat      *float64 // sort by distance when provided
+	Lng      *float64
+	Category *string  // service category filter
+	OpenNow  bool
+	Page     int
+	Limit    int
+}
+
+// PublicBranchSummary is the projection returned in the public branch list.
+type PublicBranchSummary struct {
+	ID             string
+	TenantID       string
+	Name           string
+	City           *string
+	Province       *string
+	AddressLine1   *string
+	ContactPhone   *string
+	ContactEmail   *string
+	Latitude       *float64
+	Longitude      *float64
+	DistanceMeters *float64 // nil when lat/lng not provided in request
+	Categories     []string // distinct service categories at this branch
+	OperationalHours []byte // raw JSONB from DB
+}
+
+// PublicBranchDetail is the full branch detail for the public branch page.
+type PublicBranchDetail struct {
+	PublicBranchSummary
+	Services    []ServiceDetail
+	Therapists  []TherapistDetail
+	Rooms       []RoomDetail
+}
+
+// WebhookHandleInput carries the inbound webhook notification plus the
+// resolved booking for the handler.
+type WebhookHandleInput struct {
+	Notification MidtransWebhookNotification
+}
+
+// CreateBookingOutput is returned after a successful booking creation.
+// It includes the snap token for the client to initiate payment.
+type CreateBookingOutput struct {
+	BookingDetail
+	SnapToken   string
+	RedirectURL string
+}
+
 // UploadRoomPhotoInput carries data for the photo-upload operation.
 type UploadRoomPhotoInput struct {
 	RoomID         string

@@ -2,7 +2,7 @@
 
 _Owned by `db-designer`. Every schema change — new table, column, index, or constraint — must update this file in the same turn as the migration._
 
-_Last updated: 2026-04-25 — ADR 0012 Room catalog / Ruangan (migration 000021)_
+_Last updated: 2026-04-25 — ADR 0014 Phase 5 Booking Engine (migrations 000024–000027)_
 
 ---
 
@@ -1623,3 +1623,376 @@ _Revised 2026-04-24: the original per-service `service_addon` design was replace
 #### For `qa-expert`
 
 15. **Add-on integration tests (ADR 0010 §4.5):** CRUD lifecycle (create / read / update / status toggle / soft-delete) + cross-tenant isolation (add-on from Tenant A is not visible under Tenant B's session) + duplicate-name rejection within a tenant (should return `409 CONFLICT`) + reorder atomicity (`PUT /reorder` with 4 add-ons; verify all `sort_order` values persisted atomically) + cursor pagination on list endpoint (page size 10, verify `next_cursor` and last page) + `branch_admin` write rejection (`POST /addons` as branch_admin returns 403).
+
+---
+
+## Phase 5 — Booking Engine + Customer Mobile App
+
+_Added 2026-04-25 — ADR 0014. Migrations 000024 (branch geo), 000025 (booking tables), 000026 (booking permissions), 000027 (dev-only seed)._
+
+---
+
+### Phase 5 — ERD Snippet
+
+```mermaid
+erDiagram
+    tenant {
+        UUID id PK
+    }
+    branch {
+        UUID id PK
+        UUID tenant_id FK
+        NUMERIC latitude
+        NUMERIC longitude
+    }
+    service {
+        UUID id PK
+        UUID tenant_id FK
+    }
+    therapist {
+        UUID id PK
+        UUID tenant_id FK
+    }
+    room {
+        UUID id PK
+        UUID tenant_id FK
+        UUID branch_id FK
+    }
+    addon {
+        UUID id PK
+        UUID tenant_id FK
+    }
+    booking {
+        UUID id PK
+        UUID tenant_id FK
+        UUID branch_id FK
+        UUID service_id FK
+        UUID room_id FK
+        UUID therapist_id FK
+        TEXT customer_name
+        TEXT customer_phone
+        TEXT customer_email
+        TEXT code
+        TIMESTAMPTZ scheduled_start
+        TIMESTAMPTZ scheduled_end
+        TEXT status
+        BIGINT total_price_idr
+        TEXT payment_method
+        TEXT payment_reference
+        TIMESTAMPTZ paid_at
+        TIMESTAMPTZ cancelled_at
+        UUID cancelled_by FK
+        TIMESTAMPTZ checked_in_at
+        UUID checked_in_by FK
+        TIMESTAMPTZ completed_at
+        UUID completed_by FK
+    }
+    booking_addon {
+        UUID booking_id FK
+        UUID addon_id FK
+        BIGINT price_idr
+    }
+    user {
+        UUID id PK
+    }
+
+    tenant ||--o{ booking : "records"
+    branch ||--o{ booking : "hosts"
+    service ||--o{ booking : "fulfils"
+    therapist ||--o{ booking : "assigned to"
+    room ||--o{ booking : "allocated to"
+    booking ||--o{ booking_addon : "has addons"
+    addon ||--o{ booking_addon : "included in"
+    user ||--o{ booking : "cancelled_by / checked_in_by / completed_by"
+```
+
+---
+
+### branch (extended — migration 000024)
+
+Two new nullable columns added to the existing `branch` table for geolocation support.
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `latitude` | `NUMERIC(9,6)` | NULL; CHECK -90..90 | WGS84 latitude in decimal degrees. NULL = not yet entered. |
+| `longitude` | `NUMERIC(9,6)` | NULL; CHECK -180..180 | WGS84 longitude in decimal degrees. NULL = not yet entered. |
+
+**Extensions added (migration 000024):** `cube` (prerequisite for earthdistance) and `earthdistance`. Both are standard Postgres contrib modules — no OS-level install needed beyond a typical Postgres 16 setup.
+
+**New index:** `branch_geo_idx` on `(latitude, longitude)` WHERE `latitude IS NOT NULL AND longitude IS NOT NULL AND deleted_at IS NULL`. Partial — rows without coordinates are excluded from the index and from distance sort queries.
+
+**Design rationale — NUMERIC vs DOUBLE PRECISION:** `NUMERIC(9,6)` is exact (no float rounding), and 6 decimal places gives ~0.11 m precision at the equator, which exceeds the accuracy of any map-picker input. `DOUBLE PRECISION` would introduce imperceptible rounding at 15+ significant digits but is harder to reason about in CHECK constraints and in JSONB serialisation (precision loss at JSON encoding boundaries). NUMERIC is the correct type for measured quantities.
+
+**Design rationale — earthdistance vs PostGIS:** the only Phase 5 geospatial operation is "sort by distance from lat/lng". The `earthdistance` extension provides `ll_to_earth()` and `earth_distance()` functions for Haversine-approximated point distances — adequate for branch discovery at city/regional scale (sub-1% error up to ~100 km). PostGIS would be required for polygon containment, routing, or complex spatial predicates. PostGIS also requires OS-level package installation (`libgeos`, `libproj`), adding operational complexity. earthdistance with cube is a pure SQL extension installable without system packages.
+
+**Phase 6 follow-up:** map picker for branch lat/lng in tenant-admin UI; auto-geocoding from address via Nominatim or Google Maps API.
+
+---
+
+### booking (new — migration 000025)
+
+Core appointment record for the Phase 5 booking engine. One row per customer booking. Customer identity is captured inline — there is no customer account (ADR 0014 §3.2). No `deleted_at` column — lifecycle is expressed entirely through `status`.
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | `UUID` | PK, DEFAULT gen_random_uuid() | |
+| `tenant_id` | `UUID` | NOT NULL, FK → `tenant(id)` RESTRICT | RLS anchor. |
+| `branch_id` | `UUID` | NOT NULL, FK → `branch(id)` RESTRICT | |
+| `service_id` | `UUID` | NOT NULL, FK → `service(id)` RESTRICT | |
+| `room_id` | `UUID` | NULL, FK → `room(id)` RESTRICT | Auto-assigned by service layer; customer may override. |
+| `therapist_id` | `UUID` | NULL, FK → `therapist(id)` RESTRICT | Auto-assigned by service layer; customer may override. |
+| `customer_name` | `TEXT` | NOT NULL, length 1–200 | Captured at booking time. |
+| `customer_phone` | `TEXT` | NOT NULL, length 5–30 | |
+| `customer_email` | `TEXT` | NOT NULL, length ≤ 320; CHECK email shape | Used for confirmation email. |
+| `code` | `TEXT` | NOT NULL, UNIQUE; CHECK `^[A-Z2-7]{4}-[A-Z2-7]{4}$` | 9-char Crockford Base32 code with hyphen. QR payload. See ADR 0014 §3.4. |
+| `scheduled_start` | `TIMESTAMPTZ` | NOT NULL | UTC. |
+| `scheduled_end` | `TIMESTAMPTZ` | NOT NULL, CHECK > scheduled_start | UTC. Computed as start + service.duration_minutes. |
+| `status` | `TEXT` | NOT NULL, DEFAULT `pending_payment`; CHECK IN valid values | See state machine below. |
+| `total_price_idr` | `BIGINT` | NOT NULL, CHECK ≥ 0 | Snapshot of service price + addon prices at booking creation. |
+| `payment_method` | `TEXT` | NULL; CHECK IN (`midtrans`, `paid_at_venue`) | NULL until payment step. |
+| `payment_reference` | `TEXT` | NULL | Midtrans snap_token or txn_id; NULL for paid_at_venue. |
+| `paid_at` | `TIMESTAMPTZ` | NULL | Set when status transitions to `paid`. |
+| `cancelled_at` | `TIMESTAMPTZ` | NULL | Set on cancellation. |
+| `cancelled_by` | `UUID` | NULL, FK → `"user"(id)` SET NULL | Operator who cancelled; NULL for system expiry. |
+| `cancel_reason` | `TEXT` | NULL, length ≤ 1000 | Required when ops cancels; NULL for expiry. |
+| `checked_in_at` | `TIMESTAMPTZ` | NULL | Set on check-in. |
+| `checked_in_by` | `UUID` | NULL, FK → `"user"(id)` SET NULL | Operator who checked in the customer. |
+| `completed_at` | `TIMESTAMPTZ` | NULL | Set on completion. |
+| `completed_by` | `UUID` | NULL, FK → `"user"(id)` SET NULL | Operator who marked completed. |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL, DEFAULT now() | |
+| `updated_at` | `TIMESTAMPTZ` | NOT NULL, DEFAULT now() | Maintained by `trg_booking_updated_at`. |
+
+**Status state machine (ADR 0014 §3.13):**
+
+```
+pending_payment ──pay──▶ paid ──checkin──▶ checked_in ──complete──▶ completed
+       │                  │
+       └──expire(15m)──▶ expired
+                          │
+                          ├──ops cancel──▶ cancelled
+                          │
+                          └──slot ends, ops flags──▶ no_show
+```
+
+Valid status values: `pending_payment`, `paid`, `checked_in`, `completed`, `expired`, `cancelled`, `no_show`.
+
+**No `deleted_at`:** cancelled and expired rows persist for full audit trail. The `booking.code` UNIQUE constraint applies to all rows regardless of status — a cancelled booking retains its code permanently. New bookings always receive a freshly generated code.
+
+**Exclusion constraints (ADR 0002, migration 000025):**
+
+Two GiST exclusion constraints prevent double-booking at the DB level — atomically, race-condition-proof, regardless of code path:
+
+```sql
+-- Therapist double-booking prevention
+EXCLUDE USING gist (
+    therapist_id WITH =,
+    tstzrange(scheduled_start, scheduled_end) WITH &&
+) WHERE (
+    therapist_id IS NOT NULL
+    AND status IN ('pending_payment', 'paid', 'checked_in', 'completed')
+)
+
+-- Room double-booking prevention
+EXCLUDE USING gist (
+    room_id WITH =,
+    tstzrange(scheduled_start, scheduled_end) WITH &&
+) WHERE (
+    room_id IS NOT NULL
+    AND status IN ('pending_payment', 'paid', 'checked_in', 'completed')
+)
+```
+
+`pending_payment` is included in the predicate as a **soft-lock** during the 15-minute payment window. A lazy expiry sweep (triggered on every availability-list or booking-create call) transitions `pending_payment → expired` for rows older than 15 minutes, releasing the slot. `expired`, `cancelled`, and `no_show` are excluded from the predicate — terminal states do not block future bookings of the same slot.
+
+`btree_gist` extension (already created in migration 000001) provides the GiST equality operator class required for UUID columns in the exclusion predicate.
+
+**Indexes:**
+
+| Index | Columns | Partial | Purpose |
+|---|---|---|---|
+| `booking_code_uidx` | `(code)` UNIQUE | — | Code lookup at check-in; enforces global uniqueness. |
+| `booking_tenant_branch_start_idx` | `(tenant_id, branch_id, scheduled_start)` | — | Primary list scan: "today's bookings at branch X". |
+| `booking_status_start_idx` | `(status, scheduled_start)` | — | Lazy expiry sweep: all `pending_payment` rows before cutoff. |
+| `booking_tenant_id_idx` | `(tenant_id)` | — | RLS predicate acceleration. |
+| `booking_branch_id_idx` | `(branch_id)` | — | FK lookup support. |
+| `booking_service_id_idx` | `(service_id)` | — | FK lookup support. |
+| `booking_therapist_id_idx` | `(therapist_id)` | — | FK lookup support + exclusion constraint index. |
+| `booking_room_id_idx` | `(room_id)` | — | FK lookup support + exclusion constraint index. |
+
+**RLS:**
+
+- `booking_tenant_select` (SELECT): standard `tenant_id::text = current_setting('app.current_tenant', true)`.
+- `booking_public_select` (SELECT, additive): permits reads when `app.current_tenant = '__public__'` AND the booking's branch is `active` AND its tenant is `active`. See `__public__` sentinel section below.
+- `booking_tenant_insert` (INSERT): standard tenant_id check in WITH CHECK.
+- `booking_tenant_update` (UPDATE): standard tenant_id check in both USING and WITH CHECK.
+- No DELETE policy — `lustia_app` has no DELETE grant on `booking`.
+
+**Grant:** `GRANT SELECT, INSERT, UPDATE ON booking TO lustia_app;`
+
+**`updated_at` trigger:** `trg_booking_updated_at` — BEFORE UPDATE, calls `set_updated_at()`.
+
+**Security — PII columns:** `customer_name`, `customer_phone`, `customer_email` are PII. Flag for `security-expert`: these columns must be masked or excluded from application-layer logs. The `GET /public/bookings/:code` response must NOT return `customer_email` or `customer_phone` (only what the code holder needs to verify their booking). See ADR 0014 §3.16.
+
+---
+
+### booking_addon (new — migration 000025)
+
+Immutable snapshot of add-ons selected at booking creation. One row per selected add-on per booking.
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `booking_id` | `UUID` | PK part, FK → `booking(id)` CASCADE | Cascade: if booking row is deleted (admin/migration only), add-on rows follow. |
+| `addon_id` | `UUID` | PK part, FK → `addon(id)` RESTRICT | RESTRICT: prevents hard-deleting an addon that has booking history. |
+| `price_idr` | `BIGINT` | NOT NULL, CHECK ≥ 0 | **Point-in-time price snapshot** — see design rationale below. |
+
+**Design rationale — denormalised `price_idr`:** the add-on price is captured at booking creation time. If a tenant later changes `addon.price_idr`, existing bookings are unaffected — the customer paid the price at the time of booking. Querying `addon.price_idr` at report time would return the current price, not the historical price. The snapshot also makes `booking.total_price_idr` reconcilable without joining to the current addon catalog.
+
+**No `updated_at`:** this table is insert-only. Add-on selection is locked at booking creation. There is no UI to add/remove add-ons from an existing booking (Phase 5 simplification).
+
+**Grant:** `GRANT SELECT, INSERT ON booking_addon TO lustia_app;` — no UPDATE, no DELETE from the application.
+
+**RLS:**
+
+- `booking_addon_tenant_select` (SELECT): resolves tenant via a sub-select on `booking`.
+- `booking_addon_public_select` (SELECT, additive): resolves tenant via booking → branch → tenant status checks for the `__public__` sentinel.
+- `booking_addon_tenant_insert` (INSERT): resolves tenant via sub-select on `booking`.
+- No DELETE, no UPDATE policy.
+
+**Why duplicate RLS instead of join-through from `booking`:** a join-through policy would require the `booking` rows referenced by `booking_addon` to pass their own RLS policy first, creating a multi-level dependency that is harder to reason about under policy combinations. Evaluating tenant via a sub-select on `booking` is explicit and deterministic.
+
+---
+
+### Permission matrix update — `booking.*` (migration 000026)
+
+UUID namespace `c0000000-0000-0000-0026-*`. Verified zero pre-existing matches in `lustia/migrations/` before writing.
+
+| Permission | code | UUID |
+|---|---|---|
+| `booking.read` | List and view bookings | `c0000000-0000-0000-0026-000000000001` |
+| `booking.create` | Create a booking (concierge / ops) | `c0000000-0000-0000-0026-000000000002` |
+| `booking.cancel` | Force-cancel with reason | `c0000000-0000-0000-0026-000000000003` |
+| `booking.checkin` | Check in by QR / code | `c0000000-0000-0000-0026-000000000004` |
+| `booking.complete` | Mark completed | `c0000000-0000-0000-0026-000000000005` |
+| `booking.no_show` | Flag no-show | `c0000000-0000-0000-0026-000000000006` |
+
+Updated permission matrix rows (add to §4):
+
+| Permission | `super_admin` | `tenant_admin` | `branch_admin` | `finance` | `therapist` | `customer` |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| `booking.read` | Y | Y | Y | — | Y† | — |
+| `booking.create` | Y | Y | Y | — | — | — |
+| `booking.cancel` | Y | Y | Y | — | — | — |
+| `booking.checkin` | Y | Y | Y | — | — | — |
+| `booking.complete` | Y | Y | Y | — | — | — |
+| `booking.no_show` | Y | Y | Y | — | — | — |
+
+_† `therapist` holds `booking.read`; service layer filters to bookings where `therapist_id = caller.therapist_id`._
+
+_Note: the customer role is not applicable for `booking.*` permissions — customer-facing booking creation uses the public endpoint (no JWT)._
+
+---
+
+### `__public__` RLS sentinel (ADR 0014 §3.17)
+
+The `__public__` sentinel mirrors the `__platform__` pattern established in ADR 0005 for super-admin bypass.
+
+**Value:** the string `__public__` (with double underscores).
+
+**Set by:** the auth middleware on all requests that arrive at public customer endpoints (`/api/v1/public/*`). The middleware calls:
+
+```sql
+SET LOCAL app.current_tenant = '__public__';
+```
+
+at the start of the transaction, without decoding any JWT (public endpoints have no JWT requirement).
+
+**Tables with an additive `__public__` SELECT policy:** `booking`, `booking_addon`.
+
+**Endpoints that set `__public__`:**
+- `GET /api/v1/public/branches` — uses `__public__` for branch/tenant reads; no booking reads.
+- `GET /api/v1/public/branches/:id` — same.
+- `GET /api/v1/public/branches/:id/availability` — same.
+- `GET /api/v1/public/bookings/:code` — uses `__public__` for the booking + booking_addon read.
+- `POST /api/v1/public/bookings` — switches from `__public__` to the resolved `tenant_id` before the INSERT transaction.
+- `POST /api/v1/public/payments/webhook` — switches to the resolved `tenant_id` for the UPDATE.
+
+**Security boundary — single-row code lookup:**
+
+The `booking_public_select` RLS policy permits SELECT on any booking row for an active branch/tenant when `app.current_tenant = '__public__'`. This means the RLS policy alone would allow a table scan exposing all bookings across all tenants under the public sentinel. This is intentional at the RLS layer — the constraint is at the **service layer**:
+
+> Every public booking read MUST include `WHERE code = ?` in the query predicate. The service layer is responsible for enforcing this. The repository function `GetBookingByCode(ctx, code string)` is the only public-path booking read function; it always includes `WHERE code = ?` and returns at most one row.
+
+This is the same risk profile as the `__platform__` sentinel: a bug that forgets the predicate exposes data. Mitigation: the repository function signature makes the code parameter mandatory (not optional); there is no `ListBookings` function callable on the public path.
+
+**Public INSERT flow:** the public booking creation flow does NOT insert under `__public__`. The service layer:
+1. Resolves `tenant_id` from the supplied `branch_id` (SELECT from `branch` under `__public__` — allowed by `branch` RLS or by direct branch lookup as no branch has tenant-scoped RLS).
+2. Sets `app.current_tenant = <resolved_tenant_id>` for the INSERT transaction.
+3. The standard `booking_tenant_insert` policy applies — `WITH CHECK (tenant_id::text = current_setting('app.current_tenant', true))`.
+4. After the INSERT commits, resets to `__public__` for the response-phase SELECT.
+
+**Reserved slug enforcement:** `__public__` must be added to the reserved slug blocklist alongside `__platform__` (flag for `go-expert` — see ADR 0005 Consequences).
+
+---
+
+### Phase 5 — Migration Log
+
+| Migration | Date | Summary |
+|---|---|---|
+| 000024 | 2026-04-25 | Branch geo: `latitude`, `longitude` columns; `cube` + `earthdistance` extensions; `branch_geo_idx`. |
+| 000025 | 2026-04-25 | Booking engine: `booking` table, `booking_addon` table, exclusion constraints, RLS with `__public__` sentinel, indexes, grants, trigger. |
+| 000026 | 2026-04-25 | Booking permissions: `booking.read/create/cancel/checkin/complete/no_show`; wired to super_admin, tenant_admin, branch_admin (all 6), therapist (read only). UUID namespace `c0000000-0000-0000-0026-*`. |
+| 000027 | 2026-04-25 | Dev-only seed: 5 sample bookings (4 paid, 1 checked_in) + 2 booking_addon rows for acme-spa Cabang Utama. Fixed UUIDs `b0000000-0000-0000-0027-*`. |
+
+---
+
+### Phase 5 — Design Decision Log
+
+**No `customer` table reference on booking:** ADR 0014 §3.2 establishes a guest-only model — no login, no customer account. Customer info (`name`, `phone`, `email`) is stored inline on the booking row. This simplifies the schema (no customer FK, no customer lifecycle, no customer deduplication problem) and the privacy surface (PII is scoped to the booking row, not a separate customer entity). A future `customer` table can be introduced in Phase 7+ if account features are added; the FK can be added as a nullable column at that point.
+
+**`code` column not partial-unique:** the `booking_code_uidx` UNIQUE index is NOT partial (`WHERE status NOT IN ('cancelled','expired')`). This means cancelled/expired rows permanently own their code. Rationale: a QR code printed on a booking confirmation email must never be reusable — even after cancellation. A partial unique would allow a new booking to acquire the same code as a cancelled one, which would pass QR scan validation against the wrong booking. Permanent code ownership is the correct behaviour. Keyspace (~10^12 combinations in the 8-char Crockford Base32 format) makes collision probability negligible even at scale.
+
+**`total_price_idr` as BIGINT, not NUMERIC:** service prices and add-on prices are stored in whole Rupiah (IDR has no decimal subunit in practice). BIGINT avoids the NUMERIC overhead (variable-length storage, arbitrary-precision arithmetic) for what is effectively an integer value. Maximum representable value (~9.2 × 10^18 IDR ≈ 9.2 × 10^8 USD) is impossibly large for any real booking, so overflow is not a concern.
+
+**RLS on `booking_addon` duplicates tenant resolution:** the alternative (sub-select through `booking` to get tenant_id for the RLS check) requires `booking` rows to be visible under the current session's policy before `booking_addon` rows can be read. This creates a policy evaluation dependency between two tables that is hard to test and can fail silently if the `booking` RLS policy changes. Explicit duplication of the tenant-resolution logic in `booking_addon` is slightly more code but easier to reason about and test independently.
+
+**`booking.cancel_reason` NULL-allowed:** the Phase 5 spec says ops must supply a reason when cancelling. This is enforced at the service layer (return 422 if `cancel_reason` is empty when `status = 'cancelled'`). A DB-level NOT NULL would also require it for system-triggered expiry (which has no reason), so NULL is the correct default; the service layer adds the application constraint.
+
+---
+
+### Phase 5 — Open Questions / Cross-Agent Flags
+
+#### For `go-expert`
+
+1. **Booking code generation:** `crypto/rand` 5 bytes → Crockford Base32 8 chars → insert with format `XXXX-XXXX`. On uniqueness conflict (extremely rare), retry up to 3 times. If all retries fail, return 500 (not a realistic scenario at Phase 5 volumes). The CHECK constraint `^[A-Z2-7]{4}-[A-Z2-7]{4}$` must match the generator's output character set exactly.
+
+2. **Lazy expiry sweep:** on every call to `GetAvailableSlots()` and `CreateBooking()`, run: `UPDATE booking SET status = 'expired', updated_at = now() WHERE status = 'pending_payment' AND created_at < now() - INTERVAL '15 minutes'`. Execute this UPDATE before the main operation within the same transaction.
+
+3. **Public INSERT tenant resolution:** the public booking create handler must: (a) SELECT `branch.tenant_id` WHERE `branch.id = req.branch_id AND branch.status = 'active' AND branch.deleted_at IS NULL`; (b) set `app.current_tenant = <tenant_id>` for the INSERT transaction; (c) validate `service_id` belongs to the resolved tenant; (d) insert `booking` row with the resolved `tenant_id`.
+
+4. **`__public__` added to reserved slug blocklist** — see ADR 0005 Consequences. Add to the same validator list as `__platform__`.
+
+5. **Concierge booking vs public booking:** the `POST /api/v1/tenant/bookings` (concierge) endpoint accepts `payment_method: paid_at_venue` and does not invoke Midtrans. It transitions the booking directly to `paid` with `paid_at = now()`. The `POST /api/v1/public/bookings` endpoint always starts in `pending_payment` and requires the payment step.
+
+6. **`booking.total_price_idr` computation:** service layer computes `service.price + SUM(addon.price_idr for selected addon_ids)` at booking creation time. Verify `price` from `service` table (NUMERIC) converts cleanly to BIGINT (no decimal places in IDR). Store the BIGINT snapshot; do not re-query later.
+
+7. **`go-expert` cross-agent flag — new DTOs needed:** `BookingResponse`, `BookingAddonResponse`, `CreateBookingRequest` (public + concierge variants), `CheckinRequest`, `CancelRequest`. These are new, not previously in `API_CONTRACT.md`. `go-expert` must add them.
+
+#### For `security-expert`
+
+8. **Public endpoint threat model (ADR 0014 §3.19):** rate limiting per IP at `POST /public/bookings`; anti-enumeration on `branch_id` and `code`; negative `total_price_idr` injection blocked by CHECK constraint + service-layer validation; JWT scope leakage between operator and public paths; RLS `__public__` policy listing-all-bookings risk (mitigated by service-layer code predicate — confirm this is the agreed boundary).
+
+9. **PII in `booking` columns:** `customer_name`, `customer_phone`, `customer_email` must be masked in application logs. The `GET /public/bookings/:code` response must not return `customer_email` or `customer_phone`. Document masking requirement in `SECURITY.md`.
+
+10. **Payment reference exposure:** `booking.payment_reference` contains Midtrans snap_token. Tokens should not appear in application logs. Flag for `go-expert` to ensure the DTO for internal endpoints scrubs or masks this field in logs.
+
+#### For `qa-expert`
+
+11. **Exclusion constraint concurrent INSERT test:** two goroutines simultaneously attempt to INSERT bookings for the same therapist + overlapping slot. Assert that exactly one succeeds with 200, and the other returns 409 (exclusion constraint violation mapped to CONFLICT). This is a critical regression test per ADR 0002.
+
+12. **Expiry sweep correctness:** create a `pending_payment` booking with `created_at = now() - INTERVAL '16 minutes'`. Call `GetAvailableSlots()` for the same slot. Assert the expired booking's status is now `expired` and the slot is available.
+
+13. **Code uniqueness probability test:** generate 100 booking codes with `crypto/rand`. Assert no duplicates and all match the `^[A-Z2-7]{4}-[A-Z2-7]{4}$` pattern.
+
+14. **Public read scoping:** call `GET /public/bookings/:code` for a valid code. Assert response does not include `customer_email` or `customer_phone`.
+
+15. **Dev seed bookings (migration 000027):** verify the 5 seed bookings are present in a fresh dev DB after running all migrations; check that `booking_addon` rows exist for bookings 2 and 4; verify no exclusion constraint violations in the seed data (no overlapping slots for the same therapist/room).

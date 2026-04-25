@@ -47,6 +47,16 @@ const (
 	CodeDuplicateRoomName = "DUPLICATE_ROOM_NAME"
 	CodeRoomBranchImmutable = "ROOM_BRANCH_IMMUTABLE"
 
+	// ADR 0014 — Phase 5 Booking Engine.
+	CodeBookingNotFound               = "BOOKING_NOT_FOUND"
+	CodeBookingCodeInvalid            = "BOOKING_CODE_INVALID"
+	CodeBookingSlotConflict           = "BOOKING_SLOT_CONFLICT"
+	CodeBookingExpired                = "BOOKING_EXPIRED"
+	CodeBookingInvalidStatusTransition = "BOOKING_INVALID_STATUS_TRANSITION"
+	CodeNoTherapistAvailable          = "NO_THERAPIST_AVAILABLE"
+	CodeNoRoomAvailable               = "NO_ROOM_AVAILABLE"
+	CodeTherapistNotForService        = "THERAPIST_NOT_FOR_SERVICE"
+
 	// ADR 0011 — Storage abstraction + therapist extended profile.
 	CodeUploadQuotaExceeded    = "UPLOAD_QUOTA_EXCEEDED"
 	CodeInvalidImageFormat     = "INVALID_IMAGE_FORMAT"

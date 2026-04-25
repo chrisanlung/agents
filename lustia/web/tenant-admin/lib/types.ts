@@ -248,6 +248,85 @@ export interface RoomSortOrderItem {
   sort_order: number;
 }
 
+// ─── Phase 5 — Booking Engine (ADR 0014 §3.16, API §14) ─────────────────────
+
+export type BookingStatus =
+  | "pending_payment"
+  | "paid"
+  | "checked_in"
+  | "completed"
+  | "cancelled"
+  | "expired"
+  | "no_show";
+
+export interface BookingAddon {
+  addon_id: string;
+  name: string;
+  price_idr: number;
+}
+
+/** Full operator booking response (API §14.5). */
+export interface Booking {
+  id: string;
+  branch_id: string;
+  branch_name: string;
+  service_id: string;
+  service_name: string;
+  room_id: string | null;
+  room_name: string | null;
+  therapist_id: string | null;
+  therapist_name: string | null;
+  customer_name: string;
+  customer_phone: string;
+  customer_email: string;
+  code: string;
+  scheduled_start: string;
+  scheduled_end: string;
+  total_price_idr: number;
+  payment_method: string | null;
+  payment_reference: string | null;
+  paid_at: string | null;
+  status: BookingStatus;
+  cancelled_at: string | null;
+  cancelled_by: string | null;
+  cancel_reason: string | null;
+  checked_in_at: string | null;
+  checked_in_by: string | null;
+  completed_at: string | null;
+  completed_by: string | null;
+  addons: BookingAddon[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BookingListResponse {
+  data: Booking[];
+  page: number;
+  limit: number;
+  total_count: number;
+  total_pages: number;
+}
+
+/** GET /api/v1/tenant/reports/bookings/summary response (API §14.2.9). */
+export interface BookingReportSummary {
+  total_bookings: number;
+  total_revenue_idr: number;
+  no_show_count: number;
+  no_show_rate: number;
+  cancelled_count: number;
+  completed_count: number;
+  paid_count: number;
+  by_branch: BookingReportBranch[];
+}
+
+export interface BookingReportBranch {
+  branch_id: string;
+  branch_name: string;
+  total_bookings: number;
+  total_revenue_idr: number;
+  no_show_count: number;
+}
+
 // ─── Onboarding state (ADR 0008 §2.3.3) ─────────────────────────────────────
 
 /**

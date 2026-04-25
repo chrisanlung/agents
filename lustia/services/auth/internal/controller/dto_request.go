@@ -384,3 +384,99 @@ type ReorderRoomsRequest struct {
 	BranchID string                     `json:"branch_id" binding:"required,uuid"`
 	Items    []RoomSortOrderItemRequest `json:"items"     binding:"required,min=1,max=200,dive"`
 }
+
+// ---------------------------------------------------------------------------
+// ADR 0014 — Phase 5 Booking Engine.
+// ---------------------------------------------------------------------------
+
+// CreateBookingRequest is the JSON body for POST /api/v1/public/bookings.
+//
+// C-1 (SECURITY.md): total_price_idr is deliberately ABSENT from this DTO.
+// The server computes the total from DB-fetched service + addon prices. Any
+// client-supplied total would be ignored — but having no field makes it
+// impossible to accidentally trust a client value.
+//
+// Also absent: status, paid_at, payment_reference, tenant_id — all server-set.
+type CreateBookingRequest struct {
+	BranchID       string   `json:"branch_id"       binding:"required,uuid"`
+	ServiceID      string   `json:"service_id"      binding:"required,uuid"`
+	AddonIDs       []string `json:"addon_ids"       binding:"omitempty,max=20,dive,uuid"`
+	RoomID         *string  `json:"room_id"         binding:"omitempty,uuid"`
+	TherapistID    *string  `json:"therapist_id"    binding:"omitempty,uuid"`
+	ScheduledStart string   `json:"scheduled_start" binding:"required"`
+	CustomerName   string   `json:"customer_name"   binding:"required,min=1,max=200"`
+	CustomerPhone  string   `json:"customer_phone"  binding:"required,min=5,max=30"`
+	CustomerEmail  string   `json:"customer_email"  binding:"required,email,max=320"`
+}
+
+// ConciergeCreateBookingRequest is the JSON body for POST /api/v1/tenant/bookings.
+// Payment method is always paid_at_venue for operator-created bookings.
+//
+// C-1: total_price_idr is also absent here for the same reason.
+type ConciergeCreateBookingRequest struct {
+	BranchID       string   `json:"branch_id"       binding:"required,uuid"`
+	ServiceID      string   `json:"service_id"      binding:"required,uuid"`
+	AddonIDs       []string `json:"addon_ids"       binding:"omitempty,max=20,dive,uuid"`
+	RoomID         *string  `json:"room_id"         binding:"omitempty,uuid"`
+	TherapistID    *string  `json:"therapist_id"    binding:"omitempty,uuid"`
+	ScheduledStart string   `json:"scheduled_start" binding:"required"`
+	CustomerName   string   `json:"customer_name"   binding:"required,min=1,max=200"`
+	CustomerPhone  string   `json:"customer_phone"  binding:"required,min=5,max=30"`
+	CustomerEmail  string   `json:"customer_email"  binding:"required,email,max=320"`
+}
+
+// CheckInRequest is the JSON body for POST /api/v1/tenant/bookings/:id/checkin.
+type CheckInRequest struct {
+	Code string `json:"code" binding:"omitempty,max=9"`
+}
+
+// CancelBookingRequest is the JSON body for POST /api/v1/tenant/bookings/:id/cancel.
+type CancelBookingRequest struct {
+	Reason string `json:"reason" binding:"required,min=1,max=1000"`
+}
+
+// ListBookingsQuery are query parameters for GET /api/v1/tenant/bookings.
+type ListBookingsQuery struct {
+	BranchID  string `form:"branch_id"  binding:"omitempty,uuid"`
+	Status    string `form:"status"     binding:"omitempty"`
+	ServiceID string `form:"service_id" binding:"omitempty,uuid"`
+	FromDate  string `form:"from"       binding:"omitempty"`
+	ToDate    string `form:"to"         binding:"omitempty"`
+	Page      int    `form:"page"       binding:"omitempty,min=1"`
+	Limit     int    `form:"limit"      binding:"omitempty,min=1,max=200"`
+}
+
+// ReportBookingQuery are query parameters for GET /api/v1/tenant/reports/bookings/summary.
+type ReportBookingQuery struct {
+	BranchID string `form:"branch_id" binding:"omitempty,uuid"`
+	From     string `form:"from"      binding:"required"`
+	To       string `form:"to"        binding:"required"`
+}
+
+// AvailabilityQuery are query parameters for GET /api/v1/public/branches/:id/availability.
+type AvailabilityQuery struct {
+	ServiceID string `form:"service_id" binding:"required,uuid"`
+	Date      string `form:"date"       binding:"required"`
+}
+
+// PublicBranchListQuery are query parameters for GET /api/v1/public/branches.
+type PublicBranchListQuery struct {
+	Q        string   `form:"q"`
+	Lat      *float64 `form:"lat"       binding:"omitempty,min=-90,max=90"`
+	Lng      *float64 `form:"lng"       binding:"omitempty,min=-180,max=180"`
+	Category string   `form:"category"`
+	OpenNow  bool     `form:"open_now"`
+	Page     int      `form:"page"      binding:"omitempty,min=1"`
+	Limit    int      `form:"limit"     binding:"omitempty,min=1,max=50"`
+}
+
+// WebhookNotificationRequest is the JSON body for POST /api/v1/public/payments/webhook.
+// This mirrors the Midtrans notification shape at the HTTP layer.
+type WebhookNotificationRequest struct {
+	OrderID           string `json:"order_id"`
+	TransactionStatus string `json:"transaction_status"`
+	StatusCode        string `json:"status_code"`
+	GrossAmount       string `json:"gross_amount"`
+	SignatureKey      string `json:"signature_key"`
+	PaymentType       string `json:"payment_type"`
+}

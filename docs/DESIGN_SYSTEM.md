@@ -2265,3 +2265,1291 @@ No new shadcn/ui primitives. All components are already vendored.
 
 4. **`photo_url` in Room DTO:** confirm with `go-expert` that the Room DTO returns `photo_url` (resolved URL, nullable string) and not the raw `photo_key`. TypeScript type in `lib/types.ts` should have `photo_url: string | null`.
 
+---
+
+## Phase 5 — Booking Engine
+
+_Owned by `ui-ux-expert`. Consumed by `flutter-expert` (Parts A) and `nextjs-expert` (Parts B + C). Backend contract in ADR 0014._
+
+_All copy in Indonesian. WCAG 2.2 AA contrast minimum throughout. Touch targets ≥ 48×48 dp (mobile) and ≥ 32×32 px (web)._
+
+---
+
+### Part A — Mobile App (Flutter)
+
+_The Lustia customer mobile app. Platform: Flutter (Material 3 primary, Cupertino conventions respected on iOS). State management: Riverpod 2. Navigation: go\_router. No customer login — guest-only._
+
+---
+
+#### BK-A0 — Token translation: web → Flutter
+
+The Flutter app reuses the same semantic color and type decisions as the web portals, translated into Material 3 `ThemeData` keys.
+
+**Color palette (Material 3 `ColorScheme`):**
+
+| Semantic role | Web token | Flutter `ColorScheme` key | Light hex | Dark hex |
+|---|---|---|---|---|
+| `bg-surface` | background / canvas | `surface` | `#FAFAFA` | `#111111` |
+| `bg-elevated` | card / elevated surface | `surfaceContainerHigh` | `#FFFFFF` | `#1E1E1E` |
+| `text-primary` | primary text | `onSurface` | `#111827` | `#F3F4F6` |
+| `text-muted` | secondary / muted text | `onSurfaceVariant` | `#6B7280` | `#9CA3AF` |
+| `border-subtle` | divider / border | `outlineVariant` | `#E5E7EB` | `#374151` |
+| `accent` (primary brand) | emerald / teal | `primary` | `#059669` | `#34D399` |
+| `accent-container` | light accent fill | `primaryContainer` | `#D1FAE5` | `#064E3B` |
+| `danger` | red / destructive | `error` | `#DC2626` | `#F87171` |
+| `success` | emerald-600 | `tertiary` | `#059669` | `#34D399` |
+| `warning` | amber | `secondary` | `#D97706` | `#FCD34D` |
+
+**Typography (`TextTheme` equivalents):**
+
+| Semantic role | Flutter `TextTheme` key | Size | Weight | Line height |
+|---|---|---|---|---|
+| Display / hero text | `displayMedium` | 28sp | w600 | 1.2 |
+| Page title / heading | `headlineMedium` | 22sp | w600 | 1.25 |
+| Section heading | `titleLarge` | 18sp | w600 | 1.3 |
+| Body text | `bodyLarge` | 16sp | w400 | 1.5 |
+| Body small / labels | `bodyMedium` | 14sp | w400 | 1.5 |
+| Caption / metadata | `bodySmall` | 12sp | w400 | 1.4 |
+| Button label | `labelLarge` | 14sp | w600 | 1.2 |
+
+Font family: **Inter** (Google Fonts, already widely used in the web portals). Fallback: system-ui.
+
+**Spacing scale (4 dp base):** `4, 8, 12, 16, 24, 32, 48, 64, 96` — identical to web.
+
+**Radius scale:** `4, 8, 12, 16, 24, 999` dp. `CardTheme` uses `radius=12`. Bottom sheet uses `radius=24` top corners.
+
+**Motion:** fast 150ms ease-out (hover/fade), medium 225ms ease-out (modal, page transition). All transitions respect `MediaQuery.disableAnimations`.
+
+---
+
+#### BK-A1 — App-level information architecture
+
+**Bottom navigation bar — 4 destinations:**
+
+| Index | Label | Icon (outlined) | Icon (filled / active) | Route |
+|---|---|---|---|---|
+| 0 | Beranda | `Icons.home_outlined` | `Icons.home` | `/` (branch list + search) |
+| 1 | Favorit | `Icons.favorite_outline` | `Icons.favorite` | `/favorites` |
+| 2 | Booking Saya | `Icons.receipt_long_outlined` | `Icons.receipt_long` | `/my-bookings` |
+| 3 | Pengaturan | `Icons.settings_outlined` | `Icons.settings` | `/settings` |
+
+Material 3 `NavigationBar` widget. Active indicator uses `primaryContainer`. Labels always visible (no hide-on-scroll). Badge on "Booking Saya" is not required in Phase 5 (no push notifications).
+
+**Navigation model (go\_router):**
+
+```
+/                          → BranchListScreen (shell route: bottom nav)
+  /branches/:id            → BranchDetailScreen (no bottom nav — full-screen push)
+    /branches/:id/book     → BookingWizardScreen (wizard, no bottom nav)
+      /branches/:id/book/payment  → PaymentScreen
+      /branches/:id/book/confirm  → BookingConfirmScreen
+/favorites                 → FavoritesScreen (shell route)
+/my-bookings               → MyBookingsScreen (shell route)
+  /my-bookings/:code       → BookingDetailScreen (push, shows QR)
+/settings                  → SettingsScreen (shell route)
+/splash                    → SplashScreen (initial route, exits to /)
+```
+
+**Back navigation:** go\_router handles `pop`. On wizard steps, "Kembali" steps backward inside the wizard shell (not OS back, which would exit the entire flow). The wizard uses a `StatefulShellRoute` to preserve step state without re-fetching.
+
+**Deep link:** `lustia://my-bookings/:code` — opens the booking detail QR directly. Useful when user taps the confirmation email link on mobile.
+
+---
+
+#### BK-A2 — Splash + onboarding
+
+**Splash screen (shown on first launch and app restart):**
+
+- Full-screen `Surface` in `primary` color. Centered Lustia logo (SVG asset, white). Below logo: `Text("Lustia", style: displayMedium, color: white)`. No tagline in Phase 5.
+- Duration: 1.5s minimum; exits as soon as branch-list data prefetch completes (whichever is longer).
+- Implemented via `flutter_native_splash` for the OS-level splash (avoids white flash before Flutter engine loads) + a `FutureProvider` that resolves when the prefetch is done.
+- Reduced motion: no animation — static logo only. `MediaQuery.disableAnimations` respected.
+
+**Onboarding — location permission (shown once, after splash, before branch list):**
+
+Displayed only when `Permission.locationWhenInUse` has never been requested (`PermissionStatus.denied` + first launch flag in `shared_preferences`).
+
+Layout (full-screen, centered column):
+
+```
+[Illustrated icon — MapPin, size 80dp, color: primary]
+[Heading]    "Temukan cabang terdekat dari kamu"   (headlineMedium)
+[Body]       "Izinkan Lustia mengakses lokasimu agar kami\n
+              bisa menampilkan cabang spa dan klinik\n
+              yang paling dekat denganmu."           (bodyLarge, center-aligned, max-width 280dp)
+[Spacer 32dp]
+[Primary button, full-width]  "Izinkan Lokasi"
+[Ghost button, full-width]    "Lewati, cari manual"
+```
+
+If user taps "Izinkan Lokasi": call `Geolocator.requestPermission()`. On grant → proceed to branch list with geosort. On deny → proceed to branch list without geosort (distance badges hidden, no sort by distance; search still works).
+
+If user taps "Lewati": mark `onboarding_location_asked = true` in `shared_preferences`, proceed to branch list without geosort.
+
+If user has previously denied and OS blocks re-request: show a `SnackBar` with "Aktifkan lokasi di Pengaturan perangkat" + "Buka Pengaturan" action button (`openAppSettings()`).
+
+**Do NOT show onboarding again** once `onboarding_location_asked = true`, even after app reinstall would reset it — `shared_preferences` is wiped on reinstall, so on fresh install a clean slate is acceptable.
+
+---
+
+#### BK-A3 — Branch list screen
+
+**Purpose:** primary discovery surface. Sorted by distance (with location) or by name (without). Search + filter inline.
+
+**AppBar:**
+
+```
+[AppBar, transparent / surface color]
+  title: Text("Lustia", style: titleLarge)
+  actions: [IconButton(Icons.search) → expand search bar]
+```
+
+On search icon tap: `AppBar` morphs into a search bar using `SearchBar` widget (Material 3). Placeholder: "Cari cabang atau area…". `onChanged` debounced 300ms.
+
+**Filter chips (horizontal scrollable `Wrap` / `SingleChildScrollView` below AppBar):**
+
+```
+[Chip "Semua Kategori" — leading category icon, selected = filled]
+[Chip "Pijat"]  [Chip "Facial"]  [Chip "Nail Art"]  [Chip "Lainnya"]
+[FilterChip "Buka sekarang" — leading clock icon]
+```
+
+Filter chips are `FilterChip` (Material 3). Selected state: `primaryContainer` fill + `onPrimaryContainer` text. At most one category chip active at a time; "Buka sekarang" is independent boolean.
+
+**Branch card layout (`ListView.builder`, scroll direction vertical):**
+
+```
+Card (radius: 12dp, elevation: 1)
+  Row
+    ClipRRect(radius: 8dp)
+      CachedNetworkImage(w: 96dp, h: 96dp, fit: cover)
+      // placeholder: Container(color: surfaceContainerHigh) + Icon(Icons.spa, color: outline)
+    SizedBox(width: 12dp)
+    Expanded(
+      Column(crossAxisAlignment: start)
+        Text(branch.tenant_name, style: bodySmall, color: onSurfaceVariant)  // e.g. "Luspa Spa"
+        SizedBox(height: 2dp)
+        Text(branch.name, style: titleMedium, fontWeight: w600)              // e.g. "Cabang Kemang"
+        SizedBox(height: 4dp)
+        Row [Icon(Icons.location_on_outlined, size: 14dp) + Text(branch.short_address, style: bodySmall)]
+        SizedBox(height: 4dp)
+        Row [
+          if (distance != null) Chip-style Text("X.X km", style: bodySmall, color: primary)
+          Spacer()
+          IconButton(
+            icon: Icon(is_favorite ? Icons.favorite : Icons.favorite_outline,
+                       color: is_favorite ? error : onSurfaceVariant, size: 20dp),
+            onPressed: toggleFavorite,
+            tooltip: is_favorite ? "Hapus dari favorit" : "Simpan ke favorit",
+          )
+        ]
+    )
+```
+
+Card tap → `context.push('/branches/${branch.id}')`.
+
+**Pagination:** `ListView` uses `_scrollController` with a listener — when `pixels >= maxScrollExtent - 200` and `!isLoading && hasMore`, fetch next cursor page. Append to list. No separate "Muat lebih banyak" button (infinite scroll). Loading indicator at bottom: `CircularProgressIndicator.adaptive()` in a `Center` with `Padding(vertical: 24dp)`.
+
+**Empty states:**
+
+| State | Icon | Heading | Supporting | CTA |
+|---|---|---|---|---|
+| No branches found (search result empty) | `Icons.search_off` | "Tidak ditemukan" | "Coba kata kunci atau filter yang berbeda." | "Hapus filter" ghost button |
+| No active branches exist | `Icons.store_outlined` | "Belum ada cabang" | "Kami sedang berkembang. Cek lagi nanti!" | — |
+| Location denied + no search input | `Icons.location_off_outlined` | "Lokasi tidak tersedia" | "Izinkan lokasi agar cabang terdekat muncul di sini, atau gunakan pencarian." | "Izinkan Lokasi" primary |
+
+**Error state:** full-screen `Column` with `Icons.wifi_off` (56dp, `error` color) + "Gagal memuat cabang" (titleMedium) + "Periksa koneksi internetmu dan coba lagi." (bodyMedium, center) + `FilledButton("Coba Lagi")`. Retry calls `ref.invalidate(branchListProvider)`.
+
+**Loading state:** `ListView` of 6 skeleton `Card` items. Each skeleton: grey shimmer rectangle (96×96dp for photo area) + two line stubs on the right. Use `Shimmer` package or a simple `AnimatedContainer` fade.
+
+---
+
+#### BK-A4 — Branch detail screen
+
+**Route:** `/branches/:id`
+
+**AppBar:** transparent overlay on hero photo. Back arrow (white, with drop-shadow for contrast on light photos). Favorite icon (heart, white) at far right. `SliverAppBar` with `expandedHeight: 240dp`, `pinned: true`.
+
+**Hero photo:** `SliverAppBar` `flexibleSpace` → `FlexibleSpaceBar` → `CachedNetworkImage(fit: BoxFit.cover)`. Placeholder: gradient `Container` in `primaryContainer` with centered `Icon(Icons.spa, size: 48, color: primary)`.
+
+**Body (below hero, in `CustomScrollView`):**
+
+```
+SliverPadding(padding: EdgeInsets.all(16))
+  Column
+    [Name row]
+      Text(branch.name, style: headlineMedium, fontWeight: w700)
+      SizedBox(height: 4)
+      Text(branch.tenant_name, style: bodyMedium, color: onSurfaceVariant)
+
+    [Address row — icon + text]
+      Row [Icon(Icons.location_on_outlined, 16dp, color: primary) + Text(branch.full_address)]
+
+    [Hours row — icon + text]
+      Row [Icon(Icons.schedule_outlined, 16dp, color: primary) + Text("Buka hari ini: 09:00–21:00")]
+      // "Tutup hari ini" shown in error/warning color if branch is closed
+
+    Divider(height: 24)
+
+    [Section heading] Text("Layanan", style: titleLarge)
+    SizedBox(height: 12)
+    [Layanan list — grouped by kategori]
+    // For each category: category label (bodySmall uppercase tracking) + list of ServiceTile
+
+    Divider(height: 24)
+
+    SizedBox(height: 80)  // clearance for sticky CTA button
+```
+
+**ServiceTile (inside branch detail):**
+
+```
+ListTile(
+  title: Text(service.name, style: bodyLarge, fontWeight: w500),
+  subtitle: Text("${service.duration_minutes} menit", style: bodySmall),
+  trailing: Text("Rp ${formatPrice(service.price_idr)}", style: bodyMedium, fontWeight: w600, color: primary),
+)
+```
+
+**Sticky "Booking" CTA (bottom of screen, above bottom nav if shell is present — but this screen has no bottom nav):**
+
+```
+Positioned(bottom: 0, left: 0, right: 0)
+  Container(
+    padding: EdgeInsets.fromLTRB(16, 12, 16, 16 + MediaQuery.viewPadding.bottom),
+    color: surface (with top shadow elevation-1),
+    child: FilledButton.icon(
+      icon: Icon(Icons.calendar_today_outlined),
+      label: Text("Booking"),
+      style: ButtonStyle(minimumSize: Size(double.infinity, 52dp)),
+      onPressed: () => context.push('/branches/$id/book'),
+    ),
+  )
+```
+
+**Empty states:** if `services.isEmpty` → inline "Belum ada layanan tersedia." below the section heading.
+
+**Error loading detail:** full-screen retry state (same pattern as branch list).
+
+---
+
+#### BK-A5 — Booking flow (multi-step wizard)
+
+**Route:** `/branches/:id/book`
+
+**Architecture:** a single `StatefulWidget` (or `ConsumerStatefulWidget` with Riverpod) holding a `PageController`. Steps advance by calling `pageController.nextPage(duration: 225ms, curve: Curves.easeOut)`. The back button calls `pageController.previousPage` or `context.pop()` if on step 1.
+
+**Progress indicator:**
+
+```
+[AppBar title: "Booking — Langkah X dari Y"]
+[LinearProgressIndicator(value: step / totalSteps, minHeight: 3dp, color: primary)]
+```
+
+`totalSteps` = number of active steps. Steps with "Pilih saja" default (therapist, room) are always shown but can be skipped quickly with one tap.
+
+**Step sequence:**
+
+| Step | Label | Mandatory |
+|---|---|---|
+| 1 | Pilih Layanan | Yes |
+| 2 | Pilih Tambahan (add-ons) | No (skip if no add-ons available) |
+| 3 | Pilih Tanggal & Slot | Yes |
+| 4 | Pilih Terapis | No (default: auto) |
+| 5 | Pilih Ruangan | No (default: auto) |
+| 6 | Info Kamu | Yes |
+| 7 | Konfirmasi | Yes |
+
+If a branch has no add-ons, Step 2 is skipped automatically (its route is still present but `pageController` skips the index). The progress bar denominator adjusts accordingly so it never shows "Langkah 3 dari 7" when step 2 was skipped — compute `effectiveTotalSteps = totalSteps - skippedSteps`.
+
+**"Lanjut" / "Kembali" button bar (shared across all steps):**
+
+```
+Positioned(bottom: 0)
+  Row
+    if (step > 1) OutlinedButton("Kembali", onPressed: prevStep)
+    Spacer()
+    FilledButton("Lanjut", onPressed: nextStep, disabled: !currentStepValid)
+```
+
+On the final step, "Lanjut" becomes "Bayar".
+
+---
+
+#### BK-A6 — Slot picker (Step 3: Pilih Tanggal & Slot)
+
+**Date strip:**
+
+Horizontal scrollable row of `DateChip` widgets. Shows 14 days from today. Each chip:
+
+```
+Column
+  Text(dayName, style: bodySmall)  // "Sen", "Sel", …
+  SizedBox(height: 4)
+  Container(
+    width: 48dp, height: 48dp, radius: 12dp,
+    color: isSelected ? primary : surfaceContainerHigh,
+    child: Column(
+      Text(dayNumber, style: titleMedium, fontWeight: w600,
+           color: isSelected ? onPrimary : onSurface),
+      Text(monthShort, style: bodySmall,
+           color: isSelected ? onPrimary.withOpacity(0.8) : onSurfaceVariant),
+    )
+  )
+```
+
+Past dates not shown. Today has a subtle dot indicator below the chip if not selected.
+
+**Slot grid (below date strip):**
+
+`GridView.count(crossAxisCount: 3, childAspectRatio: 2.5)` of `SlotChip` widgets.
+
+Each slot:
+
+```
+FilterChip(
+  label: Text("09:00", style: labelLarge),
+  selected: isSelected,
+  enabled: isAvailable,
+  // disabled style: backgroundColor: surfaceContainerHigh, labelColor: onSurfaceVariant/40
+  tooltip: !isAvailable ? "Tidak tersedia" : null,
+)
+```
+
+Disabled slots (`isAvailable = false`): grey fill, grey label, `tooltip: "Tidak tersedia"`. Screen reader: `Semantics(label: "09:00 — tidak tersedia", excludeSemantics: true)`.
+
+**Loading state for slots:** `GridView` skeleton — 9 rounded rectangles in `Shimmer` while the availability API call is in flight. Show after 200ms delay (prevent flash for fast connections).
+
+**Empty slot state (all slots unavailable on selected date):** inline `Text("Tidak ada slot tersedia pada hari ini. Pilih tanggal lain.", style: bodyMedium, textAlign: center)` replacing the grid.
+
+---
+
+#### BK-A7 — Therapist picker (Step 4: Pilih Terapis)
+
+**Layout:** `ListView` of therapist option cards + sticky "Pilih Saja" card at top.
+
+**"Pilih Saja" card (top, always first):**
+
+```
+Card (selected style if isAutoSelected: border primary 2dp, primaryContainer fill)
+  ListTile
+    leading: CircleAvatar(radius: 24dp, child: Icon(Icons.person_outline))
+    title: Text("Pilih Saja", style: titleMedium)
+    subtitle: Text("Kami pilihkan terapis terbaik yang tersedia untukmu", style: bodySmall)
+    trailing: if (isAutoSelected) Icon(Icons.check_circle, color: primary)
+```
+
+**Therapist option card:**
+
+```
+Card
+  ListTile
+    leading: CircleAvatar(radius: 24dp,
+               backgroundImage: CachedNetworkImageProvider(therapist.photo_url),
+               child: if (no photo) Text(initials, style: bodyMedium))
+    title: Text(therapist.full_name, style: titleMedium)
+    subtitle: Wrap(spacing: 4dp)
+               [if height_cm] Chip("${h} cm", style: bodySmall)
+               [if weight_kg] Chip("${w} kg", style: bodySmall)
+               [if build] Chip(buildLabel, style: bodySmall)   // "Atletis", "Langsing", etc.
+    trailing: if (isSelected) Icon(Icons.check_circle, color: primary)
+```
+
+Body badges (`height`, `weight`, `build`) use `Chip` with `labelStyle: bodySmall`, `padding: EdgeInsets.symmetric(horizontal: 6, vertical: 0)`, `visualDensity: VisualDensity.compact`. These are factual attributes shown per ADR 0014 §3.18.
+
+**Accessibility:** each `ListTile` wraps in `Semantics(label: "${therapist.full_name}, ${buildLabel}, tinggi ${h} cm, berat ${w} kg")`. "Pilih Saja" tile: `Semantics(label: "Pilih saja — terapis dipilihkan otomatis")`.
+
+**Selection model:** only one therapist OR "Pilih Saja" can be selected. Initial state: "Pilih Saja" is pre-selected (auto-assign default per ADR 0014 §3.6).
+
+**Empty state:** if `therapists.isEmpty` (no therapists available at this slot): inline warning card "Tidak ada terapis tersedia di slot ini. Coba slot atau tanggal lain." + `OutlinedButton("Ganti Slot", onPressed: goToStep3)`.
+
+---
+
+#### BK-A8 — Room picker (Step 5: Pilih Ruangan)
+
+Same pattern as therapist picker (BK-A7).
+
+**"Pilih Saja" card:** identical copy pattern: "Pilih Saja" / "Kami pilihkan ruangan yang tersedia untukmu."
+
+**Room option card:**
+
+```
+Card
+  Row
+    ClipRRect(radius: 8dp)
+      CachedNetworkImage(width: 72dp, height: 72dp, fit: cover)
+      // placeholder: Icon(Icons.meeting_room_outlined) on surfaceContainerHigh
+    SizedBox(width: 12dp)
+    Expanded
+      Column
+        Text(room.name, style: titleMedium)
+        SizedBox(height: 4)
+        Row [
+          Badge room_type label (e.g. "VIP", "Reguler") — `Chip(labelStyle: bodySmall)`
+          SizedBox(width: 8)
+          Text("Kapasitas: ${room.capacity}", style: bodySmall, color: onSurfaceVariant)
+        ]
+    if (isSelected) Padding(right: 12) Icon(Icons.check_circle, color: primary)
+```
+
+**Accessibility:** `Semantics(label: "${room.name}, ${roomTypeLabel}, kapasitas ${room.capacity}")`.
+
+**Empty state:** "Tidak ada ruangan tersedia di slot ini." + "Ganti Slot" button.
+
+---
+
+#### BK-A9 — Customer info form (Step 6: Info Kamu)
+
+**Layout:** single-column form inside the step widget.
+
+```
+[Section heading] Text("Informasi Pemesanan", style: titleLarge)
+SizedBox(height: 16)
+
+[Nama Lengkap]
+  TextFormField(
+    labelText: "Nama Lengkap",
+    hintText: "Masukkan nama kamu",
+    keyboardType: TextInputType.name,
+    textCapitalization: TextCapitalization.words,
+    validator: required + minLength(2),
+  )
+
+SizedBox(height: 16)
+
+[No. WhatsApp]
+  TextFormField(
+    labelText: "No. WhatsApp",
+    hintText: "08xxxxxxxxxx",
+    keyboardType: TextInputType.phone,
+    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+    validator: required + isIndonesianPhone (starts with 08 or +62, 10–15 digits),
+  )
+
+SizedBox(height: 16)
+
+[Email]
+  TextFormField(
+    labelText: "Email",
+    hintText: "kamu@email.com",
+    keyboardType: TextInputType.emailAddress,
+    validator: required + isEmail,
+  )
+
+SizedBox(height: 16)
+
+[T&C notice — bodySmall, onSurfaceVariant]
+  "Dengan melanjutkan, kamu menyetujui [Syarat & Ketentuan] dan memahami bahwa booking yang sudah dibayar tidak dapat dibatalkan."
+  // [Syarat & Ketentuan] is a TextSpan with tap → open SettingsScreen T&C in a modal WebView / BottomSheet
+```
+
+**Validation:**
+
+| Field | Rule | Error message |
+|---|---|---|
+| Nama | Required, ≥ 2 chars | "Nama wajib diisi." / "Nama terlalu pendek." |
+| No. WhatsApp | Required, Indonesian phone format | "Nomor WhatsApp wajib diisi." / "Format nomor tidak valid." |
+| Email | Required, valid email format | "Email wajib diisi." / "Format email tidak valid." |
+
+**Inline errors:** `validator` result shown below each `TextFormField` via `errorText`. Red (`error` color) with `Icon(Icons.error_outline, size: 14dp)` prefix. Error clears on next user input.
+
+---
+
+#### BK-A10 — Payment screen (DUMMY)
+
+**Purpose:** simulate payment. This is a stub. Real Midtrans Snap integration has the same screen shell with the Snap WebView replacing the dummy content.
+
+**Full-screen layout:**
+
+```
+AppBar(title: Text("Pembayaran"), leading: BackButton)
+
+Body (SingleChildScrollView, padding: 16dp)
+  // --- DUMMY NOTICE ---
+  Container(
+    color: warning.withOpacity(0.12),
+    padding: 12dp, radius: 8dp,
+    child: Row [
+      Icon(Icons.info_outline, color: warning),
+      SizedBox(width: 8),
+      Expanded(
+        Text("MODE PENGUJIAN — Klik Bayar untuk simulasi pembayaran sukses.",
+             style: bodySmall, color: onSurface)
+      )
+    ]
+  )
+  SizedBox(height: 24)
+
+  // --- PRICE BREAKDOWN ---
+  Card(elevation: 1)
+    CardContent(padding: 16dp)
+      Text("Rincian Pembayaran", style: titleMedium)
+      Divider(height: 20)
+      [PriceRow("Layanan: ${service.name}", service.price_idr)]
+      [if add-ons] for each addon: [PriceRow(addon.name, addon.price_idr)]
+      Divider(height: 20)
+      [PriceRow("Total", totalPrice, bold: true, color: primary)]
+
+  SizedBox(height: 24)
+
+  // --- Booking summary (compact) ---
+  Card
+    ListTile(leading: Icon(Icons.calendar_today_outlined), title: Text(slotDateTime))
+    ListTile(leading: Icon(Icons.person_outlined), title: Text(therapistName or "Pilih otomatis"))
+    ListTile(leading: Icon(Icons.meeting_room_outlined), title: Text(roomName or "Pilih otomatis"))
+
+  SizedBox(height: 80) // clearance for CTA
+```
+
+**Sticky CTA:**
+
+```
+Positioned(bottom: 0)
+  Container
+    FilledButton.icon(
+      icon: Icon(Icons.lock_outlined),
+      label: Text("Bayar — Rp ${formatPrice(total)}"),
+      style: full-width, height: 52dp,
+      onPressed: _submitPayment,  // calls POST /public/bookings then dummy webhook
+    )
+    if (isLoading) LinearProgressIndicator below the button
+```
+
+`_submitPayment` workflow:
+1. `POST /api/v1/public/bookings` → receive `{booking_id, code, snap_token, total_price_idr}`.
+2. `POST /api/v1/public/payments/webhook` with dummy payload.
+3. On success → navigate to `/branches/:id/book/confirm` passing `code` and summary.
+4. On failure → show `SnackBar("Terjadi kesalahan. Coba lagi.")` + button re-enabled.
+
+**Loading state:** button disabled + `CircularProgressIndicator.adaptive()` inside button (replace icon + label). Do not allow back navigation while payment is being processed (disable the `AppBar` back button via `WillPopScope` or `PopScope` when `isLoading`).
+
+---
+
+#### BK-A11 — Booking confirmation screen
+
+**Route:** `/branches/:id/book/confirm` — not poppable (replace navigation stack). User cannot accidentally "go back" to the payment screen.
+
+**Layout (full-screen, centered column, scrollable):**
+
+```
+[Success icon]
+  Icon(Icons.check_circle_rounded, size: 72dp, color: primary)
+
+[Heading]
+  Text("Booking Berhasil! 🎉", style: headlineMedium, textAlign: center)
+  // Exception to no-emoji rule: 🎉 is a celebratory visual signal, not functional copy.
+  // If reduced-motion preference detected, omit the emoji (cannot detect emoji preference
+  // directly; as a heuristic: if device font-scale >= 1.5, omit to avoid double emphasis).
+  // Actually: keep it always — it is a standard Unicode character, not an animated element.
+
+SizedBox(height: 24)
+
+[QR Code Card]
+  Card(elevation: 2, radius: 16dp)
+    Column(padding: 24dp)
+      QrImageView(
+        data: bookingCode,   // e.g. "B7K3M2QF" (without hyphen — scanner reads either)
+        version: QrVersions.auto,
+        size: 200dp,
+        backgroundColor: Colors.white,  // always white — QR needs high contrast regardless of theme
+        foregroundColor: Colors.black,
+      )
+      SizedBox(height: 16)
+      Text(
+        "${code.substring(0,4)}-${code.substring(4,8)}",  // format: "B7K3-M2QF"
+        style: TextStyle(fontSize: 28sp, fontWeight: w700, letterSpacing: 4.0,
+                         fontVariations: [FontVariation('wdth', 75)]),
+        // tabular-nums equivalent: use monospace or letter-spacing
+        textAlign: center,
+      )
+      SizedBox(height: 8)
+      Text("Tunjukkan ini saat check-in", style: bodyMedium, color: onSurfaceVariant,
+           textAlign: center)
+
+SizedBox(height: 24)
+
+[Booking summary card]
+  Card
+    ListTile(leading: Icon(Icons.store_outlined), title: Text(branchName), subtitle: Text(tenantName))
+    ListTile(leading: Icon(Icons.spa_outlined), title: Text(serviceName))
+    ListTile(leading: Icon(Icons.calendar_today_outlined), title: Text(slotDateTime))
+    ListTile(leading: Icon(Icons.person_outlined), title: Text(therapistName or "Terapis dipilihkan"))
+    ListTile(leading: Icon(Icons.payments_outlined), title: Text("Rp ${formatPrice(totalPrice)}"))
+
+SizedBox(height: 16)
+
+[Email notice]
+  Row [Icon(Icons.email_outlined, size: 16dp, color: primary) + SizedBox(4) +
+       Expanded(Text("Kode ini juga sudah dikirim ke email kamu. Simpan kode ini!",
+                style: bodySmall, color: onSurfaceVariant))]
+
+SizedBox(height: 24)
+
+[Share / save buttons — optional row]
+  OutlinedButton.icon(icon: Icon(Icons.share_outlined), label: Text("Bagikan Kode"))
+  // uses Share.share("Kode booking Lustia: ${code}")
+
+SizedBox(height: 32)
+
+[Back to home]
+  TextButton("Kembali ke Beranda")
+  // clears the navigation stack back to /
+```
+
+**Accessibility:**
+- QR code: `Semantics(label: "QR code untuk booking. Kode: ${formattedCode}. Tunjukkan kepada staff saat check-in.")`.
+- Code text has `copyOnLongPress` gesture → clipboard + `SnackBar("Kode disalin.")`.
+
+---
+
+#### BK-A12 — "Booking Saya" screen
+
+**Route:** `/my-bookings` (shell route, bottom nav index 2)
+
+**Purpose:** show recent booking codes stored in `shared_preferences`. No server authentication — pure local storage list.
+
+**Storage key:** `lustia_recent_booking_codes` → JSON array of `{code, service_name, branch_name, scheduled_start, total_price_idr, saved_at}`. Max 20 entries. Newest first. Entries are added on booking confirmation (BK-A11). No sync with server — client-only list.
+
+**AppBar:** `Text("Booking Saya", style: headlineMedium)`. No actions.
+
+**List (`ListView.builder`):**
+
+```
+Card
+  ListTile
+    leading: Container(
+      width: 48dp, height: 48dp, radius: 8dp, color: primaryContainer,
+      child: Icon(Icons.receipt_long_outlined, color: primary)
+    )
+    title: Text(entry.service_name, style: titleMedium)
+    subtitle: Column
+      Text(entry.branch_name, style: bodySmall, color: onSurfaceVariant)
+      Text(formatDate(entry.scheduled_start), style: bodySmall)
+    trailing: Icon(Icons.chevron_right, color: onSurfaceVariant)
+    onTap: () => context.push('/my-bookings/${entry.code}')
+```
+
+**Booking detail (re-show QR) — `/my-bookings/:code`:**
+
+Fetches `GET /api/v1/public/bookings/:code` to get current booking status. Displays:
+- Same QR + code display as BK-A11.
+- Current status badge: `paid` → "Terbayar" (success), `checked_in` → "Check-in" (primary), `completed` → "Selesai" (onSurfaceVariant), `cancelled` → "Dibatalkan" (error), `no_show` → "Tidak Hadir" (warning), `expired` → "Kedaluwarsa" (error).
+- Full booking summary (same as BK-A11).
+- "Kode ini sudah tidak bisa digunakan." banner (full-width, `error` container color) shown for `cancelled`, `no_show`, `expired` status.
+
+**Empty state:**
+
+```
+Column(center)
+  Icon(Icons.receipt_long_outlined, size: 64dp, color: onSurfaceVariant/40)
+  SizedBox(height: 16)
+  Text("Belum ada booking", style: titleMedium, color: onSurfaceVariant)
+  SizedBox(height: 8)
+  Text("Booking kamu akan muncul di sini setelah selesai memesan.",
+       style: bodyMedium, textAlign: center, color: onSurfaceVariant)
+  SizedBox(height: 24)
+  FilledButton("Cari Cabang", onPressed: () => context.go('/'))
+```
+
+---
+
+### Part B — Ops Portal Check-in Flow (web, port 3003)
+
+_Extends the existing ops portal (`lustia/web/ops`). Navigation uses `AppHeader` with `activeNav` prop. Styling: existing shadcn/ui + Tailwind tokens._
+
+---
+
+#### BK-B1 — New nav entry: "Booking"
+
+**Add to `AppHeader` nav items:**
+
+```
+{ key: "booking", label: "Booking", icon: Calendar, href: "/booking" }
+```
+
+Position: after "Dasbor", before any existing "Operasional" entries. Icon: `Calendar` (lucide-react).
+
+`NavKey` union: add `"booking"`.
+
+**Active route match:** `/booking` and all sub-routes (`/booking/*`).
+
+---
+
+#### BK-B2 — Booking list page — `/booking`
+
+**Purpose:** ops staff primary view of today's bookings with quick actions.
+
+**Page header:**
+
+```
+[h1 "Booking Hari Ini"]  [subtitle: count badge "N booking"]  [+ Buat Booking]
+```
+
+**Filter bar (above table):**
+
+```
+FilterBar
+  [DatePicker — today by default, change to view another day]
+  [FilterSelect "Status" — Semua / Menunggu Pembayaran / Terbayar / Check-in / Selesai / No-show / Dibatalkan]
+  [FilterSelect "Terapis" — dropdown of branch therapists]
+```
+
+**Table layout (`<Card><CardContent className="overflow-x-auto p-0">`):**
+
+| Column | Width | Content |
+|---|---|---|
+| Waktu | 80px | `scheduled_start` time — `tabular-nums font-medium` |
+| Pelanggan | 180px | `customer_name` (bold) + `customer_phone` (bodySmall, muted) |
+| Layanan | 160px | `service.name` |
+| Terapis | 140px | `therapist.full_name` (or "—" if auto-assigned but not yet confirmed) |
+| Ruangan | 100px | `room.name` (or "—") |
+| Total | 90px | `total_price_idr` formatted, `tabular-nums` |
+| Status | 110px | Status badge (see status color system below) |
+| Aksi | 120px | Quick action buttons (see below) |
+
+**Status badge color system:**
+
+| Status | Badge label | Variant |
+|---|---|---|
+| `pending_payment` | Menunggu Bayar | `outline` + amber text |
+| `paid` | Terbayar | `outline` + emerald text |
+| `checked_in` | Check-in | filled primary |
+| `completed` | Selesai | `outline` + muted text |
+| `cancelled` | Dibatalkan | filled destructive |
+| `no_show` | Tidak Hadir | filled warning (amber) |
+| `expired` | Kedaluwarsa | `outline` + muted/40 text |
+
+**Quick actions per row:**
+
+```
+<div className="flex items-center gap-1">
+  {status === "paid" && (
+    <Button variant="outline" size="sm" onClick={openCheckin}>
+      <QrCode size={14} className="mr-1.5" /> Check-in
+    </Button>
+  )}
+  {status === "checked_in" && (
+    <Button variant="outline" size="sm" onClick={markComplete}>
+      <CheckCircle size={14} className="mr-1.5" /> Selesai
+    </Button>
+  )}
+  {status === "paid" && (
+    <Button variant="ghost" size="icon" title="Tandai no-show"
+            aria-label={`Tandai no-show: ${customer_name}`} onClick={markNoShow}>
+      <UserX size={14} />
+    </Button>
+  )}
+  <Button variant="ghost" size="icon" asChild aria-label={`Detail booking: ${customer_name}`}>
+    <Link href={`/booking/${id}`}><Eye size={14} /></Link>
+  </Button>
+</div>
+```
+
+Row click (outside action buttons): navigate to `/booking/:id`.
+
+**Pagination:** cursor-based, page size 10. `<Pagination>` component (existing).
+
+**Loading state:** 5 skeleton rows (`h-14` rows, same pattern as therapist/service list).
+
+---
+
+#### BK-B3 — Check-in page — `/booking/checkin`
+
+**Purpose:** scan QR or enter 8-char code to check in a customer.
+
+**Reached from:** "Check-in" button on the booking list row, or direct nav.
+
+**Layout:**
+
+```
+[Page header] "Check-in Pelanggan"
+
+[Two-column on lg+, stacked on mobile]
+
+LEFT COLUMN — QR Scanner (primary method)
+  Card(className="h-[420px] overflow-hidden")
+    // Browser MediaDevices camera feed
+    <div id="qr-viewport" className="relative w-full h-full bg-black">
+      <video className="w-full h-full object-cover" autoPlay muted playsInline />
+      // Scanning overlay: centered square crop guide (white corners, animated pulse border)
+      <div className="absolute inset-0 flex items-center justify-center">
+        <div className="w-48 h-48 border-2 border-white/80 rounded-md
+                        [outline-corner treatment — see note]" />
+      </div>
+      <p className="absolute bottom-4 left-0 right-0 text-center text-white text-sm">
+        Arahkan kamera ke QR code booking
+      </p>
+    </div>
+
+RIGHT COLUMN — Manual entry (fallback)
+  Card
+    CardHeader: "Atau masukkan kode manual"
+    CardContent
+      <Label for="manual-code">Kode Booking (8 karakter)</Label>
+      <Input
+        id="manual-code"
+        placeholder="B7K3-M2QF"
+        maxLength={9}  // 8 chars + hyphen
+        className="text-center text-lg tracking-widest font-mono uppercase"
+        pattern="[A-Z0-9]{4}-[A-Z0-9]{4}"
+        onInput={autoFormatHyphen}  // inserts hyphen after 4 chars
+      />
+      <Button type="submit" className="w-full mt-3">Cari Booking</Button>
+```
+
+**Camera permission denied state:**
+
+Replace the camera card with:
+
+```
+Card(className="h-[420px] flex flex-col items-center justify-center gap-4")
+  CameraOff size={48} className="text-muted-foreground"
+  p "Akses kamera ditolak."
+  p className="text-sm text-muted-foreground text-center max-w-xs"
+    "Izinkan akses kamera di pengaturan browser untuk menggunakan pemindai QR."
+  Button variant="outline" onClick={requestPermission} "Coba Izinkan Kamera"
+```
+
+**On valid scan / code input — booking found:**
+
+The camera card / code area slides/transitions (225ms) to reveal a booking detail panel below (or in a `Sheet` from the right on desktop):
+
+```
+Card (success-tinted: border-emerald-200 bg-emerald-50)
+  CardHeader: [CheckCircle2 icon, emerald] "Booking Ditemukan"
+  CardContent
+    [Customer name — titleLarge, bold]
+    [Service — bodyMedium]
+    [Slot — bodyMedium]  [Therapist — bodyMedium]  [Room — bodyMedium]
+    [Status badge]
+  CardFooter className="flex justify-end gap-2"
+    Button variant="outline" "Batal"
+    Button variant="default" (primary) onClick={confirmCheckin}
+      <CheckCircle size={14} className="mr-1.5" /> "Konfirmasi Check-in"
+```
+
+**On code not found:**
+
+```
+Card (error-tinted: border-red-200 bg-red-50)
+  AlertCircle icon (red)
+  Text "Kode tidak ditemukan."
+  Text className="text-sm text-muted-foreground" "Periksa kembali kode yang dimasukkan."
+```
+
+**Post-confirm check-in:** status transitions to `checked_in`. The panel shows a success state for 1.5s then auto-resets the scanner for the next customer. Toast: `"Check-in berhasil. Selamat datang, [customer_name]!"` (success).
+
+---
+
+#### BK-B4 — Booking detail page — `/booking/:id`
+
+**Purpose:** full booking information + ops actions.
+
+**Layout:**
+
+```
+[Page header]
+  Back link "← Kembali ke Daftar Booking"
+  h1 "Detail Booking"  [booking.code badge — monospace, outline]
+  Status badge (large, right slot)
+
+[Two-column grid on lg+, stacked on mobile]
+
+LEFT: Booking info card
+  Section "Pelanggan"
+    Name, Phone (with copy icon), Email (with copy icon)
+  Section "Booking"
+    Service, Add-ons (list), Slot, Duration
+    Therapist, Room
+  Section "Pembayaran"
+    Total, Payment method, Payment reference (if any), Paid at
+
+RIGHT: Actions + history card
+  [Actions section]
+    — if status = "paid":
+      Button primary full-width "Konfirmasi Check-in"  (→ calls checkin endpoint)
+      Button outline full-width "Tandai Tidak Hadir"   (→ no-show with confirm dialog)
+      Button destructive outline full-width "Batalkan Booking"  (→ cancel with reason dialog)
+    — if status = "checked_in":
+      Button primary full-width "Tandai Selesai"
+      Button destructive outline "Batalkan Booking"
+    — if terminal states (completed/cancelled/no_show/expired):
+      Informational card "Tidak ada tindakan tersedia."
+
+  [Status history timeline]
+    Timeline of status transitions:
+    Each entry: [dot] [status label] — [timestamp] — [actor username if available]
+    Using a simple `<ol>` with `::before` dot styling; no library required.
+```
+
+**Confirmation dialogs:**
+
+No-show confirmation:
+- Title: "Tandai Tidak Hadir?"
+- Body: "Pelanggan [nama] akan ditandai tidak hadir. Slot tidak akan dibebaskan secara otomatis."
+- Confirm: "Ya, Tidak Hadir" (destructive)
+- Cancel: "Batal"
+
+Cancel booking confirmation:
+- Title: "Batalkan Booking?"
+- Body: "Booking ini akan dibatalkan. Tindakan ini tidak dapat dibatalkan."
+- Body: below — `<Label>Alasan Pembatalan</Label>` + `<Textarea rows={3} required />`. Submit button disabled until textarea has content.
+- Confirm: "Ya, Batalkan" (destructive)
+- Cancel: "Batal"
+
+---
+
+#### BK-B5 — Concierge "Buat Booking Baru" — `/booking/new`
+
+**Purpose:** ops staff creates a booking on behalf of a walk-in / phone-in customer. Payment method is `paid_at_venue`.
+
+**Layout:** a web-form adaptation of the mobile booking wizard. Single-page (not multi-step) since ops staff have the customer in front of them and can fill everything at once.
+
+```
+[Page header]  "Buat Booking"  / subtitle "Booking atas nama pelanggan (bayar di tempat)"
+
+[Form card — single column on mobile, two-column grid on lg+]
+
+LEFT column
+  [Layanan — required Select]  // tenant services grouped by category
+  [Tambahan — multi-select combobox (same pattern as ServiceCombobox)]
+  [Cabang — read-only (ops portal is branch-scoped)]
+  [Tanggal — date picker (Calendar popover, today min)]
+  [Slot — dynamic select, populated on date/service selection via availability API]
+  [Terapis — optional Select; "Pilih otomatis" as first option]
+  [Ruangan — optional Select; "Pilih otomatis" as first option]
+
+RIGHT column
+  [Info Pelanggan section]
+    Nama Lengkap — Input, required
+    No. WhatsApp — Input, type tel, required
+    Email — Input, type email, required
+
+  [Price summary box]
+    Card (bg-muted/30)
+      "Layanan: Rp X"
+      "Tambahan: Rp Y" (if any)
+      Divider
+      "Total: Rp Z" (bold, emerald)
+
+[Button row — bottom of form]
+  Button ghost "Batal" → navigate to /booking
+  Button primary "Buat Booking" (disabled until form valid)
+```
+
+**Slot select behavior:** when `service_id` and `date` are both set, auto-trigger `GET /api/v1/public/branches/:id/availability?service_id=&date=`. Populate the Slot select with returned available slots. Show `CirclularProgress` inline while loading. If no slots available: `Select` shows disabled option "Tidak ada slot tersedia."
+
+**On submit:** `POST /api/v1/tenant/bookings` with `payment_method: "paid_at_venue"`. On success: navigate to `/booking/:id` of the new booking. Toast: "Booking berhasil dibuat."
+
+**No payment screen** — `paid_at_venue` skips the dummy payment entirely. Status starts `paid` (pre-confirmed).
+
+---
+
+#### BK-B6 — Empty and error states (ops portal)
+
+| Screen | State | Copy | Visual |
+|---|---|---|---|
+| Booking list | No bookings today | "Tidak ada booking hari ini." | `Calendar` icon (56px, muted/40) + supporting "Booking baru akan muncul di sini." |
+| Booking list | Load error | "Gagal memuat daftar booking. Muat ulang halaman." | Inline alert with retry button |
+| Check-in | Camera permission denied | "Akses kamera ditolak. Izinkan akses kamera di pengaturan browser." | `CameraOff` icon + "Coba Izinkan Kamera" button |
+| Check-in | Code not found | "Kode tidak ditemukan. Periksa kembali kode yang dimasukkan." | Error card (red-50 bg) |
+| Booking detail | Booking not found | "Booking tidak ditemukan." | `AlertCircle` (red) + back link |
+| Booking new — no slots | No available slots for date/service | "Tidak ada slot tersedia pada tanggal ini." | Inline in slot Select |
+
+---
+
+### Part C — Tenant Admin Booking Views (web, port 3002)
+
+_Extends the existing tenant-admin portal (`lustia/web/tenant-admin`). Sidebar nav uses existing pattern._
+
+---
+
+#### BK-C1 — Sidebar nav addition
+
+**Placement:** add "Booking" as a **standalone top-level item** in the sidebar, after "Operasional" and before "Pengaturan" (if Pengaturan exists) or at the bottom of the nav group.
+
+Rationale: booking data is cross-branch reporting data (not per-branch operational master data), and "Laporan" lives within it — this elevates Booking to the same tier as "Cabang" and "Operasional", not a sub-item within Operasional. Nesting booking under Operasional would bury reporting behind an extra nav click.
+
+```
+nav item:
+  icon: Calendar (lucide-react)
+  label: "Booking"
+  href: "/booking"
+  active match: /booking/*
+```
+
+Sub-items (secondary nav below "Booking" when active, rendered inline as pills or sub-list):
+
+```
+/booking            → "Daftar Booking"
+/booking/reports    → "Laporan"
+```
+
+---
+
+#### BK-C2 — Booking list page — `/booking`
+
+**Purpose:** cross-branch visibility for tenant_admin / branch_admin sees own branch only.
+
+**Page header:**
+
+```
+h1 "Daftar Booking"
+subtitle "Semua booking di semua cabang Anda" (tenant_admin)
+        / "Booking di cabang Anda" (branch_admin)
+```
+
+No "Buat Booking" CTA here — tenant admin does not create bookings (that is the ops portal's role).
+
+**Filter bar:**
+
+```
+FilterBar
+  DateRangePicker (from/to — default: this week)    // shadcn Calendar in Popover, range mode
+  FilterSelect "Cabang" (tenant_admin only; branch_admin sees own branch implicitly)
+  FilterSelect "Status" (Semua / Terbayar / Check-in / Selesai / Tidak Hadir / Dibatalkan)
+  FilterSelect "Layanan"
+```
+
+**Table layout:**
+
+| Column | Content |
+|---|---|
+| Kode | `booking.code` — `font-mono text-sm` — copyable (click → clipboard) |
+| Pelanggan | `customer_name` (bold) + `customer_phone` (bodySmall, muted) |
+| Layanan | `service.name` + add-on count badge if `addon_count > 0` |
+| Cabang | `branch.name` (tenant_admin only) |
+| Jadwal | `scheduled_start` date + time — `tabular-nums` |
+| Terapis | `therapist.full_name` |
+| Total | `total_price_idr` — `tabular-nums` |
+| Status | Status badge (same color system as BK-B2) |
+| Aksi | `Eye` (pencil) button → `/booking/:id`. No other inline actions here (full detail on detail page). |
+
+`<TableHeader className="bg-muted/30">`, `<TableRow className="h-14">`, `<TableBody className="text-sm">` — consistent with all other list pages.
+
+**Pagination:** cursor-based, page size 10 (Lustia convention). `<Pagination>` component.
+
+**Mobile:** `Card className="overflow-x-auto"` + `Table className="min-w-[680px]"`.
+
+---
+
+#### BK-C3 — Booking detail page — `/booking/:id`
+
+**Purpose:** read-only view + optional cancel action for tenant_admin.
+
+**Layout:** same grid structure as ops portal BK-B4, with these differences:
+- **No check-in / no-show / complete buttons** — those are ops portal operations.
+- **Only "Batalkan Booking" is available** (for `tenant_admin` role, when status is `paid` or `checked_in`).
+- Status history timeline shown (same pattern as BK-B4).
+
+**Cancel booking dialog:** same as BK-B4 (requires reason text in textarea).
+
+**Post-cancel:** stay on detail page, update status badge, toast "Booking berhasil dibatalkan."
+
+**Read-only indicator:** a top-of-page info bar for branch_admin (who has `booking.read` but not `booking.cancel`):
+
+```
+<div role="note" className="bg-muted/40 border border-border rounded-md px-4 py-2 text-sm text-muted-foreground mb-4">
+  Anda hanya dapat melihat detail booking. Hubungi tenant admin untuk membatalkan.
+</div>
+```
+
+---
+
+#### BK-C4 — Reports page — `/booking/reports`
+
+**Purpose:** high-level booking metrics for the tenant. Simple, no complex charting.
+
+**Page header:** h1 "Laporan Booking" + subtitle "Ringkasan performa booking"
+
+**Date range filter (top of page):**
+
+```
+DateRangePicker (from/to — default: this month)
+FilterSelect "Cabang" (tenant_admin only)
+Button primary "Terapkan" — fetches fresh data
+```
+
+**Metric cards (grid: 2-col on mobile, 4-col on lg+):**
+
+```
+[Card 1] Total Booking
+  [Number: N (large, primary color)]
+  [Subtitle: "periode ini"]
+
+[Card 2] Total Pendapatan
+  [Number: Rp X.XXX.XXX (large, emerald)]
+  [Subtitle: "dari booking terbayar"]
+
+[Card 3] Tingkat No-show
+  [Number: X% (large, amber if >10%, emerald if ≤10%)]
+  [Subtitle: "dari booking terbayar"]
+
+[Card 4] Booking Dibatalkan
+  [Number: N (large)]
+  [Subtitle: "oleh operator"]
+```
+
+Number formatting: `formatPrice` for Rp values, `tabular-nums`. Percentage: `(no_show_count / paid_count * 100).toFixed(1)%`.
+
+**Bar chart — "Booking per Cabang" (single chart, below metric cards):**
+
+Use `recharts` (already a common dep in Next.js projects; if not yet installed, `nextjs-expert` adds it). A simple vertical bar chart:
+
+```
+<BarChart data={branchBreakdown} height={240}>
+  <XAxis dataKey="branch_name" tick={{ fontSize: 12 }} />
+  <YAxis tick={{ fontSize: 12 }} />
+  <Tooltip
+    formatter={(value, name) => {
+      if (name === "total_bookings") return [value, "Booking"]
+      if (name === "total_revenue_idr") return [formatPrice(value), "Pendapatan"]
+    }}
+  />
+  <Bar dataKey="total_bookings" fill={emerald-500} radius={[4,4,0,0]} />
+</BarChart>
+```
+
+Each bar represents one branch. Hover tooltip shows booking count + revenue for that branch. Color: `#10B981` (emerald-500, matching `accent` token). `prefers-reduced-motion`: `animationDuration={0}` when `window.matchMedia("(prefers-reduced-motion: reduce)").matches`.
+
+**Chart accessibility:**
+
+Below the chart: a summary table with the same data (branch name, booking count, revenue) for screen readers and keyboard-only users. Use `<caption>` inside the `<table>` reading "Booking per cabang, periode [dari]–[hingga]". Apply `className="sr-only"` to the table caption on the chart version so it is not visually double-rendered.
+
+**Loading state:** skeleton cards (4 `Card` items with grey shimmer rectangle for the number area) + grey rectangle for chart area.
+
+**Empty state (no bookings in period):** metric cards show "0" / "Rp 0" / "—". Chart shows: centered text "Tidak ada data booking pada periode ini." in chart area (`height: 240`, centered).
+
+---
+
+#### BK-C5 — Empty states (tenant admin)
+
+| Screen | State | Copy |
+|---|---|---|
+| Booking list | No bookings in range/filter | "Tidak ada booking pada periode ini." + `Calendar` icon (muted/40) |
+| Booking list | No bookings ever | "Belum ada booking. Booking dari pelanggan akan muncul di sini." + `Calendar` icon + CTA-less (tenant admin cannot create bookings) |
+| Booking detail | Not found or wrong tenant | "Booking tidak ditemukan atau Anda tidak memiliki akses." + back link |
+| Reports | No data for selected period | "Tidak ada data untuk periode yang dipilih. Coba rentang tanggal yang berbeda." |
+
+---
+
+### New Components — Phase 5 Additions
+
+Append to the component inventory:
+
+#### Web components (nextjs-expert)
+
+| Component | Location | Description |
+|---|---|---|
+| `BookingStatusBadge` | `components/booking-status-badge.tsx` | Maps `booking.status` string → labeled Badge with correct color variant. Shared across ops portal and tenant-admin. |
+| `BookingTable` | `components/booking-table.tsx` | Reusable table for booking lists. Accepts `bookings[]`, `showBranchColumn?: boolean`, `showQuickActions?: boolean`. Column visibility is prop-driven to serve both ops portal and tenant-admin. |
+| `CheckinScanner` | `components/checkin-scanner.tsx` | Camera QR scanner + manual code input. Client component. Uses `html5-qrcode` or `@zxing/library`. Returns `onScan(code: string)` callback. |
+| `SlotSelect` | `components/slot-select.tsx` | Dynamic `<Select>` that fetches availability slots when `serviceId` + `date` change. Wraps the availability API call + loading state. |
+| `DateRangePicker` | `components/date-range-picker.tsx` | shadcn `Calendar` in `Popover`, range mode (`DateRange` from `react-day-picker`). Used on tenant-admin booking list + reports. |
+| `BookingMetricCard` | `components/booking-metric-card.tsx` | Single KPI card: icon slot + large number + label + optional trend indicator. |
+| `ConciergeBookingForm` | `components/concierge-booking-form.tsx` | Full booking creation form for ops portal. Uses `SlotSelect`, service Select, therapist Select, customer info fields. |
+
+#### Flutter components (flutter-expert)
+
+| Widget | File | Description |
+|---|---|---|
+| `BranchCard` | `widgets/branch_card.dart` | Branch list item card with photo, name, address, distance badge, favorite icon. |
+| `SlotGrid` | `widgets/slot_grid.dart` | `GridView` of `FilterChip` slot tiles. Accepts `slots[]`, `selectedSlot`, `onSlotSelected`. |
+| `TherapistOptionTile` | `widgets/therapist_option_tile.dart` | ListTile with avatar, name, body badges. Used in therapist picker step. |
+| `RoomOptionTile` | `widgets/room_option_tile.dart` | Room card with thumbnail, name, type badge, capacity. Used in room picker step. |
+| `BookingQrCard` | `widgets/booking_qr_card.dart` | White card containing `QrImageView` + formatted code text + "Tunjukkan saat check-in" label. |
+| `BookingStepBar` | `widgets/booking_step_bar.dart` | `LinearProgressIndicator` + step label. |
+| `PriceBreakdownCard` | `widgets/price_breakdown_card.dart` | List of service + addons + total with `tabular-nums` styling. |
+| `StatusBanner` | `widgets/status_banner.dart` | Full-width colored banner for cancelled/expired/no_show booking states in My Bookings. |
+
+---
+
+### Phase 5 — Accessibility Audit
+
+**Mobile (Flutter):**
+- All `IconButton` and `FloatingActionButton` use `tooltip:` prop (becomes `Semantics(label:)` on Android, `UIAccessibility` label on iOS).
+- `QrImageView` wrapped in `Semantics(label: "QR kode booking ${code}. Kode booking: ${formattedCode}.")`.
+- Body metrics (height/weight/build) in `TherapistOptionTile`: not excluded from semantics — factual attributes relevant to some customers' selection.
+- All `FilterChip` slots: `Semantics(label: "${time} — ${isAvailable ? 'tersedia' : 'tidak tersedia'}", button: true)`.
+- Minimum touch target 48×48 dp enforced on all interactive elements. `SlotGrid` `childAspectRatio: 2.5` at `crossAxisCount: 3` on 360dp screen = ~113dp wide × ~45dp tall — acceptable (just below 48dp height). Add `constraints: BoxConstraints(minHeight: 48)` to slot `FilterChip` to guarantee 48dp minimum.
+- `prefers-reduced-motion` via `MediaQuery.disableAnimations` — all `AnimatedContainer`, `PageController` transitions, and `Shimmer` animations check this.
+
+**Web (ops portal + tenant-admin):**
+- `CheckinScanner`: camera `<video>` has `aria-hidden="true"` (visual-only element); the result panel is the semantic anchor. Manual code input has associated `<label>` via `htmlFor`.
+- `BookingTable`: `<TableRow>` with `className="cursor-pointer"` uses `onClick` on the row — add `role="link"` and `tabIndex={0}` with `onKeyDown={(e) => e.key === 'Enter' && navigate(href)}` so keyboard users can activate rows.
+- `BookingStatusBadge`: badge text is the sole semantic signal (no reliance on color alone). All status labels are unique Indonesian strings.
+- `BarChart` (recharts): has companion `<table>` as screen-reader fallback. `aria-label="Grafik booking per cabang"` on the `<div>` wrapper.
+- `DateRangePicker`: date inputs have associated labels. Calendar popup: `role="dialog"`, `aria-label="Pilih rentang tanggal"`. Escape closes.
+- Confirm dialogs (cancel, no-show): focus on "Batal" by default (first focusable in footer). Escape closes. Focus restored to trigger on close. All Radix `AlertDialog` defaults cover this.
+- All form labels associated via `htmlFor` / RHF `<FormLabel>`. Error messages via `<FormMessage role="alert">`.
+- Color contrast: `text-emerald-700` on `bg-emerald-50` = ~4.7:1 (WCAG AA pass). `text-amber-700` on `bg-amber-50` = ~4.6:1 (WCAG AA pass). `text-red-700` on `bg-red-50` = ~4.9:1 (WCAG AA pass). All status badge text-on-background combinations verified.
+
+---
+
+### Phase 5 — Microcopy additions
+
+#### Mobile (Flutter)
+
+| Screen | Indonesian copy |
+|---|---|
+| Onboarding — heading | "Temukan cabang terdekat dari kamu" |
+| Onboarding — body | "Izinkan Lustia mengakses lokasimu agar kami bisa menampilkan cabang spa dan klinik yang paling dekat denganmu." |
+| Onboarding — primary CTA | "Izinkan Lokasi" |
+| Onboarding — skip | "Lewati, cari manual" |
+| Branch list — search placeholder | "Cari cabang atau area…" |
+| Slot not available tooltip | "Tidak tersedia" |
+| Therapist auto-select label | "Pilih Saja" |
+| Therapist auto-select subtitle | "Kami pilihkan terapis terbaik yang tersedia untukmu" |
+| Room auto-select label | "Pilih Saja" |
+| Room auto-select subtitle | "Kami pilihkan ruangan yang tersedia untukmu" |
+| Payment dummy notice | "MODE PENGUJIAN — Klik Bayar untuk simulasi pembayaran sukses." |
+| Confirmation heading | "Booking Berhasil!" |
+| QR instruction | "Tunjukkan ini saat check-in" |
+| Email notice | "Kode ini juga sudah dikirim ke email kamu. Simpan kode ini!" |
+| T&C notice | "Dengan melanjutkan, kamu menyetujui Syarat & Ketentuan dan memahami bahwa booking yang sudah dibayar tidak dapat dibatalkan." |
+
+#### Web — ops portal
+
+| Screen | Indonesian copy |
+|---|---|
+| Check-in scan prompt | "Arahkan kamera ke QR code booking" |
+| Check-in manual input label | "Kode Booking (8 karakter)" |
+| Check-in manual input placeholder | "B7K3-M2QF" |
+| Check-in success toast | "Check-in berhasil. Selamat datang, [nama]!" |
+| Cancel dialog — title | "Batalkan Booking?" |
+| Cancel dialog — reason label | "Alasan Pembatalan" |
+| Cancel dialog — confirm | "Ya, Batalkan" |
+| No-show dialog — title | "Tandai Tidak Hadir?" |
+| No-show dialog — confirm | "Ya, Tidak Hadir" |
+| Mark complete button | "Tandai Selesai" |
+| Concierge page subtitle | "Booking atas nama pelanggan (bayar di tempat)" |
+
+#### Web — tenant admin
+
+| Screen | Indonesian copy |
+|---|---|
+| Booking list — tenant_admin subtitle | "Semua booking di semua cabang Anda" |
+| Booking list — branch_admin subtitle | "Booking di cabang Anda" |
+| Reports page heading | "Laporan Booking" |
+| Reports metric — total bookings | "Total Booking" |
+| Reports metric — revenue | "Total Pendapatan" |
+| Reports metric — no-show rate | "Tingkat Tidak Hadir" |
+| Reports metric — cancelled | "Booking Dibatalkan" |
+| Reports chart title | "Booking per Cabang" |
+
+---
+
+### Phase 5 — Open questions for orchestrator
+
+1. **Branch photo URL in public API:** `GET /api/v1/public/branches` must return a `photo_url` (resolved) for branch thumbnail images. Confirm with `go-expert` that the public branch DTO resolves `photo_key` → URL at the controller boundary (same pattern as therapist photo). This is a cross-agent impact: `flutter-expert` needs `photo_url: String?` in the Dart model; `nextjs-expert` needs `photo_url: string | null` in TypeScript types.
+
+2. **"Buka sekarang" filter implementation:** the filter chip triggers `open_now=true` on the public branch list endpoint. Confirm with `go-expert` that the backend computes `open_now` by checking `branch.operational_hours` JSON against `now()` in the server's timezone. The Flutter app passes `open_now=1` (boolean query param) and does not compute this client-side.
+
+3. **QR scanner library choice (web):** `CheckinScanner` requires a JavaScript QR scanning library. Options: `html5-qrcode` (MIT, widely used) or `@zxing/library` (Apache 2.0, TypeScript-native). Recommend `@zxing/library` for TypeScript ergonomics. `nextjs-expert` selects final library; flag if neither is acceptable.
+
+4. **`recharts` dependency (tenant-admin):** the reports bar chart uses `recharts`. If `recharts` is not already in `package.json` for the tenant-admin app, `nextjs-expert` adds it. No design dependency — chart can fall back to a plain table if recharts causes build issues.
+
+5. **Payment method field display:** for `paid_at_venue` bookings (concierge), the booking detail page should show "Bayar di Tempat" as the payment method label. Confirm the API returns `payment_method: "paid_at_venue"` as a string that the frontend maps to this display label. Add to `BookingStatusBadge` or a separate `PaymentMethodLabel` helper.
+
+6. **Therapist body attributes in public API:** the public branch detail endpoint (`GET /api/v1/public/branches/:id`) must return therapist list with `height_cm`, `weight_kg`, `build` fields for the therapist picker in the Flutter app (BK-A7). Confirm this is in the `go-expert`'s public branch detail DTO. Cross-agent impact: if it is missing, the body badges in `TherapistOptionTile` cannot be shown.
+

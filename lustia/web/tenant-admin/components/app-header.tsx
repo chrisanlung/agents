@@ -1,5 +1,11 @@
 import Link from "next/link";
-import { Building2, LayoutDashboard, MapPin, Stethoscope } from "lucide-react";
+import {
+  Building2,
+  Calendar,
+  LayoutDashboard,
+  MapPin,
+  Stethoscope,
+} from "lucide-react";
 
 import { WorkspaceSwitcher, type MembershipSummary } from "@/components/workspace-switcher";
 import { UserMenu } from "@/components/user-menu";
@@ -7,19 +13,22 @@ import { cn } from "@/lib/utils";
 
 const appName = process.env.NEXT_PUBLIC_APP_NAME ?? "Lustia Tenant Portal";
 
-type NavKey = "dashboard" | "branches" | "operasional";
+type NavKey = "dashboard" | "branches" | "operasional" | "booking";
 
 interface NavItem {
   key: NavKey;
   href: string;
   label: string;
   icon: typeof LayoutDashboard;
+  /** Additional path prefixes that should mark this item as active */
+  activePrefix?: string;
 }
 
 const NAV_ITEMS: NavItem[] = [
   { key: "dashboard", href: "/dashboard", label: "Dasbor", icon: LayoutDashboard },
   { key: "branches", href: "/branches", label: "Cabang", icon: MapPin },
   { key: "operasional", href: "/master/therapists", label: "Operasional", icon: Stethoscope },
+  { key: "booking", href: "/booking", label: "Booking", icon: Calendar, activePrefix: "/booking" },
 ];
 
 interface AppHeaderProps {
@@ -104,3 +113,14 @@ export function AppHeader({
 }
 
 export type { NavKey };
+
+/**
+ * Derive the active nav key from a pathname string.
+ * Useful in layouts that want to auto-detect the active item.
+ */
+export function getActiveNavKey(pathname: string): NavKey {
+  if (pathname.startsWith("/booking")) return "booking";
+  if (pathname.startsWith("/master")) return "operasional";
+  if (pathname.startsWith("/branches")) return "branches";
+  return "dashboard";
+}

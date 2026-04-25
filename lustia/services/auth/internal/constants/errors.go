@@ -160,6 +160,49 @@ var (
 	// the branch_id of an existing room.
 	ErrRoomBranchImmutable = errors.New("branch ruangan tidak dapat diubah")
 
+	// ADR 0014 — Phase 5 Booking Engine.
+
+	// ErrBookingNotFound is returned when a booking ID or code does not resolve.
+	ErrBookingNotFound = errors.New("booking not found")
+
+	// ErrBookingCodeInvalid is returned when a provided booking code has an
+	// invalid format (does not match XXXX-XXXX Crockford Base32 pattern).
+	ErrBookingCodeInvalid = errors.New("invalid booking code format")
+
+	// ErrBookingSlotConflict is returned when the DB-level GiST exclusion
+	// constraint fires: therapist or room is already booked for the requested
+	// slot. Maps to HTTP 409.
+	ErrBookingSlotConflict = errors.New("slot not available — therapist or room is already booked at this time")
+
+	// ErrBookingExpired is returned when an action (e.g. check-in) is attempted
+	// on a booking whose status is 'expired'.
+	ErrBookingExpired = errors.New("booking has expired")
+
+	// ErrBookingInvalidStatusTransition is returned when a state transition is
+	// not valid (e.g. completing an already-cancelled booking).
+	ErrBookingInvalidStatusTransition = errors.New("status transition tidak valid untuk booking ini")
+
+	// ErrPaymentAmountMismatch is returned internally when a webhook gross_amount
+	// is less than the booking's total_price_idr. This is an audit event — the
+	// webhook handler returns HTTP 200 but does NOT mark the booking paid.
+	ErrPaymentAmountMismatch = errors.New("payment amount mismatch")
+
+	// ErrNoTherapistAvailable is returned when no therapist satisfies all
+	// constraints for the requested slot (auto-assign path).
+	ErrNoTherapistAvailable = errors.New("tidak ada terapis tersedia di slot ini")
+
+	// ErrNoRoomAvailable is returned when no room satisfies all constraints for
+	// the requested slot (auto-assign path).
+	ErrNoRoomAvailable = errors.New("tidak ada ruangan tersedia di slot ini")
+
+	// ErrTherapistNotForService is returned when the requested therapist is not
+	// mapped (via therapist_service) to the requested service.
+	ErrTherapistNotForService = errors.New("terapis tidak tersedia untuk layanan ini")
+
+	// ErrBookingCancellationForbidden is returned when a customer-facing cancel
+	// is attempted (not allowed in Phase 5 — ops-only cancel).
+	ErrBookingCancellationForbidden = errors.New("pembatalan hanya dapat dilakukan oleh operator")
+
 	// ADR 0011 — Storage abstraction + therapist extended profile.
 
 	// ErrUploadQuotaExceeded is returned when a tenant exceeds the per-hour

@@ -49,4 +49,12 @@ const (
 	PermRoomCreate = "room.create"
 	PermRoomUpdate = "room.update"
 	PermRoomDelete = "room.delete"
+
+	// ADR 0014 — Phase 5 Booking Engine.
+	PermBookingRead     = "booking.read"
+	PermBookingCreate   = "booking.create"
+	PermBookingCancel   = "booking.cancel"
+	PermBookingCheckin  = "booking.checkin"
+	PermBookingComplete = "booking.complete"
+	PermBookingNoShow   = "booking.no_show"
 )

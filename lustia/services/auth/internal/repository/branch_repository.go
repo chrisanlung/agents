@@ -48,7 +48,14 @@ func (r *BranchRepository) FindByTenant(ctx context.Context, tenantID string, fi
 		page = 1
 	}
 
-	q := db.Model(&model.Branch{}).Where("tenant_id = ? AND deleted_at IS NULL", tenantID)
+	q := db.Model(&model.Branch{}).Where("deleted_at IS NULL")
+	// Empty tenantID ⇒ public/cross-tenant listing path. RLS is the boundary
+	// (the __public__ session var only exposes branches whose parent tenant
+	// is active). Skip the tenant_id WHERE so we don't attempt to coerce ""
+	// to a UUID.
+	if tenantID != "" {
+		q = q.Where("tenant_id = ?", tenantID)
+	}
 	if filter.Status != "" && filter.Status != "all" {
 		q = q.Where("status = ?", filter.Status)
 	}

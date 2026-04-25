@@ -132,6 +132,24 @@ func RespondDomainError(c *gin.Context, err error) {
 	case errors.Is(err, constants.ErrImageDimensionsTooLarge):
 		RespondError(c, http.StatusBadRequest, constants.CodeImageDimensionsTooLarge, err.Error())
 
+	// ADR 0014 — Phase 5 Booking Engine.
+	case errors.Is(err, constants.ErrBookingNotFound):
+		RespondError(c, http.StatusNotFound, constants.CodeBookingNotFound, "booking not found")
+	case errors.Is(err, constants.ErrBookingCodeInvalid):
+		RespondError(c, http.StatusBadRequest, constants.CodeBookingCodeInvalid, "invalid booking code format")
+	case errors.Is(err, constants.ErrBookingSlotConflict):
+		RespondError(c, http.StatusConflict, constants.CodeBookingSlotConflict, err.Error())
+	case errors.Is(err, constants.ErrBookingExpired):
+		RespondError(c, http.StatusConflict, constants.CodeBookingExpired, "booking has expired")
+	case errors.Is(err, constants.ErrBookingInvalidStatusTransition):
+		RespondError(c, http.StatusConflict, constants.CodeBookingInvalidStatusTransition, err.Error())
+	case errors.Is(err, constants.ErrNoTherapistAvailable):
+		RespondError(c, http.StatusConflict, constants.CodeNoTherapistAvailable, err.Error())
+	case errors.Is(err, constants.ErrNoRoomAvailable):
+		RespondError(c, http.StatusConflict, constants.CodeNoRoomAvailable, err.Error())
+	case errors.Is(err, constants.ErrTherapistNotForService):
+		RespondError(c, http.StatusConflict, constants.CodeTherapistNotForService, err.Error())
+
 	// Generic service-layer validation error — 400 VALIDATION with the
 	// service's message so the caller sees what went wrong.
 	case errors.Is(err, constants.ErrInvalidInput):

@@ -444,3 +444,172 @@ type RoomSortOrderItem struct {
 	ID        string
 	SortOrder int
 }
+
+// ---------------------------------------------------------------------------
+// ADR 0014 — Phase 5 Booking Engine.
+// ---------------------------------------------------------------------------
+
+// BookingRepository is the interface for booking persistence.
+// Consumer-owned per SOLID-I: declared here in the service package.
+type BookingRepository interface {
+	// Save inserts a new booking row. The booking must already have TenantID,
+	// Code, TotalPriceIDR, etc. set by the service layer. The DB exclusion
+	// constraint (ADR 0002) fires here; callers must map the error to
+	// ErrBookingSlotConflict.
+	Save(ctx context.Context, b *model.Booking) error
+
+	// SaveAddons bulk-inserts all booking_addon rows for a booking.
+	SaveAddons(ctx context.Context, addons []*model.BookingAddon) error
+
+	// FindByID returns a booking by primary key.
+	// Returns ErrBookingNotFound when no matching row exists.
+	FindByID(ctx context.Context, id string) (*model.Booking, error)
+
+	// FindByCode returns a booking by its human-readable code (operator path).
+	// This is the tenant-scoped lookup. code must be non-empty.
+	// Returns ErrBookingNotFound when no matching row exists.
+	FindByCode(ctx context.Context, code string) (*model.Booking, error)
+
+	// FindByCodePublic returns a booking by code under the __public__ RLS sentinel.
+	//
+	// H-7 (SECURITY.md): This method MUST always include WHERE code = $1.
+	// The public RLS policy (booking_public_select) is additive and does NOT
+	// restrict to a specific code by itself — it would expose all booking rows
+	// under __public__ if called without this predicate.
+	// DO NOT add a parameterless variant of this method.
+	// code must be non-empty; the method returns ErrBookingNotFound on missing code.
+	FindByCodePublic(ctx context.Context, code string) (*model.Booking, error)
+
+	// FindAddonsByBooking returns all booking_addon rows for the given booking ID.
+	FindAddonsByBooking(ctx context.Context, bookingID string) ([]*model.BookingAddon, error)
+
+	// FindByTenant returns an offset-paginated list of bookings for the given
+	// tenant, applying optional filters, plus the total count.
+	FindByTenant(ctx context.Context, tenantID string, filter BookingFilter) ([]*model.Booking, int64, error)
+
+	// TransitionStatus performs a conditional UPDATE:
+	//   UPDATE booking SET status=$new, <audit_cols>, updated_at=now()
+	//   WHERE id=$1 AND status=$expected
+	//
+	// H-5 (SECURITY.md): The WHERE status=$expected ensures the transition is
+	// atomic and conditional. Returns (rowsAffected, error). When rowsAffected==0,
+	// the caller must look up current status to distinguish "already paid"
+	// (idempotent) from "expired before payment confirmed".
+	TransitionStatus(ctx context.Context, in TransitionStatusInput) (int64, error)
+
+	// SweepExpired transitions all pending_payment bookings older than 15 minutes
+	// to 'expired'. Returns the count of rows swept.
+	// Called lazily before booking create and availability list.
+	SweepExpired(ctx context.Context) (int, error)
+
+	// FindByPaymentReference looks up a booking by its payment_reference.
+	// Used by the webhook handler to resolve a Midtrans order_id → booking.
+	FindByPaymentReference(ctx context.Context, reference string) (*model.Booking, error)
+
+	// ReportSummary returns aggregate metrics for a tenant within a date range.
+	ReportSummary(ctx context.Context, in BookingReportFilter) (BookingReportSummary, error)
+}
+
+// BookingFilter carries optional filters for the booking list query.
+type BookingFilter struct {
+	BranchID  *string
+	Status    *string
+	ServiceID *string
+	FromDate  *string // RFC3339 date string, inclusive
+	ToDate    *string // RFC3339 date string, inclusive
+	Page      int
+	Limit     int
+}
+
+// TransitionStatusInput carries parameters for the conditional status transition.
+type TransitionStatusInput struct {
+	BookingID        string
+	ExpectedStatus   string
+	NewStatus        string
+	PaidAt           *string // RFC3339; set when transitioning to paid
+	PaymentReference *string
+	CancelledAt      *string // RFC3339; set when transitioning to cancelled
+	CancelledBy      *string // user ID of the op who cancelled
+	CancelReason     *string
+	CheckedInAt      *string // RFC3339; set when transitioning to checked_in
+	CheckedInBy      *string
+	CompletedAt      *string // RFC3339; set when transitioning to completed
+	CompletedBy      *string
+}
+
+// BookingReportFilter carries parameters for the aggregate report query.
+type BookingReportFilter struct {
+	TenantID string
+	BranchID *string
+	FromDate string // RFC3339 date string
+	ToDate   string // RFC3339 date string
+}
+
+// BookingReportSummary carries aggregate booking metrics for the reports page.
+type BookingReportSummary struct {
+	TotalBookings   int64
+	TotalPaidIDR    int64
+	CompletedCount  int64
+	CancelledCount  int64
+	NoShowCount     int64
+	ExpiredCount    int64
+	NoShowRate      float64 // NoShowCount / (CompletedCount + NoShowCount), 0 if denominator is 0
+}
+
+// MidtransClient is the interface for payment gateway operations.
+// Consumer-owned: declared in the service package; concrete implementations
+// live in internal/helper/payment/ and are wired in main.go.
+//
+// Two implementations:
+//   - DummyMidtransClient (dev/local only — C-2 hard-gated by factory + build tag)
+//   - RealMidtransClient  (stub for now; real impl when Midtrans keys arrive)
+type MidtransClient interface {
+	// CreateTransaction creates a payment transaction and returns a snap token
+	// and redirect URL. For the dummy adapter this returns a fake token and
+	// marks the booking as paid immediately.
+	CreateTransaction(ctx context.Context, req MidtransPaymentRequest) (MidtransPaymentResponse, error)
+
+	// HandleNotification processes a webhook notification from Midtrans.
+	// For the real adapter: verifies the SHA-512 signature (H-3) before any
+	// DB read. Returns the normalised PaymentStatus.
+	// For the dummy adapter: accepts any payload, returns StatusPaid.
+	HandleNotification(ctx context.Context, n MidtransWebhookNotification) (MidtransPaymentStatus, error)
+}
+
+// MidtransPaymentStatus is the normalised payment state from the adapter.
+type MidtransPaymentStatus string
+
+const (
+	MidtransStatusPending MidtransPaymentStatus = "pending"
+	MidtransStatusPaid    MidtransPaymentStatus = "paid"
+	MidtransStatusFailed  MidtransPaymentStatus = "failed"
+	MidtransStatusExpired MidtransPaymentStatus = "expired"
+)
+
+// MidtransPaymentRequest carries the minimum data needed to create a
+// Midtrans Snap transaction.
+type MidtransPaymentRequest struct {
+	OrderID       string // booking.code used as Midtrans order_id
+	GrossAmount   int64
+	CustomerName  string
+	CustomerEmail string
+	CustomerPhone string
+	Description   string
+}
+
+// MidtransPaymentResponse is returned by CreateTransaction.
+type MidtransPaymentResponse struct {
+	SnapToken   string
+	RedirectURL string
+	Status      MidtransPaymentStatus
+}
+
+// MidtransWebhookNotification is the normalised webhook notification body.
+type MidtransWebhookNotification struct {
+	OrderID           string
+	TransactionStatus string // "settlement" | "capture" | "deny" | "cancel" | "expire"
+	StatusCode        string
+	GrossAmount       string // string in Midtrans API; parse to int64 before comparison
+	SignatureKey      string
+	PaymentType       string
+}

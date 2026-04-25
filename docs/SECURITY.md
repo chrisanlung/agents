@@ -1503,3 +1503,585 @@ Alternatively, enforce via CI/CD pipeline configuration (staging/prod jobs run `
 The previous review M-1 finding (N+1 reorder validation outside a transaction) has been fully resolved in this redesign: `Reorder` now calls `FindByIDs` inside `tx.WithTx`. The `branch_admin` write-block is correctly implemented via migration seeding and RBAC middleware. Soft-delete is irreversible. No mass-assignment surface. No PII in audit events. Frontend server actions derive tenant context from session cookie only.
 
 Phase 1-4 controls (Argon2id, RS256 JWT, RLS tenant isolation, refresh token rotation, `must_change_password`, branch-level isolation) remain sound and were not regressed by this change.
+
+---
+
+## Phase 5 — Booking Engine + Customer Mobile App
+
+_Reviewer: security-expert. Authority: may BLOCK Phase 5 implementation on Critical or High findings — these must be resolved in ADR or design before `go-expert` writes booking code. Reviewed: ADR 0014, migration 000025, ADR 0005, existing SECURITY.md Sections 1–11 incorporated by reference._
+
+_Date: 2026-04-25_
+
+---
+
+### Executive Summary
+
+Phase 5 is the highest-risk phase to date. It introduces the first unauthenticated public API surface, a payment webhook endpoint, customer PII (name/phone/email) on a new table, and a mobile app client. The threat model is dominated by three concerns: (1) **public endpoint abuse** without auth to lean on, (2) **payment integrity** (webhook forgery, total-price tampering, replay), and (3) **cross-tenant contamination** via the new `__public__` sentinel path. The schema and RLS design from migration 000025 are generally sound. Several design constraints MUST be locked in the ADR before coding begins — these are marked BLOCK. All others are Code Review territory.
+
+**Finding count by severity: 2 Critical | 6 High | 6 Medium | 4 Low | 2 Info**
+
+**Blocking verdict: BLOCKED — 2 Critical and 6 High findings must be resolved (ADR-documented or mitigated in design) before `go-expert` writes booking service code.**
+
+---
+
+### STRIDE Extension for Phase 5
+
+| # | Category | Concrete Threat | Where | Impact | Mitigation | Status |
+|---|---|---|---|---|---|---|
+| S-5 | Spoofing | Midtrans webhook forged by attacker — dummy adapter accepts any payload | `POST /public/payments/webhook` | Booking marked paid without real payment | Dummy adapter reachable only in non-production builds; real adapter verifies Midtrans SHA-512 signature | Must enforce — see H-3 |
+| S-6 | Spoofing | Customer presents an expired/cancelled booking code at check-in | `POST /tenant/bookings/:id/checkin` | Denied customer claims; social-engineering ops staff | Service layer checks `status == paid`; code is looked up server-side; fake code returns 404 | Design |
+| T-10 | Tampering | `total_price_idr` injected via request body overrides server-computed total | `POST /public/bookings` | Revenue loss — attacker pays IDR 1 for any service | Total computed server-side only; body field must be ignored | Must enforce — see C-1 |
+| T-11 | Tampering | Webhook payload claims `gross_amount` lower than `booking.total_price_idr` | `POST /public/payments/webhook` | Booking marked paid for underpayment | Webhook handler must compare amounts before transitioning status | Must enforce — see H-4 |
+| T-12 | Tampering | Concurrent booking requests for the same slot — slot double-booked | `booking` GiST exclusion constraint | Duplicate booking, double revenue | DB-level exclusion constraint (migration 000025) covers `pending_payment`+`paid`+`checked_in`+`completed` | Design (see H-5 for edge) |
+| T-13 | Tampering | Cross-tenant FK smuggling in `POST /public/bookings` — attacker sends `service_id` from tenant B for a branch of tenant A | `booking` INSERT path | Cross-tenant data pollution | Service layer validates every FK against the resolved `tenant_id`; see H-1 | Must enforce |
+| R-3 | Repudiation | Booking cancelled by ops; no evidence of amount collected | `POST /tenant/bookings/:id/cancel` | Dispute with no audit trail | `cancelled_by` + `cancel_reason` + `cancelled_at` stored on booking row; `booking.cancelled` event to `audit_log` required | Design |
+| I-8 | Information Disclosure | `GET /public/bookings/:code` returns full customer PII (name/phone/email) to anyone with the code | Customer-facing code lookup | PII exposure if code shared | By design — code is the auth artifact; partial masking recommended for phone/email | See M-3 |
+| I-9 | Information Disclosure | Public branch listing leaks branches of inactive tenants | `GET /public/branches` | Business intelligence leak | RLS + SQL filter: `tenant.status = 'active' AND branch.status = 'active'` | Design |
+| D-7 | Denial of Service | Unauthenticated flood of `POST /public/bookings` — each call runs availability check, exclusion constraint, email send | Public endpoint | Service CPU/DB/email exhaustion | Per-IP rate limit (see H-2); body-size cap; lazy expiry sweep on every call | Must enforce |
+| D-8 | Denial of Service | Webhook endpoint flooded — each call reads + writes booking row | `POST /public/payments/webhook` | DB connection exhaustion | Midtrans source IP allowlist in production; rate limit on webhook endpoint | See M-4 |
+| E-7 | Elevation of Privilege | Branch admin creates concierge booking with `service_id`/`room_id`/`therapist_id` from a different branch | `POST /tenant/bookings` (concierge) | Cross-branch resource booking | Service layer checks all FK resources belong to caller's branch scope | Must enforce — see H-6 |
+| E-8 | Elevation of Privilege | `__public__` sentinel passed as a real tenant UUID to resolve a booking INSERT under another tenant's RLS | INSERT path in booking service | Cross-tenant booking injection | `__public__` is blocked from INSERT policy; only resolved `tenant_uuid` may be used for INSERT | Design (see H-1) |
+
+---
+
+### Section A — Public Endpoints (No Auth)
+
+---
+
+#### C-1 (Critical): `total_price_idr` must NEVER be accepted from the request body — server must compute it
+
+**Severity:** Critical — BLOCKS implementation
+
+**Location:** `POST /api/v1/public/bookings` body parsing (to be implemented by `go-expert`)
+
+**Attack scenario:** The ADR 0014 §3.16 request shape includes `{branch_id, service_id, addon_ids[], ...}` — it does NOT include `total_price_idr`. However if the `go-expert` models the incoming DTO with a `total_price_idr` field (e.g. to mirror the response DTO), a client can supply `"total_price_idr": 1` and if that value flows into the booking INSERT it overrides the server calculation. The customer then pays IDR 1 for a IDR 500,000 service. Blast radius: every booking on the platform at a user-chosen price.
+
+**Required design constraint (must be in ADR before code):**
+
+The `CreateBookingRequest` DTO (public) MUST NOT contain `total_price_idr`, `payment_reference`, `status`, `paid_at`, `tenant_id`, or any lifecycle field. These are computed/set server-side exclusively. The service layer computes total as:
+
+```
+total = service.price + SUM(addon.price_idr for each addon_id in validated list)
+```
+
+where each `addon_id` is validated to belong to the same `tenant_id` as the resolved branch. The `booking_addon.price_idr` column stores a snapshot of `addon.price_idr` at booking time — the INSERT must use the DB-fetched price, not any client-supplied value.
+
+**Blocks Phase 5 coding:** Yes. `go-expert` must confirm this constraint in `dto_request.go` before the booking controller is written.
+
+---
+
+#### C-2 (Critical): Webhook dummy adapter MUST be hard-blocked in production builds — not merely "unreachable"
+
+**Severity:** Critical — BLOCKS implementation
+
+**Location:** `POST /api/v1/public/payments/webhook` (stub implementation, future real adapter)
+
+**Attack scenario:** ADR 0014 §3.3 documents a dummy `MidtransClient` that returns `paid` for any payload. In Phase 5 this is the only adapter. If the service is deployed to staging or production with the dummy adapter active, any attacker can `POST` to the webhook endpoint with an arbitrary payload and mark any booking as paid without payment. Since the webhook is a public endpoint (no auth), the exploit requires only knowledge of the endpoint URL and a `booking_id` or `payment_reference` (which may be guessable if `payment_reference` stores the `code` value).
+
+**Required design constraint:**
+
+The adapter selection MUST be controlled by an environment variable (e.g. `PAYMENT_ADAPTER=dummy|midtrans`) AND the application MUST fail-fast at startup if `PAYMENT_ADAPTER=dummy` AND `APP_ENV != local|dev`. Concretely in `main.go`:
+
+```go
+if cfg.Payment.Adapter == "dummy" && cfg.AppEnv != "local" && cfg.AppEnv != "dev" {
+    log.Fatal(ctx, "dummy payment adapter is not permitted outside local/dev environments")
+}
+```
+
+This means an accidental `PAYMENT_ADAPTER=dummy` in a staging `.env` causes the service to refuse to start — a visible, loud failure rather than a silent security hole. The dummy adapter must be in a separate Go package (`internal/adapter/payment/dummy`) with a build tag (`//go:build dev`) to prevent it from being included in production binaries entirely (belt-and-suspenders with the runtime guard).
+
+**Blocks Phase 5 coding:** Yes. `go-expert` must implement the adapter selection guard before any payment code is written.
+
+---
+
+### Section B — Payment Integration
+
+---
+
+#### H-1: Cross-tenant FK validation on `POST /public/bookings` — service MUST validate all resource IDs against resolved tenant
+
+**Severity:** High — BLOCKS implementation
+
+**Location:** `POST /api/v1/public/bookings` service layer (to be written)
+
+**Attack scenario:** The public booking endpoint receives `{branch_id, service_id, addon_ids[], room_id?, therapist_id?, scheduled_start}`. The `branch_id` is used to resolve `tenant_id`. An attacker could supply a valid `branch_id` from tenant A alongside a `service_id` from tenant B. If the service layer does not validate cross-FK ownership, the booking row is inserted with `tenant_id = tenant_A.id` but references a service that belongs to tenant B. This corrupts booking analytics, allows cross-tenant service disclosure (confirms UUID existence via `404 vs 409`), and may allow price manipulation if tenant B has cheaper or zero-price services.
+
+**Required validation pattern for `go-expert`:**
+
+```go
+// Step 1: Resolve tenant from branch
+branch, err := branchRepo.FindActiveByID(ctx, req.BranchID)  // checks active + not deleted
+if err != nil { return 404 }
+tenantID := branch.TenantID
+
+// Step 2: Set app.current_tenant = tenantID for this transaction
+tx.SetTenantContext(ctx, tenantID)
+
+// Step 3: Validate all resource FKs belong to same tenant
+service, err := serviceRepo.FindByIDInTenant(ctx, tenantID, req.ServiceID)
+if err != nil { return 404 }  // not 422 — no oracle
+
+for _, addonID := range req.AddonIDs {
+    addon, err := addonRepo.FindByIDInTenant(ctx, tenantID, addonID)
+    // ... also confirm addon is_active
+}
+
+if req.RoomID != nil {
+    room, err := roomRepo.FindByIDInBranchTenant(ctx, tenantID, branch.ID, *req.RoomID)
+    // room must belong to both tenant AND the specific branch
+}
+
+if req.TherapistID != nil {
+    // same pattern
+}
+```
+
+Every mismatch returns 404 (not 422 / 409) to avoid confirming whether the UUID exists in another tenant.
+
+**Blocks Phase 5 coding:** Yes. Encoding this pattern in the ADR before coding prevents accidental omission.
+
+---
+
+#### H-2: Rate limiting on `POST /public/bookings` — concrete thresholds required before coding
+
+**Severity:** High — BLOCKS implementation
+
+**Location:** `POST /api/v1/public/bookings` + `GET /api/v1/public/branches`
+
+**Requirements (must be documented in ADR before coding):**
+
+| Endpoint | Per-IP limit | Global limit | Notes |
+|---|---|---|---|
+| `POST /public/bookings` | 5 req/min, 20 req/hour | 500 req/hour platform-wide | Each call: DB read + GiST constraint eval + email send |
+| `GET /public/bookings/:code` | 20 req/min per IP | — | Hard rate limit to limit code brute-force |
+| `GET /public/branches` | 60 req/min per IP | — | Read-only, cacheable; less restrictive |
+| `GET /public/branches/:id` | 60 req/min per IP | — | Same |
+| `GET /public/branches/:id/availability` | 30 req/min per IP | — | Computes slot availability; moderate cost |
+| `POST /public/payments/webhook` | 60 req/min per IP | — | Allowlisted to Midtrans IPs in prod |
+
+Implementation note for `go-expert`: use the existing in-memory limiter for Phase 5 (single instance). The global platform-wide cap on `POST /public/bookings` (500/hour) must be a separate atomic counter (e.g. a Redis counter in production, or a goroutine-safe in-memory counter for Phase 5 dev) — it cannot be expressed as a per-IP rule.
+
+CAPTCHA (hCaptcha or Cloudflare Turnstile) is deferred but must be added before public launch. Add to Section 9.4 production readiness checklist.
+
+**Blocks Phase 5 coding:** Yes — the rate limit middleware must exist before the booking handler is registered. Without it the public endpoint is a DoS vector on day one.
+
+---
+
+#### H-3: Webhook signature verification — dummy vs real adapter boundary enforcement
+
+**Severity:** High (design constraint, reinforces C-2)
+
+**Location:** `POST /api/v1/public/payments/webhook` real adapter
+
+**Pattern for `go-expert` (in the real `MidtransAdapter`):**
+
+Midtrans sends `signature_key = SHA-512(order_id + status_code + gross_amount + server_key)` in the notification body. Verification:
+
+```go
+expected := sha512.Sum512([]byte(
+    notification.OrderID +
+    notification.StatusCode +
+    notification.GrossAmount +
+    cfg.Midtrans.ServerKey,
+))
+if !subtle.ConstantTimeCompare(
+    []byte(hex.EncodeToString(expected[:])),
+    []byte(notification.SignatureKey),
+) {
+    return http.StatusUnauthorized, ErrWebhookSignatureInvalid
+}
+```
+
+`subtle.ConstantTimeCompare` is mandatory — timing-safe comparison. Reject the payload before any DB read or status transition if the signature fails.
+
+The dummy adapter MUST NOT implement this check (it accepts any payload) — this is deliberate for dev, but requires the hard build/runtime guard from C-2 to prevent it reaching production.
+
+**Blocks Phase 5 coding:** Yes (as C-2 dependency). Recorded here as a specific implementation requirement for `go-expert`.
+
+---
+
+#### H-4: Webhook amount validation — underpayment must not mark booking paid
+
+**Severity:** High — BLOCKS implementation
+
+**Location:** `POST /api/v1/public/payments/webhook` handler (both dummy and real)
+
+**Required check in the payment status transition:**
+
+```go
+// After signature verification (real) or payload parse (dummy):
+if notification.TransactionStatus == "settlement" || notification.TransactionStatus == "capture" {
+    booking, err := bookingRepo.FindByPaymentReference(ctx, notification.OrderID)
+    if err != nil { return 404 }
+
+    // Parse gross_amount from Midtrans (string in their API) to int64
+    paid, err := parseIDRAmount(notification.GrossAmount)
+    if err != nil || paid < booking.TotalPriceIDR {
+        log.Warn(ctx, "webhook_amount_mismatch",
+            "order_id", notification.OrderID,
+            "expected", booking.TotalPriceIDR,
+            "received", paid)
+        // Do NOT mark paid. Treat as fraud signal. Notify ops.
+        return http.StatusOK  // Return 200 to Midtrans so they don't retry; log + alert internally.
+    }
+    // Proceed to mark paid.
+}
+```
+
+Returning HTTP 200 to Midtrans while internally suppressing the state transition is the correct pattern — Midtrans retries non-200 responses, which would flood logs and alert queues. Log the mismatch as a `payment.amount_mismatch` event to `audit_log` with full details for ops review.
+
+**Blocks Phase 5 coding:** Yes.
+
+---
+
+#### H-5: Race condition on expiry sweep vs payment confirmation — sweep must use `RETURNING` and reject stale IDs
+
+**Severity:** High — BLOCKS implementation
+
+**Location:** Lazy expiry sweep + webhook handler (concurrent execution)
+
+**Attack scenario:** Timeline:
+1. `T=0`: Customer creates booking. Status = `pending_payment`. `created_at = T=0`.
+2. `T=14m59s`: Customer completes payment on Midtrans. Webhook fires.
+3. `T=15m01s`: Availability query triggers lazy sweep: `UPDATE booking SET status='expired' WHERE status='pending_payment' AND created_at < now()-interval '15 min' RETURNING id`.
+4. Race: if the sweep UPDATE commits before the webhook handler reads the booking row, the booking is already `expired` when the webhook tries to transition it to `paid`. The webhook must not silently ignore this.
+
+**Required implementation pattern:**
+
+```go
+// In webhook handler (after amount validation):
+rowsAffected, err := bookingRepo.TransitionStatus(ctx,
+    bookingID,
+    StatusPendingPayment,  // expected current status
+    StatusPaid,
+    paidAt,
+    paymentReference,
+)
+if rowsAffected == 0 {
+    // Either already expired/paid/cancelled — look up current status
+    current, _ := bookingRepo.FindByID(ctx, bookingID)
+    if current.Status == StatusExpired {
+        log.Warn(ctx, "payment_for_expired_booking", "booking_id", bookingID)
+        // Alert ops — customer may have paid; needs manual refund review
+        auditLog.Append(ctx, AuditEntry{
+            Action: "payment.expired_booking_payment",
+            ResourceID: bookingID,
+            Meta: map[string]interface{}{"payment_reference": paymentReference},
+        })
+        return http.StatusOK  // Don't cause Midtrans retry storm
+    }
+    if current.Status == StatusPaid {
+        // Idempotent — already processed. Return 200.
+        return http.StatusOK
+    }
+}
+```
+
+The `TransitionStatus` repo method must use a conditional UPDATE:
+
+```sql
+UPDATE booking
+SET status = 'paid', paid_at = $3, payment_reference = $4, updated_at = now()
+WHERE id = $1 AND status = $2
+```
+
+The `WHERE status = $2` clause ensures the transition is atomic and conditional — if the sweep already flipped to `expired`, zero rows are affected and the handler can detect and alert.
+
+**Blocks Phase 5 coding:** Yes. Without this pattern, a customer who pays at T=14m59s loses their booking silently.
+
+---
+
+#### H-6: Concierge booking — all resource FKs must be validated against caller's branch scope
+
+**Severity:** High — BLOCKS implementation
+
+**Location:** `POST /api/v1/tenant/bookings` (concierge, ops JWT)
+
+**Scenario:** An ops staff member at Branch A creates a concierge booking. If the service layer does not validate that `service_id`, `room_id`, `therapist_id` all belong to the caller's tenant AND the specific `branch_id` in the request, the ops staff can book a therapist from Branch B into Branch A's slot (cross-branch resource theft). In a multi-branch tenant this is an IDOR at the branch level.
+
+**Required check (mirrors `RoomService`/`TherapistService` pattern from ADR 0014 §3.16):**
+
+```go
+// After RBAC check (booking.create permission):
+// Caller JWT claims: tenantID, callerBranches
+
+// Branch must be in caller's branch scope (for branch_admin)
+if !callerClaims.IsAdmin && !containsBranch(callerClaims.Branches, req.BranchID) {
+    return 403 ErrCrossBranchForbidden
+}
+
+// All resource FKs: same tenant + same branch
+service must have service.tenant_id == callerTenantID (service is tenant-scoped, not branch-scoped — OK)
+therapist must have therapist.branch_id == req.BranchID AND therapist.tenant_id == callerTenantID
+room must have room.branch_id == req.BranchID AND room.tenant_id == callerTenantID
+```
+
+**Blocks Phase 5 coding:** Yes.
+
+---
+
+### Section C — `__public__` Sentinel and Cross-Tenant Isolation
+
+---
+
+#### H-7: Public SELECT RLS policy on `booking` is overly broad — service layer MUST add `WHERE code = ?` predicate
+
+**Severity:** High — design constraint
+
+**Location:** `migration 000025_phase5_bookings.up.sql` — `booking_public_select` policy (lines 315–330)
+
+**Assessment:** The migration comment explicitly documents this (the `PUBLIC READ CAVEAT` block at line 296–303). The `booking_public_select` policy passes when `current_tenant = '__public__'` AND the booking's branch is active AND tenant is active — but it does NOT restrict to a specific code. Without an application-level `WHERE code = ?` predicate, a query running under `__public__` sentinel could return ALL booking rows for active tenants.
+
+**Required service-layer contract (must be enforced by `go-expert` and verified by `qa-expert`):**
+
+1. Every public booking query MUST be `WHERE code = $1` — never `WHERE tenant_id = $1` or unbounded.
+2. The repository method for public code lookup must be named `FindByCodePublic` (distinct from `FindByID`) and its signature must require a `code string` parameter with no way to call it without one.
+3. `qa-expert` must add a test: call the public booking repository method without a `WHERE code` and assert it returns `ErrMethodNotAllowed` (or equivalent) at compile time via the type system, or at test time.
+
+**Blocks Phase 5 coding:** Yes (noted as design constraint; `go-expert` must acknowledge this in the implementation). Not a schema fix — the schema is correct; the service-layer contract must be explicit.
+
+---
+
+### Section D — Booking-Engine Integrity
+
+---
+
+#### M-1: `GET /public/bookings/:code` — booking code brute-force feasibility
+
+**Severity:** Medium
+
+**Location:** `GET /api/v1/public/bookings/:code`
+
+**Analysis:** Code format `[A-Z2-7]{4}-[A-Z2-7]{4}` uses 32 symbols × 8 positions = 32^8 = ~1.1×10^12 combinations. The rate limit from H-2 (20 req/min per IP) limits one IP to 28,800 attempts/day. To enumerate 0.1% of the space (1.1×10^9 attempts) from a single IP takes ~104 years — computationally infeasible for a single IP. A distributed botnet of 1,000 IPs at 20 req/min each attempts ~28.8M/day, which exhausts 0.0026% of the space per day — still infeasible for targeted brute-force.
+
+**Assessment:** The 20 req/min hard rate limit from H-2 is sufficient. No additional mitigation needed beyond the rate limit and the UNIQUE DB index. Brute-force is not a practical threat at this keyspace + rate limit combination. Document the assumption: if the booking volume ever exceeds 10^8 active bookings simultaneously, collision probability needs re-evaluation (currently negligible per ADR 0014 §3.4).
+
+**Code Review territory:** Confirm `booking_code_uidx` is present (it is, in migration 000025). Confirm the rate limit is applied. No ADR change needed.
+
+---
+
+#### M-2: `GET /public/bookings/:code` PII exposure — partial masking recommended
+
+**Severity:** Medium
+
+**Location:** `GET /api/v1/public/bookings/:code` response DTO
+
+**Issue:** ADR 0014 §3.16 says the response "returns booking detail (no customer email/phone — only what the holder needs to verify)." However the API contract must make this explicit. The response DTO must be defined as:
+
+```
+booking_code, branch_name, service_name, scheduled_start, scheduled_end,
+status, total_price_idr, customer_name, customer_phone (masked: last 4 only),
+customer_email (masked: first 2 chars + domain), addons[]
+```
+
+Rationale: if a customer forwards their booking code to a friend (e.g., "scan this for me at check-in"), the friend should not see the full phone number and email of the person who booked.
+
+**Required action for `go-expert`:** The public booking response DTO must mask `customer_phone` to `****XXXX` (last 4 digits) and `customer_email` to `fi**@domain.com` (first 2 + masked). The full values are available on the tenant-side endpoint (`GET /tenant/bookings/:id`) which requires authentication.
+
+**Blocks Phase 5 coding:** No — Code Review territory. But must be agreed in the API contract before `nextjs-expert` / `flutter-expert` consume the response shape.
+
+---
+
+#### M-3: Lazy expiry sweep — must be triggered at booking-create, not just availability-list
+
+**Severity:** Medium
+
+**Location:** Lazy sweep invocation points
+
+**Issue:** ADR 0014 §4.1 decides "lazy sweep on every list-availability + booking-create call." The concern is: if a slot has a stale `pending_payment` row and the customer never queries availability again (they navigated directly from a deep link or cached result), the expired row stays in the exclusion predicate and blocks the slot even after 15min. The sweep MUST also run on `POST /public/bookings` immediately before the exclusion constraint check. Without this, a stale `pending_payment` row for an expired booking blocks a new booking attempt with a confusing 409.
+
+**Pattern:**
+
+```go
+// BookingService.Create — BEFORE the booking INSERT:
+bookingRepo.SweepExpired(ctx)  // UPDATE ... WHERE status='pending_payment' AND created_at < now()-interval '15 min'
+// Then attempt the INSERT (exclusion constraint now applies only to live pending_payment rows)
+```
+
+`SweepExpired` must use `RETURNING id` so the result can be logged and (in the `H-5` race case) the webhook handler can detect IDs that were just expired.
+
+**Blocks Phase 5 coding:** No — Code Review territory. But must be implemented correctly per H-5.
+
+---
+
+#### M-4: Webhook endpoint — Midtrans source IP allowlist in production
+
+**Severity:** Medium
+
+**Location:** `POST /api/v1/public/payments/webhook`
+
+**Issue:** Without an IP allowlist, any internet host can send arbitrary POST bodies to the webhook endpoint. In production the signature check (H-3) is the primary control, but defense-in-depth requires restricting the endpoint to Midtrans's published IP ranges at the ingress/WAF layer. This is an operational control for `devops-expert`, not a code control.
+
+**Required action:** Add to Section 9.4 production readiness checklist: "Configure WAF/ingress to allowlist `POST /public/payments/webhook` to Midtrans IP ranges only (published at `https://docs.midtrans.com/reference/ip-address-and-api-whitelist`)."
+
+**Blocks Phase 5 coding:** No — operational control. Code Review territory for the webhook handler itself. `devops-expert` owns this checklist item.
+
+---
+
+#### M-5: Webhook idempotency — same notification arriving twice
+
+**Severity:** Medium
+
+**Location:** `POST /api/v1/public/payments/webhook` handler
+
+**Issue:** Midtrans may send the same notification more than once (retries on non-200, network duplicates). The handler must be idempotent: transitioning `paid → paid` again must be a no-op, not an error, and must not duplicate any side-effect (email send, audit log entry).
+
+**Required pattern:** The `TransitionStatus` conditional UPDATE from H-5 (`WHERE status = 'pending_payment'`) naturally handles this: a second webhook for an already-paid booking finds zero rows and the handler detects `StatusPaid` → returns HTTP 200. No duplicate email is sent because the email send is inside the `if rowsAffected > 0` block.
+
+**Blocks Phase 5 coding:** No — Code Review territory. But must be implemented as part of H-5 pattern.
+
+---
+
+#### M-6: No-cancel dispute path — ops contact information must be surfaced in app
+
+**Severity:** Medium
+
+**Location:** `flutter-expert` booking confirmation screen + T&C
+
+**Issue:** ADR 0014 §3.5 correctly states "no refund path in Phase 5." However, a customer who has a legitimate dispute (payment charged but service not rendered, booking cancelled by ops after payment, etc.) has no documented escalation path. Without a contact channel in the app, customers will dispute directly with their bank/card (chargeback) rather than with the spa — chargebacks damage the platform's Midtrans merchant account.
+
+**Required action (flutter-expert + ui-ux-expert):** The booking confirmation screen and the T&C screen must display: "Untuk keluhan atau pertanyaan, hubungi [branch phone/email from branch detail]." The API contract must include `branch.contact_phone` or `branch.contact_email` in the `GET /public/branches/:id` response so the Flutter app can surface it on the confirmation screen.
+
+**Blocks Phase 5 coding:** No — design coordination item. Notify `flutter-expert` and `ui-ux-expert`.
+
+---
+
+### Section E — Geo Data
+
+---
+
+#### L-1: Branch lat/lng input validation — DB CHECK constraints are correct; document the trust chain
+
+**Severity:** Low
+
+**Location:** `branch.latitude` CHECK (-90 ≤ lat ≤ 90), `branch.longitude` CHECK (-180 ≤ lng ≤ 180) (ADR 0014 §3.9)
+
+**Assessment:** DB CHECK constraints are the correct final gate. The service layer should additionally validate before the INSERT:
+
+```go
+if lat < -90 || lat > 90 { return ErrInvalidInput }
+if lng < -180 || lng > 180 { return ErrInvalidInput }
+```
+
+This gives a clean 422 validation error rather than a DB-level constraint failure. The DTO binding tag should use `binding:"omitempty,min=-90,max=90"` for latitude and `binding:"omitempty,min=-180,max=180"` for longitude. No security issue — this is defense-in-depth input validation.
+
+**Blocks Phase 5 coding:** No — Code Review territory.
+
+---
+
+#### L-2: Haversine distance calculation — earthdistance extension does not require PostGIS; confirm extension availability
+
+**Severity:** Low
+
+**Location:** `GET /public/branches?lat=&lng=` sorting logic
+
+**Assessment:** ADR 0014 §3.9 specifies `cube` + `earthdistance` PostgreSQL extensions. The migration must confirm these are created before any distance query runs. The extensions are NOT installed by default on all PostgreSQL distributions (e.g. RDS may need explicit enabling). Flag for `devops-expert`: verify `cube` and `earthdistance` are available and enabled in the production DB before deploying Phase 5.
+
+**Blocks Phase 5 coding:** No — operational item. Add to Section 9.4 checklist.
+
+---
+
+### Section F — Mobile App Surface
+
+---
+
+#### L-3: Local storage for booking codes — acceptable risk with documented assumptions
+
+**Severity:** Low
+
+**Location:** Flutter app `shared_preferences` (favorites + recent codes)
+
+**Assessment:** `shared_preferences` on Android stores data in unencrypted XML in the app's private data directory. On iOS it stores data in the app's sandbox (unencrypted). On non-rooted/non-jailbroken devices this is accessible only to the app — acceptable for the threat model.
+
+**Documented threat model assumption:** The booking code is NOT a secret authentication token in the traditional sense. Anyone physically possessing the code (printed receipt, screenshot) can present it for check-in. This is equivalent to a movie ticket. Loss of the device means loss of the code display, but the code was also sent via email — the customer can retrieve it there. Storing codes in `shared_preferences` (rather than `flutter_secure_storage`) is acceptable because the codes have no standalone value beyond confirming a booking to ops staff who are co-located with the customer.
+
+**Caveat:** If Phase 6 adds customer login and codes become linked to a permanent customer identity, revisit this assessment and migrate to `flutter_secure_storage`.
+
+**Blocks Phase 5 coding:** No — Info/acceptance record.
+
+---
+
+#### L-4: HTTPS enforcement — Android `cleartext` and iOS ATS
+
+**Severity:** Low
+
+**Location:** Flutter app Android manifest + iOS ATS config
+
+**Required actions for `flutter-expert`:**
+
+Android `AndroidManifest.xml` production build:
+```xml
+<application android:usesCleartextTraffic="false" ...>
+```
+The `dev` flavor targeting `10.0.2.2` (emulator) may use a separate `network_security_config.xml` that allows cleartext to localhost only. Do NOT set `usesCleartextTraffic="false"` globally in the dev flavor or emulator testing breaks.
+
+iOS: Ensure `Info.plist` does NOT contain `NSAllowsArbitraryLoads=true` in the production build. App Transport Security (ATS) defaults to HTTPS-only on iOS 9+; the risk is that a developer adds this key during debugging and it ships in production.
+
+**Build flavor strategy:** The `prod` flavor (ADR 0014 §3.18) must explicitly set `usesCleartextTraffic="false"` for Android. Add this to the `flutter-expert` implementation checklist.
+
+**Blocks Phase 5 coding:** No — implementation checklist item.
+
+---
+
+### Section G — Remaining Phase 4 Open Findings (Carry-forward)
+
+The following Phase 4 findings remain open and MUST be resolved before Phase 5 ops-portal ships (they affect the same code paths Phase 5 extends):
+
+| Finding | Phase | Severity | Status | Required action |
+|---|---|---|---|---|
+| M-2: `therapist`-role user can overwrite colleague availability | Phase 4 | Medium | Open | `go-expert`: restrict availability write to own therapist record or remove role grant |
+| M-3 / Addon M-1: Cursor subquery implicit RLS dependency | Phase 4 | Medium | Open | `go-expert`: add explicit `AND tenant_id = ?` to all cursor subqueries |
+| L-1: `therapist.user_id` same-tenant membership check missing | Phase 4 | Low (escalates to High in Phase 5) | Open | `go-expert`: add `userRepo.FindByIDInTenant` check when `user_id != nil` |
+
+The `therapist.user_id` finding from Phase 4 Section 5 is escalated: Phase 5 uses `user_id` for the ops portal therapist-schedule view. A dangling cross-tenant `user_id` would allow tenant A's therapist to appear in tenant B's schedule view. **Resolve before Phase 5 ops portal ships.**
+
+---
+
+### RLS Coverage Assessment — Phase 5 New Tables
+
+| Table | SELECT | INSERT | UPDATE | DELETE | lustia_app grants | Assessment |
+|---|---|---|---|---|---|---|
+| `booking` | `booking_tenant_select` + `booking_public_select` | `booking_tenant_insert` | `booking_tenant_update` | No policy, no grant | SELECT, INSERT, UPDATE | Complete. Public SELECT is correct but requires service-layer `WHERE code=?` predicate (H-7). INSERT under `__public__` is correctly blocked — only resolved `tenant_uuid` may INSERT. |
+| `booking_addon` | `booking_addon_tenant_select` + `booking_addon_public_select` | `booking_addon_tenant_insert` | No policy, no grant | No policy, no grant | SELECT, INSERT | Complete. Add-ons are immutable after booking creation (INSERT-only). |
+
+---
+
+### Production Readiness Checklist Additions (Section 9.4 updates)
+
+Add these items to Section 9.4:
+
+- [ ] `PAYMENT_ADAPTER=dummy` must fail-fast at startup when `APP_ENV != local|dev` (C-2).
+- [ ] Midtrans server key loaded from secret manager (not `.env`) before real integration.
+- [ ] WAF/ingress allowlist for `POST /public/payments/webhook` to Midtrans IP ranges (M-4).
+- [ ] `cube` and `earthdistance` PostgreSQL extensions enabled in staging and production DB (L-2).
+- [ ] Flutter production build: `android:usesCleartextTraffic="false"` in production manifest (L-4).
+- [ ] CAPTCHA (hCaptcha or Cloudflare Turnstile) added to `POST /public/bookings` before public launch (H-2).
+- [ ] Content moderation for customer-entered text fields (name, cancel reason) — Phase 6 scope; acceptable for Phase 5 closed beta.
+- [ ] `booking.customer_phone` and `booking.customer_email` redacted from application logs (extend Section 7.2 rules).
+- [ ] Booking confirmation email: confirm that the booking `code` is NOT logged to any structured log system during email send.
+
+---
+
+### Phase 5 Threat Model Sign-off
+
+**Decision: BLOCKED — 2 Critical and 6 High findings must be resolved (as ADR updates or explicit design constraints acknowledged by `go-expert`) before booking service code is written.**
+
+**Must-do checklist for `go-expert` before writing booking code:**
+
+| Priority | Item | Why blocking |
+|---|---|---|
+| 1 | C-1: Confirm `CreateBookingRequest` DTO has NO `total_price_idr` field. Server computes total from DB-fetched prices only. | Revenue integrity — attacker can set price to IDR 1 |
+| 2 | C-2: Implement `PAYMENT_ADAPTER` env gate with `log.Fatal` when dummy in non-local env. Add build tag `//go:build dev` to dummy package. | Any prod/staging deploy with dummy adapter = free bookings for attackers |
+| 3 | H-1: Validate every FK in `POST /public/bookings` against resolved `tenant_id`. Cross-tenant UUID → 404 (not 409/422). | Cross-tenant data pollution and service disclosure |
+| 4 | H-2: Register rate limit middleware on all `/public/*` routes before any handler. Thresholds as per H-2 table. | Public endpoint is unauthenticated DoS vector |
+| 5 | H-3: Real webhook adapter uses `subtle.ConstantTimeCompare` for Midtrans SHA-512 signature verification before any DB read. | Webhook forgery → free paid bookings |
+| 6 | H-4: Webhook handler compares `gross_amount` to `booking.total_price_idr`; underpayment → log + alert, return 200, do NOT mark paid. | Revenue integrity |
+| 7 | H-5: `TransitionStatus` uses conditional UPDATE `WHERE status = 'pending_payment'`; webhook handler detects `rowsAffected == 0` and distinguishes `expired` vs `paid` cases. | Customer pays at T=14m59s, booking expires, money taken but booking lost |
+| 8 | H-6: Concierge booking validates `branch_id` against caller's `claims.Branches`; all resource FKs (`room_id`, `therapist_id`) validated against `branch_id`. | Cross-branch resource theft by ops staff |
+| 9 | H-7: `FindByCodePublic` repository method requires `code string` parameter; no unbounded public booking query is possible. | Public policy without predicate exposes all booking rows |
+
+**Medium findings (M-1 through M-6) are NOT blocking code start.** They are Code Review territory — `go-expert` must address them in the booking service implementation or note them explicitly in the PR for the review gate.
+
+| Date | Change reviewed | Findings | Status |
+|---|---|---|---|
+| 2026-04-25 | Phase 5 — Booking Engine + Customer Mobile App threat model (pre-implementation, ADR 0014 + migration 000025) | **[Critical — BLOCKING]** C-1: `total_price_idr` must never be trusted from request body. **[Critical — BLOCKING]** C-2: Dummy payment adapter must be hard-blocked in non-local environments via startup fail-fast + build tag. **[High — BLOCKING]** H-1: Cross-tenant FK validation on POST /public/bookings. **[High — BLOCKING]** H-2: Rate limits on all `/public/*` endpoints — concrete thresholds required before handler registration. **[High — BLOCKING]** H-3: Webhook signature verification — `subtle.ConstantTimeCompare` on Midtrans SHA-512. **[High — BLOCKING]** H-4: Webhook underpayment check — `gross_amount < total_price_idr` must not mark paid. **[High — BLOCKING]** H-5: Expiry-sweep race — conditional UPDATE `WHERE status='pending_payment'` with `rowsAffected` detection. **[High — BLOCKING]** H-6: Concierge booking branch-scope FK validation. **[High — BLOCKING]** H-7: `booking_public_select` RLS overly broad — service-layer `WHERE code=?` contract mandatory. **[Medium]** M-1: Booking code brute-force feasibility — rate limit sufficient, no ADR change needed. **[Medium]** M-2: PII masking in `GET /public/bookings/:code` response. **[Medium]** M-3: Lazy expiry sweep must trigger on `POST /public/bookings` before INSERT. **[Medium]** M-4: Webhook source IP allowlist — production operational control for `devops-expert`. **[Medium]** M-5: Webhook idempotency — `paid→paid` must be no-op. **[Medium]** M-6: No-cancel dispute path — contact channel must be surfaced in app. **[Low]** L-1: Lat/lng service-layer validation before DB constraint. **[Low]** L-2: `earthdistance` extension availability — production checklist item. **[Low]** L-3: `shared_preferences` for booking codes — documented acceptable risk. **[Low]** L-4: Android `usesCleartextTraffic=false` in prod build. | **BLOCKED — 2 Critical + 6 High must be resolved before booking code is written** |
