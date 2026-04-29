@@ -161,6 +161,7 @@ func Register(r *gin.Engine, deps Deps) {
 		publicBookingGroup.GET("/public/bookings/:code", codeBookingLimiter, deps.Booking.GetPublicByCode)
 		publicBookingGroup.POST("/public/payments/webhook", deps.Booking.HandleWebhook) // not rate-limited
 		publicBookingGroup.GET("/public/branches", branchListLimiter, deps.Booking.ListPublicBranches)
+		publicBookingGroup.GET("/public/branches/:id", branchListLimiter, deps.Booking.GetPublicBranchDetail)
 		publicBookingGroup.GET("/public/branches/:id/availability", availabilityLimiter, deps.Booking.GetAvailability)
 
 		// Operator group — JWT required.

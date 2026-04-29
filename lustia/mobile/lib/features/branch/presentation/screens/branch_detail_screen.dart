@@ -1,5 +1,6 @@
 // Layar detail cabang (BK-A4) — hero foto, info, layanan, CTA booking.
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -20,10 +21,7 @@ class BranchDetailScreen extends ConsumerWidget {
     final async = ref.watch(branchDetailProvider(branchId));
 
     return async.when(
-      loading: () => Scaffold(
-        appBar: AppBar(),
-        body: const Center(child: CircularProgressIndicator.adaptive()),
-      ),
+      loading: () => const _BranchDetailSkeleton(),
       error: (err, _) => Scaffold(
         appBar: AppBar(),
         body: ErrorView(
@@ -32,6 +30,100 @@ class BranchDetailScreen extends ConsumerWidget {
         ),
       ),
       data: (branch) => _BranchDetailContent(branch: branch),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BK-R4: skeleton loading state for branch detail
+// ---------------------------------------------------------------------------
+class _BranchDetailSkeleton extends StatelessWidget {
+  const _BranchDetailSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      body: CustomScrollView(
+        slivers: [
+          SliverAppBar(
+            expandedHeight: 240,
+            pinned: true,
+            backgroundColor: cs.surface,
+            flexibleSpace: FlexibleSpaceBar(
+              background: Container(
+                color: cs.primaryContainer,
+                child: Center(
+                  child: Icon(Icons.spa, size: 48, color: cs.primary),
+                ),
+              ),
+            ),
+          ),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+            sliver: SliverList(
+              delegate: SliverChildListDelegate([
+                _ShimmerBox(
+                  width: MediaQuery.of(context).size.width * 0.6,
+                  height: 28,
+                ),
+                const SizedBox(height: 8),
+                const _ShimmerBox(width: 160, height: 16),
+                const SizedBox(height: 16),
+                const _ShimmerBox(width: double.infinity, height: 14),
+                const SizedBox(height: 6),
+                const _ShimmerBox(width: 200, height: 14),
+              ]),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ShimmerBox extends StatefulWidget {
+  const _ShimmerBox({required this.width, required this.height});
+  final double width;
+  final double height;
+
+  @override
+  State<_ShimmerBox> createState() => _ShimmerBoxState();
+}
+
+class _ShimmerBoxState extends State<_ShimmerBox>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
+    _anim = Tween<double>(begin: 0.4, end: 1.0).animate(_ctrl);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _anim,
+      child: Container(
+        width: widget.width,
+        height: widget.height,
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(4),
+        ),
+      ),
     );
   }
 }
@@ -63,13 +155,28 @@ class _BranchDetailContent extends ConsumerWidget {
                 foregroundColor: Colors.white,
                 flexibleSpace: FlexibleSpaceBar(
                   background: branch.photoUrl != null
-                      ? Image.network(
-                          branch.photoUrl!,
+                      ? CachedNetworkImage(
+                          imageUrl: branch.photoUrl!,
                           fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) => Container(
+                          fadeInDuration: const Duration(milliseconds: 200),
+                          placeholder: (_, __) => Container(
                             color: cs.primaryContainer,
-                            child: const Center(
-                              child: Icon(Icons.spa, size: 48),
+                            child: Center(
+                              child: Icon(
+                                Icons.spa,
+                                size: 48,
+                                color: cs.primary,
+                              ),
+                            ),
+                          ),
+                          errorWidget: (_, __, ___) => Container(
+                            color: cs.primaryContainer,
+                            child: Center(
+                              child: Icon(
+                                Icons.spa,
+                                size: 48,
+                                color: cs.primary,
+                              ),
                             ),
                           ),
                         )
@@ -98,18 +205,21 @@ class _BranchDetailContent extends ConsumerWidget {
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
                 sliver: SliverList(
                   delegate: SliverChildListDelegate([
-                    // Name + tenant
+                    // Name + tenant (contract: show "tenant_name — branch.name")
+                    if (branch.tenantName.isNotEmpty)
+                      Text(
+                        branch.tenantName,
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          color: cs.primary,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    if (branch.tenantName.isNotEmpty) const SizedBox(height: 2),
                     Text(
                       branch.name,
                       style: theme.textTheme.headlineMedium?.copyWith(
                         fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      branch.tenantName,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: cs.onSurfaceVariant,
                       ),
                     ),
                     const SizedBox(height: 12),

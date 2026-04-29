@@ -3553,3 +3553,189 @@ Append to the component inventory:
 
 6. **Therapist body attributes in public API:** the public branch detail endpoint (`GET /api/v1/public/branches/:id`) must return therapist list with `height_cm`, `weight_kg`, `build` fields for the therapist picker in the Flutter app (BK-A7). Confirm this is in the `go-expert`'s public branch detail DTO. Cross-agent impact: if it is missing, the body badges in `TherapistOptionTile` cannot be shown.
 
+---
+
+## Phase 5 customer flow review (BK-R1..)
+
+_Owned by `ui-ux-expert`. Source: code audit of `lustia/mobile/lib/features/` against ADR 0014 §2 customer journey and BK-A1..BK-A12 spec. All items assigned to `flutter-expert`._
+
+---
+
+### BK-R1 — Splash min-duration too short (400 ms instead of 1 500 ms)
+
+- **Screen:** `SplashScreen` (`splash_screen.dart`)
+- **Current behavior:** `Future.delayed(400ms)` exits splash. At 400 ms the logo is barely visible; on a cold start with a slow API the splash flashes out before any branch data arrives, causing a jarring white-frame jump to the skeleton list. Spec (BK-A2) requires **1 500 ms minimum**.
+- **Recommended fix:** Change `const Duration(milliseconds: 400)` to `const Duration(milliseconds: 1500)` in `_SplashScreenState._init()`.
+- **Severity:** Medium
+- **Directive:** In `splash_screen.dart`, change `Duration(milliseconds: 400)` to `Duration(milliseconds: 1500)`.
+
+---
+
+### BK-R2 — Onboarding skips to home before prefetch finishes when location is denied
+
+- **Screen:** `SplashScreen` — `_allowLocation()` and `_skipLocation()`
+- **Current behavior:** After tapping "Lewati, cari manual" (or after location denial), `_showOnboarding` is set to `false` and `_maybeNavigate()` is called immediately. If the branch-list prefetch hasn't completed yet (`_prefetchDone == false`), `_maybeNavigate()` exits early correctly — but on slow connections the onboarding dismisses and the user is left staring at the still-animating `_SplashContent` with no visible loading feedback. There is no "loading" indicator or copy between onboarding dismissal and navigation.
+- **Recommended fix:** After tapping "Lewati" / denying location, show a transient loading indicator (e.g., swap `_OnboardingScreen` for `_SplashContent`) until `_prefetchDone` resolves; do not show a blank white frame.
+- **Severity:** Medium
+- **Directive:** In `_allowLocation()` and `_skipLocation()`, after setting `_showOnboarding = false`, set `setState(() => _showOnboarding = false)` so the splash logo reappears while prefetch completes — already done, but verify the fallback branch in `build()` falls through to `_SplashContent` (it does, but a `CircularProgressIndicator` overlay over the splash would be cleaner on very slow networks).
+
+---
+
+### BK-R3 — Skeleton cards have no shimmer animation (look broken)
+
+- **Screen:** `BranchListScreen` — `_SkeletonCard`
+- **Current behavior:** `_SkeletonBox` renders a static `surfaceContainerHighest` rectangle. There is no shimmer or pulse animation. On a slow network the skeleton list sits completely still, which users interpret as a crash or blank screen rather than a loading state. Spec (BK-A3) requires `Shimmer` package or `AnimatedContainer` fade.
+- **Recommended fix:** Wrap each `_SkeletonBox` in a `TweenAnimationBuilder` pulsing opacity between 0.4 and 1.0 at 900 ms interval, or use the `shimmer` package (`Shimmer.fromColors`). One shared `AnimationController` at the `_SkeletonList` level to avoid 6× separate timers.
+- **Severity:** High
+- **Directive:** Add shimmer/pulse animation to `_SkeletonCard` — use `shimmer` package (`Shimmer.fromColors`, baseColor: `surfaceContainerHighest`, highlightColor: `surface`) wrapping the entire card placeholder row.
+
+---
+
+### BK-R4 — Branch detail loading state is a full-screen spinner, no skeleton
+
+- **Screen:** `BranchDetailScreen` — `loading` branch of `async.when(...)`
+- **Current behavior:** Shows a bare `Scaffold(appBar: AppBar(), body: Center(CircularProgressIndicator))`. On typical mobile latency (200–400 ms) the user sees a blank app bar with a spinner where the hero photo should be. Spec (BK-A4) implies the detail view should show a hero placeholder + body stubs while loading.
+- **Recommended fix:** Replace the loading branch with a skeleton layout: a `SliverAppBar` with `expandedHeight: 240` showing the `primaryContainer` gradient placeholder (same as "no photo" fallback), plus two grey line stubs for name and address below it. This prevents layout reflow and communicates structure instantly.
+- **Severity:** High
+- **Directive:** Replace the `loading:` branch in `BranchDetailScreen.build()` with a `_BranchDetailSkeleton` widget that mirrors the `CustomScrollView` structure with `SliverAppBar` hero placeholder and grey line stubs for name/address.
+
+---
+
+### BK-R5 — Branch detail hero image uses `Image.network` (no cache, no fade-in)
+
+- **Screen:** `BranchDetailScreen` — `FlexibleSpaceBar` hero
+- **Current behavior:** `Image.network(branch.photoUrl!)` is used instead of `CachedNetworkImage`. On revisit the image re-downloads from scratch, causing a white flash. No fade-in transition on first load — image pops in abruptly. The branch card (`branch_card.dart`) correctly uses `CachedBranchImage`.
+- **Recommended fix:** Replace `Image.network(...)` with `CachedNetworkImage(imageUrl: ..., fit: BoxFit.cover, placeholder: (_, __) => Container(color: cs.primaryContainer), errorWidget: (_, __, ___) => ...)` in `_BranchDetailContent._buildHero`.
+- **Severity:** High
+- **Directive:** In `branch_detail_screen.dart`, replace `Image.network(branch.photoUrl!)` with `CachedNetworkImage` using the same placeholder (`primaryContainer` + `Icons.spa`) already used for the null-photo case.
+
+---
+
+### BK-R6 — Slot-picker error state has no retry affordance
+
+- **Screen:** `BookingWizardScreen` — `_SlotPickerStep`, `error:` branch of `slotsAsync.when(...)`
+- **Current behavior:** `error: (_, __) => Text('Gagal memuat slot. Coba lagi.')` — plain text, no button. User has no way to retry the availability API call without leaving the wizard entirely.
+- **Recommended fix:** Replace with `Column [ Text('Gagal memuat slot waktu.'), SizedBox(8), OutlinedButton('Coba Lagi', onPressed: () => ref.invalidate(availabilityProvider(...))) ]`.
+- **Severity:** High
+- **Directive:** In `_SlotPickerStep`, replace the `error:` text-only widget with an `OutlinedButton("Coba Lagi")` that calls `ref.invalidate(availabilityProvider(branchId: branch.id, serviceId: serviceId, date: dateStr))`.
+
+---
+
+### BK-R7 — Slot-picker skeleton has no delay guard (flashes on fast connections)
+
+- **Screen:** `BookingWizardScreen` — `_SlotPickerStep`, `loading:` branch
+- **Current behavior:** The skeleton `GridView` renders immediately on any API call, including ones that complete in under 150 ms (likely on localhost dev). This produces a grid-flicker on fast networks. Spec (BK-A6) requires showing the skeleton only after a 200 ms delay.
+- **Recommended fix:** Wrap the `loading:` branch in a `FutureBuilder` with a 200 ms `Future.delayed` — show `SizedBox.shrink()` before the delay resolves, then the skeleton grid.
+- **Severity:** Low
+- **Directive:** In `_SlotPickerStep`, replace the inline `loading:` grid with a `_DelayedSkeleton(delay: 200ms)` widget that returns `SizedBox.shrink()` for the first 200 ms and the skeleton grid afterward.
+
+---
+
+### BK-R8 — Therapist empty state shows error-colored icon but it is not an error
+
+- **Screen:** `BookingWizardScreen` — `_TherapistPickerStep`, empty therapist list branch
+- **Current behavior:** `Icon(Icons.person_off_outlined, size: 48, color: cs.error)` — red color signals danger/failure. "No therapists at this slot" is a normal state (all therapists busy), not an error. Red misleads users into thinking something is broken.
+- **Recommended fix:** Change `color: cs.error` to `color: cs.onSurfaceVariant` for the empty-state icon. Add an `OutlinedButton("Ganti Slot")` below the message that calls `pageController.goToStep(2)` per BK-A7 spec.
+- **Severity:** Medium
+- **Directive:** In `_TherapistPickerStep` empty branch, change the icon color to `cs.onSurfaceVariant` and add `OutlinedButton("Ganti Slot", onPressed: () => /* goToStep index 2 */)`.
+
+---
+
+### BK-R9 — Customer info form validates only on "Lanjut" tap; no inline real-time feedback
+
+- **Screen:** `BookingWizardScreen` — `_CustomerInfoStep`
+- **Current behavior:** `_isStepValid()` in the parent does a shallow check (`length >= 2`, `contains('@')`). The form `_formKey` validator is only triggered when Flutter's `Form` auto-validates, but `autovalidateMode` is never set — it defaults to `AutovalidateMode.disabled`. So validation errors are **never shown inline** while the user types. The "Lanjut" button also uses the shallow parent check, meaning invalid emails (e.g. `a@b`) pass through.
+- **Recommended fix:** Add `autovalidateMode: AutovalidateMode.onUserInteraction` to the `Form` widget. Call `_formKey.currentState!.validate()` inside `_isStepValid` for step index 5 (via a `ValueNotifier<bool>` that the parent reads, since `_formKey` lives in the child state). As a minimum viable fix: set `autovalidateMode: AutovalidateMode.onUserInteraction` on the `Form` so users see red error messages as they type.
+- **Severity:** Critical — users can reach the payment screen with blank/invalid email, causing the backend to reject the booking and giving no field-level guidance.
+- **Directive:** In `_CustomerInfoStep`, add `autovalidateMode: AutovalidateMode.onUserInteraction` to the `Form` widget so validators run on each keystroke and errors appear inline.
+
+---
+
+### BK-R10 — "Lanjut" button disabled state gives no reason why it is disabled
+
+- **Screen:** `BookingWizardScreen` — `_BottomNavBar`
+- **Current behavior:** `FilledButton(onPressed: isValid ? onNext : null, ...)` — when `isValid == false`, the button is greyed out with no explanation. On Step 1 (pick service) and Step 3 (pick slot) users don't know what they need to do to enable the button.
+- **Recommended fix:** When the button is disabled, show a hint text above it. For Step 1: "Pilih satu layanan untuk melanjutkan." For Step 3: "Pilih tanggal dan slot waktu." Implement via a `_stepHintText(stepIndex, wizardState)` function in the parent widget that returns `null` when valid and a string when not — render as `bodySmall` text in `onSurfaceVariant` above the button row.
+- **Severity:** Medium
+- **Directive:** Add a `Text(_stepHintText(...), style: bodySmall, color: onSurfaceVariant)` above the "Lanjut" button in `_BottomNavBar`; show only when `!isValid`; per-step hint strings defined in `BookingWizardScreen`.
+
+---
+
+### BK-R11 — "Bagikan Kode" button on confirmation screen copies instead of sharing
+
+- **Screen:** `BookingConfirmationScreen`
+- **Current behavior:** `OutlinedButton.icon(label: Text("Bagikan Kode"), onPressed: () => _copyCode(context))` — the button label says "Bagikan" (share) but the action silently copies to clipboard. The `share_plus` package is deferred to Phase 6 per a code comment. A button labeled "share" that copies is actively deceptive.
+- **Recommended fix:** Either (a) rename the button to "Salin Kode" and use `Icons.copy_outlined` to match the copy action, or (b) add `share_plus` now (it is a simple pub dependency, no native keys required). Option (a) is 5-minute scope.
+- **Severity:** High — copy labeled as share violates basic copy principles and confuses users who expect the native share sheet.
+- **Directive:** Rename the `OutlinedButton` label from `"Bagikan Kode"` to `"Salin Kode"` and change its icon to `Icons.copy_outlined` until `share_plus` is wired up in Phase 6.
+
+---
+
+### BK-R12 — Confirmation screen route uses a mismatched path (`/confirmation/:code` vs spec)
+
+- **Screen:** `PaymentScreen._submitPayment()` + `app_router.dart`
+- **Current behavior:** `context.go('/confirmation/${response.code}', extra: _ConfirmationExtra(...))`. The spec (BK-A1) defines the confirmation route as `/branches/:id/book/confirm`. The router uses `/confirmation/:code`. This mismatch means the deep-link `lustia://my-bookings/:code` is the only external entry, but the internal confirmation route is inconsistent with spec and the wizard's sub-route hierarchy (`/branches/:id/book` → `.../payment` → `.../confirm`). The current implementation also passes a private `_ConfirmationExtra` class (not `BookingConfirmationData`) from `PaymentScreen`, triggering the `extra is BookingConfirmationData` guard to fail — the confirmation screen would render with empty `branchName` and `serviceName` because `extra` is cast to the wrong type.
+- **Recommended fix:** In `payment_screen.dart`, change `context.go('/confirmation/...')` to pass a `BookingConfirmationData` object (not `_ConfirmationExtra`), or consolidate the two classes. Route alignment with spec is a Phase 6 polish item, but the wrong type is a **runtime data loss bug** today.
+- **Severity:** Critical — the confirmation screen currently shows blank branch name and service name on every booking because `_ConfirmationExtra` is not `BookingConfirmationData`.
+- **Directive:** In `payment_screen.dart`, replace `_ConfirmationExtra(...)` with `BookingConfirmationData(code: response.code, branchName: branchName, serviceName: serviceName, scheduledStart: response.scheduledStart, scheduledEnd: response.scheduledEnd, totalPriceIdr: response.totalPriceIdr, therapistName: null)` in the `context.go(...)` call.
+
+---
+
+### BK-R13 — Favorites screen silently shows a confusing secondary empty state
+
+- **Screen:** `FavoritesScreen`
+- **Current behavior:** When `favoriteIds` is non-empty but none of those IDs appear in the current branch list (e.g., branch list loaded with a filter or the branch was deactivated), the screen shows: "Cabang favorit tidak ditemukan di daftar saat ini." with no CTA and no path forward. The user has favorited branches that have simply disappeared from view. This is especially likely when the branch list is filtered by a category chip the user has previously set.
+- **Recommended fix:** Add a `FilledButton("Lihat Semua Cabang")` CTA to the secondary empty state that resets filters and navigates to `/`. Also add context: "Mungkin cabang ini tidak aktif atau sedang tidak tersedia."
+- **Severity:** Medium
+- **Directive:** In `FavoritesScreen`, replace the secondary empty-state `Text(...)` with a `Column` containing the text plus `FilledButton("Lihat Semua Cabang", onPressed: () => context.go('/'))`.
+
+---
+
+### BK-R14 — "Booking Saya" detail screen shows QR for cancelled/expired bookings without visual suppression
+
+- **Screen:** `BookingDetailScreen` — `_BookingDetailContent`
+- **Current behavior:** The QR code and large booking code are rendered for all statuses, including `cancelled`, `no_show`, and `expired`. The inactive banner ("Kode ini sudah tidak bisa digunakan.") appears above the QR — but the QR itself is still prominent and scannable. A customer at the front desk could present this QR and the op staff must scan-fail before knowing it's void.
+- **Recommended fix:** For `_isInactive == true`: render the QR at 40% opacity using `Opacity(opacity: 0.4, child: QrDisplay(...))`, overlay a `Icon(Icons.block, size: 48, color: error)` centered on top (via `Stack`), and move the inactive banner to appear **above** the QR card rather than between the status badge and the QR. The code text below should also be shown in `onSurfaceVariant` color rather than full black.
+- **Severity:** Medium
+- **Directive:** Wrap the `QrDisplay` in a `Stack` with an `Opacity(opacity: 0.4)` on the QR and a centered `Icon(Icons.block, color: cs.error)` overlay when `_isInactive == true`.
+
+---
+
+### BK-R15 — Payment screen error is a SnackBar with raw backend error message
+
+- **Screen:** `PaymentScreen._submitPayment()`
+- **Current behavior:** On failure, shows `SnackBar(content: Text(errMsg))` where `errMsg = ref.read(bookingSubmitProvider).error?.toString()`. This exposes raw exception strings (e.g., `DioException [POST /api/v1/public/bookings]: 409 Conflict {"error":"slot_unavailable"}`) directly to the user.
+- **Recommended fix:** Map known error codes to friendly Indonesian copy: `409` → "Slot ini baru saja terisi. Pilih slot lain.", generic → "Terjadi kesalahan. Coba lagi." Use a helper `_friendlyPaymentError(Object? err)` that pattern-matches on status code or error key. Show the `SnackBar` with `duration: Duration(seconds: 5)` and an action "Ganti Slot" that pops back to the wizard.
+- **Severity:** High
+- **Directive:** In `PaymentScreen._submitPayment()`, replace `errMsg = ref.read(...).error?.toString()` with a `_friendlyPaymentError(Object? err)` helper that returns "Slot ini baru saja terisi. Silakan pilih slot lain." for 409 errors and "Terjadi kesalahan. Coba lagi." for all others.
+
+---
+
+### BK-R16 — `BookingStepIndicator` widget is a TODO stub, never used
+
+- **Screen:** `booking_step_indicator.dart`
+- **Current behavior:** The file renders `Text('Langkah $currentStep dari $totalSteps')` with a `TODO` comment. The wizard uses an `AppBar` title string + `LinearProgressIndicator` (correctly, per BK-A5 spec) and never imports `BookingStepIndicator`. The file is dead code but adds confusion.
+- **Recommended fix:** Either delete `booking_step_indicator.dart` or, if a dot-based step indicator is desired for Phase 6 polish, keep it and remove the TODO comment with a proper implementation note.
+- **Severity:** Low — no user impact, but dead code creates maintenance confusion.
+- **Directive:** Delete `lustia/mobile/lib/features/booking/presentation/widgets/booking_step_indicator.dart` (it is not imported anywhere and contradicts the spec-compliant `LinearProgressIndicator` already in the wizard).
+
+---
+
+### BK-R17 — `T&C` copy in `_CustomerInfoStep` is plain text, not a tappable link
+
+- **Screen:** `BookingWizardScreen` — `_CustomerInfoStep`
+- **Current behavior:** `Text('Dengan melanjutkan, kamu menyetujui Syarat & Ketentuan...')` — "Syarat & Ketentuan" is unformatted plain text. Spec (BK-A9) requires it to be a `TextSpan` tap target that opens the T&C modal. Currently there is no way to read the T&C before agreeing to it, which is a legal and trust issue.
+- **Recommended fix:** Replace the `Text` widget with a `RichText` using a `TextSpan` tree: plain text around a tappable `TextSpan("Syarat & Ketentuan", style: TextStyle(color: primary, decoration: underline), recognizer: TapGestureRecognizer()..onTap = () => _showTncModal(context))`.
+- **Severity:** High — users cannot access T&C before agreeing; this is the only screen where they are asked to accept it.
+- **Directive:** In `_CustomerInfoStep`, replace the plain `Text` T&C notice with a `RichText` widget containing a tappable `TextSpan` for "Syarat & Ketentuan" that opens a modal bottom sheet (same pattern as `SettingsScreen._showModal()`).
+
+---
+
+### BK-R18 — Slot date-strip uses `GestureDetector` instead of `InkWell`; no ripple on tap
+
+- **Screen:** `BookingWizardScreen` — `_SlotPickerStep` date strip
+- **Current behavior:** Each date chip is wrapped in `GestureDetector(onTap: ...)`. On Android/web, Material 3 users expect a ripple effect on interactive elements. `GestureDetector` provides no visual tap feedback at all.
+- **Recommended fix:** Replace `GestureDetector` with `InkWell(borderRadius: BorderRadius.circular(12), onTap: ..., child: ...)` wrapped in `Material(color: Colors.transparent)` so the ripple clips correctly to the rounded container.
+- **Severity:** Low
+- **Directive:** In `_SlotPickerStep`, replace `GestureDetector(onTap: ...)` on each date chip with `InkWell(borderRadius: BorderRadius.circular(12), onTap: ...)` inside a `Material(color: Colors.transparent, borderRadius: BorderRadius.circular(12))` wrapper.
+

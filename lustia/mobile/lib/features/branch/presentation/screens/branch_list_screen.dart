@@ -230,14 +230,43 @@ class _EmptyBranchState extends StatelessWidget {
   }
 }
 
-/// Skeleton loading list — 6 card placeholder.
-class _SkeletonList extends StatelessWidget {
+/// Skeleton loading list with shimmer (BK-R3) — 6 card placeholders.
+/// One shared [AnimationController] drives all cards to avoid 6× timers.
+class _SkeletonList extends StatefulWidget {
+  @override
+  State<_SkeletonList> createState() => _SkeletonListState();
+}
+
+class _SkeletonListState extends State<_SkeletonList>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
+    _anim = Tween<double>(begin: 0.4, end: 1.0).animate(_ctrl);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
-    return ListView.builder(
-      padding: const EdgeInsets.only(top: 8),
-      itemCount: 6,
-      itemBuilder: (_, __) => const _SkeletonCard(),
+    return FadeTransition(
+      opacity: _anim,
+      child: ListView.builder(
+        padding: const EdgeInsets.only(top: 8),
+        itemCount: 6,
+        itemBuilder: (_, __) => const _SkeletonCard(),
+      ),
     );
   }
 }
@@ -247,6 +276,7 @@ class _SkeletonCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.surfaceContainerHighest;
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
       child: Padding(
@@ -257,20 +287,24 @@ class _SkeletonCard extends StatelessWidget {
               width: 96,
               height: 96,
               decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                color: color,
                 borderRadius: BorderRadius.circular(8),
               ),
             ),
             const SizedBox(width: 12),
-            const Expanded(
+            Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _SkeletonBox(width: 80, height: 12),
-                  SizedBox(height: 6),
-                  _SkeletonBox(width: double.infinity, height: 16),
-                  SizedBox(height: 6),
-                  _SkeletonBox(width: 120, height: 12),
+                  _SkeletonBox(width: 80, height: 12, color: color),
+                  const SizedBox(height: 6),
+                  _SkeletonBox(
+                    width: double.infinity,
+                    height: 16,
+                    color: color,
+                  ),
+                  const SizedBox(height: 6),
+                  _SkeletonBox(width: 120, height: 12, color: color),
                 ],
               ),
             ),
@@ -282,9 +316,14 @@ class _SkeletonCard extends StatelessWidget {
 }
 
 class _SkeletonBox extends StatelessWidget {
-  const _SkeletonBox({required this.width, required this.height});
+  const _SkeletonBox({
+    required this.width,
+    required this.height,
+    required this.color,
+  });
   final double width;
   final double height;
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
@@ -292,7 +331,7 @@ class _SkeletonBox extends StatelessWidget {
       width: width,
       height: height,
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        color: color,
         borderRadius: BorderRadius.circular(4),
       ),
     );

@@ -69,7 +69,7 @@ export PASSWORD_RESET_URL_BASE=${PASSWORD_RESET_URL_BASE:-http://localhost:3002/
 
 # --- CORS — dev web frontends ---
 # Comma-separated exact origins. Leave unset to disable CORS entirely.
-export CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3001,http://localhost:3002,http://localhost:3003}
+export CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3001,http://localhost:3002,http://localhost:3003,http://localhost:5000}
 
 # --- Storage (ADR 0011) ---
 # Local driver writes to a sub-directory of the repo checkout (gitignored).

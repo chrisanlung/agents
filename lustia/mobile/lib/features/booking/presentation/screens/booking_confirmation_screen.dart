@@ -183,14 +183,11 @@ class BookingConfirmationScreen extends ConsumerWidget {
             ),
             const SizedBox(height: 24),
 
-            // Share button
+            // Copy button (BK-R11: renamed from "Bagikan Kode"; share_plus wired in Phase 6)
             OutlinedButton.icon(
-              icon: const Icon(Icons.share_outlined),
-              label: const Text('Bagikan Kode'),
-              onPressed: () {
-                // Share.share di Phase 6 via share_plus
-                _copyCode(context);
-              },
+              icon: const Icon(Icons.copy_outlined),
+              label: const Text('Salin Kode'),
+              onPressed: () => _copyCode(context),
               style: OutlinedButton.styleFrom(
                 minimumSize: const Size(double.infinity, 48),
               ),

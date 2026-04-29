@@ -192,48 +192,9 @@ func main() {
 	// ADR 0012 — Room (Ruangan) catalog.
 	roomSvc := service.NewRoomSvc(roomRepo, branchRepo, auditRepo, clock, txManager)
 
-	// ADR 0014 — Phase 5 Booking Engine.
-	// C-2 (SECURITY.md): payment adapter selection with fail-fast guard.
-	// If PAYMENT_ADAPTER=dummy and APP_ENV is not dev/local, NewClient returns
-	// an error and we log.Fatal — an accidental dummy adapter in staging/prod
-	// is a critical security hole (free paid bookings).
-	appEnv := envStr("APP_ENV", "dev")
-	paymentAdapter := envStr("PAYMENT_ADAPTER", "dummy")
-	paymentClient, err := helperPayment.NewClient(helperPayment.Config{
-		Adapter:             paymentAdapter,
-		AppEnv:              appEnv,
-		MidtransServerKey:   os.Getenv("MIDTRANS_SERVER_KEY"),
-		MidtransClientKey:   os.Getenv("MIDTRANS_CLIENT_KEY"),
-		MidtransEnvironment: envStr("MIDTRANS_ENVIRONMENT", "sandbox"),
-	})
-	if err != nil {
-		log.Fatal(ctx, err, "payment adapter misconfiguration (C-2)")
-	}
-	log.Infof(ctx, "payment adapter: %s (APP_ENV=%s)", paymentAdapter, appEnv)
-
-	// paymentAdapter bridges helper/payment.MidtransClientIface → service.MidtransClient
-	// so the service package does not import the helper package (layering rule).
-	paymentBridge := &paymentAdapterBridge{inner: paymentClient}
-
-	bookingRepo := repository.NewBookingRepository(gormDB)
-	bookingSvc := service.NewBookingService(
-		bookingRepo,
-		branchRepo,
-		serviceCatalogRepo,
-		addonRepo,
-		roomRepo,
-		therapistRepo,
-		therapistServiceRepo,
-		therapistAvailabilityRepo,
-		paymentBridge,
-		auditRepo,
-		mailer,
-		clock,
-		txManager,
-	)
-
 	// -------------------------------------------------------------------------
 	// ADR 0011 — Storage adapter (fail-fast per §2.2)
+	// Dipindah ke sini agar stor tersedia sebelum NewBookingService dipanggil.
 	// -------------------------------------------------------------------------
 	storageDriver := envStr("STORAGE_DRIVER", "")
 	if storageDriver == "" {
@@ -279,6 +240,48 @@ func main() {
 	if storageDriver == "local" {
 		localStoragePath = absLocalPath
 	}
+
+	// ADR 0014 — Phase 5 Booking Engine.
+	// C-2 (SECURITY.md): payment adapter selection with fail-fast guard.
+	// If PAYMENT_ADAPTER=dummy and APP_ENV is not dev/local, NewClient returns
+	// an error and we log.Fatal — an accidental dummy adapter in staging/prod
+	// is a critical security hole (free paid bookings).
+	appEnv := envStr("APP_ENV", "dev")
+	paymentAdapter := envStr("PAYMENT_ADAPTER", "dummy")
+	paymentClient, err := helperPayment.NewClient(helperPayment.Config{
+		Adapter:             paymentAdapter,
+		AppEnv:              appEnv,
+		MidtransServerKey:   os.Getenv("MIDTRANS_SERVER_KEY"),
+		MidtransClientKey:   os.Getenv("MIDTRANS_CLIENT_KEY"),
+		MidtransEnvironment: envStr("MIDTRANS_ENVIRONMENT", "sandbox"),
+	})
+	if err != nil {
+		log.Fatal(ctx, err, "payment adapter misconfiguration (C-2)")
+	}
+	log.Infof(ctx, "payment adapter: %s (APP_ENV=%s)", paymentAdapter, appEnv)
+
+	// paymentAdapter bridges helper/payment.MidtransClientIface → service.MidtransClient
+	// so the service package does not import the helper package (layering rule).
+	paymentBridge := &paymentAdapterBridge{inner: paymentClient}
+
+	bookingRepo := repository.NewBookingRepository(gormDB)
+	bookingSvc := service.NewBookingService(
+		bookingRepo,
+		branchRepo,
+		serviceCatalogRepo,
+		addonRepo,
+		roomRepo,
+		therapistRepo,
+		therapistServiceRepo,
+		therapistAvailabilityRepo,
+		paymentBridge,
+		auditRepo,
+		mailer,
+		clock,
+		txManager,
+		stor,       // ADR 0011: storage untuk URL foto terapis/ruangan pada endpoint publik
+		tenantRepo, // digunakan oleh GetPublicBranchDetail untuk mengambil nama tenant
+	)
 
 	// -------------------------------------------------------------------------
 	// Controllers

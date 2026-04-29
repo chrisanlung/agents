@@ -3,7 +3,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../../../core/router/app_router.dart';
 import '../../../../features/favorites/data/favorites_notifier.dart';
 
 const _appVersion = '1.0.0';
@@ -29,6 +31,17 @@ class SettingsScreen extends ConsumerWidget {
             subtitle: const Text('Digunakan untuk menampilkan cabang terdekat'),
             trailing: const Icon(Icons.open_in_new, size: 18),
             onTap: () => Geolocator.openAppSettings(),
+          ),
+          const Divider(),
+
+          // Bantuan section
+          const _SectionHeader('Bantuan'),
+          ListTile(
+            leading: const Icon(Icons.search),
+            title: const Text('Cari Booking dengan Kode'),
+            subtitle: const Text('Temukan booking menggunakan kode 8 karakter'),
+            trailing: const Icon(Icons.chevron_right, size: 18),
+            onTap: () => context.push(AppRoutes.findBooking),
           ),
           const Divider(),
 

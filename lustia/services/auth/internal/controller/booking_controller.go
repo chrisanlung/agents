@@ -31,6 +31,7 @@ type BookingServiceIface interface {
 	GetReportSummary(ctx context.Context, in service.GetReportInput) (service.BookingReportSummary, error)
 	ListAvailableSlots(ctx context.Context, in service.AvailableSlotsInput) ([]service.Slot, error)
 	ListPublicBranches(ctx context.Context, filter service.PublicBranchFilter) ([]service.PublicBranchSummary, int64, error)
+	GetPublicBranchDetail(ctx context.Context, branchID string) (service.PublicBranchDetail, error)
 }
 
 // BookingController handles all booking-related HTTP endpoints.
@@ -210,6 +211,19 @@ func (c *BookingController) ListPublicBranches(ctx *gin.Context) {
 	})
 }
 
+// GetPublicBranchDetail handles GET /api/v1/public/branches/:id.
+// Response dipetakan ke PublicBranchDetailResponse agar Flutter menerima
+// snake_case key dan operational_hours sebagai array JSON (bukan base64).
+func (c *BookingController) GetPublicBranchDetail(ctx *gin.Context) {
+	id := ctx.Param("id")
+	detail, err := c.svc.GetPublicBranchDetail(ctx.Request.Context(), id)
+	if err != nil {
+		helper.RespondDomainError(ctx, err)
+		return
+	}
+	ctx.JSON(http.StatusOK, toPublicBranchDetailResponse(detail))
+}
+
 // GetAvailability handles GET /api/v1/public/branches/:id/availability.
 func (c *BookingController) GetAvailability(ctx *gin.Context) {
 	branchID := ctx.Param("id")
@@ -254,6 +268,17 @@ func (c *BookingController) GetAvailability(ctx *gin.Context) {
 // ListBookings handles GET /api/v1/tenant/bookings.
 func (c *BookingController) ListBookings(ctx *gin.Context) {
 	claims, _ := middleware.ClaimsFromContext(ctx)
+
+	// Guard: this endpoint requires a real tenant scope. Rejection with 403
+	// (instead of letting the SQL UUID parser blow up further down) lets the
+	// frontend handleApiError redirect the user back to /login or
+	// /select-tenant cleanly. Triggers if claims missing, scope=platform,
+	// scope=user without tenant selection, or anomalous '__platform__'
+	// sentinel slipped through.
+	if claims.Scope != "tenant" || claims.TenantID == "" || claims.TenantID == constants.PublicTenantSentinel || claims.TenantID == "__platform__" {
+		helper.RespondError(ctx, http.StatusForbidden, constants.CodeInsufficientPermission, "konteks tenant tidak valid. Silakan masuk kembali.")
+		return
+	}
 
 	var q ListBookingsQuery
 	if err := ctx.ShouldBindQuery(&q); err != nil {

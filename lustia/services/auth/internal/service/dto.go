@@ -1178,12 +1178,16 @@ type PublicBranchSummary struct {
 	OperationalHours []byte // raw JSONB from DB
 }
 
-// PublicBranchDetail is the full branch detail for the public branch page.
+// PublicBranchDetail adalah proyeksi lengkap cabang untuk halaman detail
+// cabang publik (GET /public/branches/:id). TenantName diisi oleh service
+// agar controller tidak perlu mengakses TenantRepository langsung.
 type PublicBranchDetail struct {
 	PublicBranchSummary
-	Services    []ServiceDetail
-	Therapists  []TherapistDetail
-	Rooms       []RoomDetail
+	TenantName string
+	Services   []ServiceDetail
+	Therapists []TherapistDetail
+	Rooms      []RoomDetail
+	Addons     []AddonDetail
 }
 
 // WebhookHandleInput carries the inbound webhook notification plus the

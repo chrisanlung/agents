@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/chrisanlung/lustia-auth/internal/service"
@@ -611,6 +613,85 @@ type ListPublicBranchesResponse struct {
 	TotalCount int64                         `json:"total_count"`
 }
 
+// OperationalHourEntry adalah satu baris jam operasional yang di-parse dari
+// JSONB. Flutter mengonsumsi ini sebagai JSON object, bukan base64 string.
+type OperationalHourEntry struct {
+	Day   int    `json:"day"`   // 0=Minggu … 6=Sabtu
+	Open  string `json:"open"`  // "HH:MM"
+	Close string `json:"close"` // "HH:MM"
+}
+
+// PublicServiceResponse adalah proyeksi layanan dalam detail cabang publik.
+// Tidak memuat is_active (selalu true pada endpoint ini) dan tenant_id
+// (implisit dari cabang).
+type PublicServiceResponse struct {
+	ID              string  `json:"id"`
+	Name            string  `json:"name"`
+	Description     *string `json:"description"`
+	Category        *string `json:"category"`
+	DurationMinutes int     `json:"duration_minutes"`
+	PriceIDR        int64   `json:"price_idr"`
+	Currency        string  `json:"currency"`
+}
+
+// PublicTherapistResponse adalah proyeksi terapis dalam detail cabang publik.
+// photo_key tidak pernah dikirim ke wire — hanya photo_url (URL yang sudah
+// di-resolve) yang diekspos.
+type PublicTherapistResponse struct {
+	ID       string  `json:"id"`
+	FullName string  `json:"full_name"`
+	Gender   *string `json:"gender"`
+	PhotoURL *string `json:"photo_url"`
+	HeightCm int16   `json:"height_cm"`
+	WeightKg int16   `json:"weight_kg"`
+	Build    string  `json:"build"`
+	Bio      *string `json:"bio"`
+}
+
+// PublicRoomResponse adalah proyeksi ruangan dalam detail cabang publik.
+type PublicRoomResponse struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description *string  `json:"description"`
+	RoomType    string   `json:"room_type"`
+	Capacity    int16    `json:"capacity"`
+	Amenities   []string `json:"amenities"`
+	PhotoURL    *string  `json:"photo_url"`
+}
+
+// PublicAddonResponse adalah proyeksi add-on dalam detail cabang publik (ADR 0010).
+// tenant_id dan deleted_at sengaja dihilangkan — bersifat internal.
+type PublicAddonResponse struct {
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Description *string `json:"description"`
+	PriceIDR    int64   `json:"price_idr"`
+	SortOrder   int     `json:"sort_order"`
+}
+
+// PublicBranchDetailResponse adalah response untuk GET /public/branches/:id.
+// Menggantikan serialisasi langsung service.PublicBranchDetail yang menghasilkan
+// PascalCase key dan OperationalHours sebagai base64.
+type PublicBranchDetailResponse struct {
+	ID               string                 `json:"id"`
+	TenantName       string                 `json:"tenant_name"`
+	Name             string                 `json:"name"`
+	City             *string                `json:"city"`
+	Province         *string                `json:"province"`
+	AddressLine1     *string                `json:"address_line1"`
+	ContactPhone     *string                `json:"contact_phone"`
+	ContactEmail     *string                `json:"contact_email"`
+	Latitude         *float64               `json:"latitude"`
+	Longitude        *float64               `json:"longitude"`
+	DistanceMeters   *float64               `json:"distance_meters"`
+	Categories       []string               `json:"categories"`
+	OperationalHours []OperationalHourEntry `json:"operational_hours"`
+	Services         []PublicServiceResponse   `json:"services"`
+	Therapists       []PublicTherapistResponse `json:"therapists"`
+	Rooms            []PublicRoomResponse      `json:"rooms"`
+	Addons           []PublicAddonResponse     `json:"addons"`
+}
+
 // ---------------------------------------------------------------------------
 // Booking mapping helpers
 // ---------------------------------------------------------------------------
@@ -679,5 +760,112 @@ func toPublicBookingResponse(v service.PublicBookingView) PublicBookingResponse 
 		CustomerPhone:  v.CustomerPhone,
 		CustomerEmail:  v.CustomerEmail,
 		Addons:         addons,
+	}
+}
+
+// toPublicBranchDetailResponse memetakan service.PublicBranchDetail ke DTO
+// dengan json tag snake_case yang benar dan OperationalHours sebagai array
+// JSON (bukan base64 string yang dihasilkan oleh serialisasi []byte langsung).
+func toPublicBranchDetailResponse(d service.PublicBranchDetail) PublicBranchDetailResponse {
+	// Parse JSONB operational_hours dari []byte → []OperationalHourEntry.
+	// Bila kosong atau tidak valid, gunakan slice kosong agar Flutter tidak
+	// menerima null.
+	var opHours []OperationalHourEntry
+	if len(d.OperationalHours) > 0 {
+		if err := json.Unmarshal(d.OperationalHours, &opHours); err != nil {
+			slog.Warn("toPublicBranchDetailResponse: gagal parse operational_hours",
+				"branch_id", d.ID, "error", err)
+			opHours = []OperationalHourEntry{}
+		}
+	} else {
+		opHours = []OperationalHourEntry{}
+	}
+
+	// Petakan layanan aktif.
+	svcs := make([]PublicServiceResponse, len(d.Services))
+	for i, s := range d.Services {
+		svcs[i] = PublicServiceResponse{
+			ID:              s.ID,
+			Name:            s.Name,
+			Description:     s.Description,
+			Category:        s.Category,
+			DurationMinutes: s.DurationMinutes,
+			PriceIDR:        s.PriceIDR,
+			Currency:        s.Currency,
+		}
+	}
+
+	// Petakan terapis — PhotoKey pada service.TherapistDetail digunakan
+	// sementara sebagai carrier URL yang sudah di-resolve oleh BookingService
+	// (ADR 0011). Nilai diteruskan ke photo_url; tidak pernah dikirim sebagai
+	// storage key.
+	therapists := make([]PublicTherapistResponse, len(d.Therapists))
+	for i, t := range d.Therapists {
+		therapists[i] = PublicTherapistResponse{
+			ID:       t.ID,
+			FullName: t.FullName,
+			Gender:   t.Gender,
+			PhotoURL: t.PhotoKey, // PhotoKey berisi resolved URL setelah BookingService memprosesnya
+			HeightCm: t.HeightCm,
+			WeightKg: t.WeightKg,
+			Build:    t.Build,
+			Bio:      t.Bio,
+		}
+	}
+
+	// Petakan ruangan — sama seperti terapis, PhotoKey berisi resolved URL.
+	rooms := make([]PublicRoomResponse, len(d.Rooms))
+	for i, r := range d.Rooms {
+		amenities := r.Amenities
+		if amenities == nil {
+			amenities = []string{}
+		}
+		rooms[i] = PublicRoomResponse{
+			ID:          r.ID,
+			Name:        r.Name,
+			Description: r.Description,
+			RoomType:    r.RoomType,
+			Capacity:    r.Capacity,
+			Amenities:   amenities,
+			PhotoURL:    r.PhotoKey, // PhotoKey berisi resolved URL
+		}
+	}
+
+	categories := d.Categories
+	if categories == nil {
+		categories = []string{}
+	}
+
+	// Petakan add-on tenant-wide (ADR 0010).
+	// is_active tidak diekspos di public response — semua entri di sini sudah aktif.
+	addons := make([]PublicAddonResponse, len(d.Addons))
+	for i, a := range d.Addons {
+		addons[i] = PublicAddonResponse{
+			ID:          a.ID,
+			Name:        a.Name,
+			Description: a.Description,
+			PriceIDR:    a.PriceIDR,
+			SortOrder:   a.SortOrder,
+		}
+	}
+
+	return PublicBranchDetailResponse{
+		ID:               d.ID,
+		TenantName:       d.TenantName,
+		Name:             d.Name,
+		City:             d.City,
+		Province:         d.Province,
+		AddressLine1:     d.AddressLine1,
+		ContactPhone:     d.ContactPhone,
+		ContactEmail:     d.ContactEmail,
+		Latitude:         d.Latitude,
+		Longitude:        d.Longitude,
+		DistanceMeters:   d.DistanceMeters,
+		Categories:       categories,
+		OperationalHours: opHours,
+		Services:         svcs,
+		Therapists:       therapists,
+		Rooms:            rooms,
+		Addons:           addons,
 	}
 }

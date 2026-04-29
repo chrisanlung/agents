@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -38,6 +39,40 @@ func (s *stubTx) WithTx(ctx context.Context, fn func(context.Context) error) err
 	return fn(ctx)
 }
 func (s *stubTx) SetTenantContext(_ context.Context, _, _ string) error { return nil }
+
+// stubStorage adalah no-op Storage untuk unit test — tidak ada upload sungguhan.
+type stubStorage struct{}
+
+func (s *stubStorage) Upload(_ context.Context, _ string, _ io.Reader, _ string) error {
+	return nil
+}
+func (s *stubStorage) Delete(_ context.Context, _ string) error { return nil }
+func (s *stubStorage) URL(_ context.Context, key string) (string, error) {
+	return "http://localhost/uploads/" + key, nil
+}
+
+// stubTenantRepo adalah no-op TenantRepository untuk unit test.
+type stubTenantRepo struct {
+	tenant *model.Tenant
+	err    error
+}
+
+func (r *stubTenantRepo) FindBySlug(_ context.Context, _ string) (*model.Tenant, error) {
+	return r.tenant, r.err
+}
+func (r *stubTenantRepo) FindByID(_ context.Context, _ string) (*model.Tenant, error) {
+	return r.tenant, r.err
+}
+func (r *stubTenantRepo) Save(_ context.Context, _ *model.Tenant) error { return nil }
+func (r *stubTenantRepo) List(_ context.Context, _ TenantFilter) ([]*TenantWithCounts, int64, error) {
+	return nil, 0, nil
+}
+func (r *stubTenantRepo) UpdateStatus(_ context.Context, _, _, _ string, _ *string) error {
+	return nil
+}
+func (r *stubTenantRepo) CountActiveBranches(_ context.Context, _ string) (int, error) {
+	return 0, nil
+}
 
 // stubPayment returns MidtransStatusPaid always (simulates dummy adapter).
 type stubPayment struct {
@@ -299,6 +334,8 @@ func newTestService(
 		&stubEmail{},
 		&stubClock{t: time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC)},
 		&stubTx{},
+		&stubStorage{},
+		&stubTenantRepo{},
 	)
 }
 

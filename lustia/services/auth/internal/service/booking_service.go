@@ -51,6 +51,11 @@ type BookingService struct {
 	email        EmailSender
 	clock        Clock
 	tx           TxManager
+	// storage digunakan untuk menghasilkan signed URL foto terapis/ruangan
+	// pada endpoint publik (ADR 0011).
+	storage Storage
+	// tenants digunakan untuk mengambil nama tenant pada GetPublicBranchDetail.
+	tenants TenantRepository
 }
 
 // NewBookingService constructs a BookingService.
@@ -68,6 +73,8 @@ func NewBookingService(
 	email EmailSender,
 	clock Clock,
 	tx TxManager,
+	storage Storage,
+	tenants TenantRepository,
 ) *BookingService {
 	return &BookingService{
 		bookings:     bookings,
@@ -83,6 +90,8 @@ func NewBookingService(
 		email:        email,
 		clock:        clock,
 		tx:           tx,
+		storage:      storage,
+		tenants:      tenants,
 	}
 }
 
@@ -97,6 +106,14 @@ func NewBookingService(
 //   - H-1: all FK IDs are validated against the resolved tenant_id.
 //   - H-2: rate limiting is applied at the middleware layer (route registration).
 func (s *BookingService) CreatePublic(ctx context.Context, in PublicCreateBookingInput) (CreateBookingOutput, error) {
+	// Pivot RLS to __public__ for the initial branch + service + addon
+	// lookups. Without this, the default __platform__ tenant context blocks
+	// every SELECT against tenant-scoped tables. After we resolve the branch
+	// and know the tenant, we switch to that tenant's context for the INSERT.
+	if err := s.tx.SetTenantContext(ctx, constants.PublicTenantSentinel, ""); err != nil {
+		return CreateBookingOutput{}, fmt.Errorf("set public tenant context: %w", err)
+	}
+
 	// Lazy expiry sweep before attempting INSERT — prevents stale pending_payment
 	// rows from blocking the exclusion constraint check (M-3, SECURITY.md).
 	if _, err := s.bookings.SweepExpired(ctx); err != nil {
@@ -903,6 +920,14 @@ func (s *BookingService) HandlePaymentWebhook(ctx context.Context, n MidtransWeb
 // ListAvailableSlots computes available time slots for a service on a given date.
 // Calls SweepExpired first to ensure stale pending_payment rows don't block slots.
 func (s *BookingService) ListAvailableSlots(ctx context.Context, in AvailableSlotsInput) ([]Slot, error) {
+	// Pivot RLS to __public__ sentinel — this endpoint is hit by the customer
+	// mobile app without a JWT, so the default __platform__ tenant context
+	// would block every SELECT against branch/service/booking. Same pattern
+	// as ListPublicBranches + GetPublicBranchDetail.
+	if err := s.tx.SetTenantContext(ctx, constants.PublicTenantSentinel, ""); err != nil {
+		return nil, fmt.Errorf("set public tenant context: %w", err)
+	}
+
 	// Lazy expiry sweep before computing availability.
 	if _, err := s.bookings.SweepExpired(ctx); err != nil {
 		slog.WarnContext(ctx, "expiry sweep error (non-fatal)", "error", err)
@@ -958,6 +983,117 @@ func (s *BookingService) ListAvailableSlots(ctx context.Context, in AvailableSlo
 // ---------------------------------------------------------------------------
 // Public branch listing (no auth)
 // ---------------------------------------------------------------------------
+
+// GetPublicBranchDetail mengembalikan detail lengkap satu cabang beserta
+// layanan, terapis, dan ruangan aktif untuk layar booking pelanggan.
+// RLS sentinel __public__ memastikan cabang/tenant tidak aktif tidak terlihat.
+func (s *BookingService) GetPublicBranchDetail(ctx context.Context, branchID string) (PublicBranchDetail, error) {
+	if err := s.tx.SetTenantContext(ctx, constants.PublicTenantSentinel, ""); err != nil {
+		return PublicBranchDetail{}, fmt.Errorf("set public tenant context: %w", err)
+	}
+
+	b, err := s.branches.FindByID(ctx, branchID)
+	if err != nil {
+		return PublicBranchDetail{}, err
+	}
+
+	out := PublicBranchDetail{
+		PublicBranchSummary: PublicBranchSummary{
+			ID:               b.ID,
+			TenantID:         b.TenantID,
+			Name:             b.Name,
+			City:             b.City,
+			Province:         b.Province,
+			AddressLine1:     b.AddressLine1,
+			ContactPhone:     b.ContactPhone,
+			ContactEmail:     b.ContactEmail,
+			Latitude:         b.Latitude,
+			Longitude:        b.Longitude,
+			OperationalHours: b.OperationalHours,
+		},
+		Services:   []ServiceDetail{},
+		Therapists: []TherapistDetail{},
+		Rooms:      []RoomDetail{},
+		Addons:     []AddonDetail{},
+	}
+
+	// Ambil nama tenant untuk ditampilkan di picker UI.
+	// Kesalahan non-fatal: field dikosongkan jika tenant tidak ditemukan.
+	if t, tErr := s.tenants.FindByID(ctx, b.TenantID); tErr == nil {
+		out.TenantName = t.Name
+	} else {
+		slog.WarnContext(ctx, "tenant lookup failed for public branch detail (non-fatal)",
+			"branch_id", branchID, "tenant_id", b.TenantID, "error", tErr)
+	}
+
+	// Pengambilan catalog best-effort: error diabaikan agar layar detail
+	// tetap merender dengan data yang berhasil dimuat.
+	trueVal := true
+	srvRows, _, _ := s.services.FindByTenant(ctx, b.TenantID, ServiceFilter{
+		IsActive: &trueVal,
+		Page:     1,
+		Limit:    200,
+	})
+	for _, sv := range srvRows {
+		out.Services = append(out.Services, toServiceDetail(sv))
+	}
+
+	thRows, _, _ := s.therapists.FindByTenant(ctx, b.TenantID, TherapistFilter{
+		BranchID: &b.ID,
+		IsActive: &trueVal,
+		Page:     1,
+		Limit:    200,
+	})
+	for _, t := range thRows {
+		d := toTherapistDetail(t)
+		// Resolusi URL foto terapis (ADR 0011): PhotoKey tidak pernah
+		// dikirim ke wire — hanya resolved URL yang diteruskan.
+		if t.PhotoKey != nil && s.storage != nil {
+			if u, uErr := s.storage.URL(ctx, *t.PhotoKey); uErr == nil {
+				d.PhotoKey = &u // sementara pakai field PhotoKey sebagai carrier
+			} else {
+				slog.WarnContext(ctx, "therapist photo URL resolution failed (non-fatal)",
+					"therapist_id", t.ID, "error", uErr)
+				d.PhotoKey = nil
+			}
+		}
+		out.Therapists = append(out.Therapists, d)
+	}
+
+	roomRows, _, _ := s.rooms.FindByTenant(ctx, b.TenantID, RoomFilter{
+		BranchID: &b.ID,
+		IsActive: &trueVal,
+		Page:     1,
+		Limit:    200,
+	})
+	for _, rm := range roomRows {
+		d := toRoomDetail(rm)
+		// Resolusi URL foto ruangan (ADR 0011).
+		if rm.PhotoKey != nil && s.storage != nil {
+			if u, uErr := s.storage.URL(ctx, *rm.PhotoKey); uErr == nil {
+				d.PhotoKey = &u
+			} else {
+				slog.WarnContext(ctx, "room photo URL resolution failed (non-fatal)",
+					"room_id", rm.ID, "error", uErr)
+				d.PhotoKey = nil
+			}
+		}
+		out.Rooms = append(out.Rooms, d)
+	}
+
+	// Ambil add-on aktif tenant-wide (ADR 0010): add-on tidak terikat cabang,
+	// cukup satu query per tenant. Best-effort: error tidak memblokir response.
+	addonRows, _, _ := s.addons.FindByTenant(ctx, b.TenantID, AddonFilter{
+		IsActive: &trueVal,
+		Page:     1,
+		Limit:    200,
+	})
+	for _, a := range addonRows {
+		out.Addons = append(out.Addons, toAddonDetail(a))
+	}
+
+	return out, nil
+}
 
 // ListPublicBranches returns active branches visible to the public.
 func (s *BookingService) ListPublicBranches(ctx context.Context, filter PublicBranchFilter) ([]PublicBranchSummary, int64, error) {

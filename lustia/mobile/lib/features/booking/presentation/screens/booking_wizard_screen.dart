@@ -1,9 +1,12 @@
 // Layar wizard booking multi-langkah (BK-A5..A9).
 // Satu PageController mengelola semua langkah dalam satu Scaffold.
 
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:smooth_page_indicator/smooth_page_indicator.dart';
 
 import '../../../../shared/utils/currency_formatter.dart';
 import '../../../../shared/utils/date_formatter.dart';
@@ -106,11 +109,9 @@ class _BookingWizardScreenState extends ConsumerState<BookingWizardScreen> {
         ),
       ),
       data: (branch) {
-        // Compute visible steps: skip step 1 if selected service has no addons
-        final selectedSvc = branch.services
-            .where((s) => s.id == wizardState.selectedService)
-            .firstOrNull;
-        final hasAddons = selectedSvc != null && selectedSvc.addons.isNotEmpty;
+        // Compute visible steps: skip step 1 if branch has no addons at all
+        // (ADR-0010 revised — addons are tenant-wide, top-level on branch).
+        final hasAddons = branch.addons.isNotEmpty;
 
         _visibleSteps = [0, if (hasAddons) 1, 2, 3, 4, 5, 6];
         final effectiveTotal = _visibleSteps.length;
@@ -136,37 +137,31 @@ class _BookingWizardScreenState extends ConsumerState<BookingWizardScreen> {
               ),
             ),
           ),
+          bottomNavigationBar: _BottomNavBar(
+            showBack: _currentStep > 0,
+            isLastStep: isLastStep,
+            isValid: isValid,
+            onBack: _prevStep,
+            onNext: () {
+              if (isLastStep) {
+                // Navigate to payment
+                context.push('/branches/${widget.branchId}/book/payment');
+              } else {
+                _nextStep();
+              }
+            },
+          ),
           body: PopScope(
             canPop: _currentStep == 0,
             onPopInvokedWithResult: (didPop, _) {
               if (!didPop) _prevStep();
             },
-            child: Column(
-              children: [
-                Expanded(
-                  child: PageView(
-                    controller: _pageController,
-                    physics: const NeverScrollableScrollPhysics(),
-                    children: _visibleSteps
-                        .map((si) => _buildStep(si, branch, wizardState))
-                        .toList(),
-                  ),
-                ),
-                _BottomNavBar(
-                  showBack: _currentStep > 0,
-                  isLastStep: isLastStep,
-                  isValid: isValid,
-                  onBack: _prevStep,
-                  onNext: () {
-                    if (isLastStep) {
-                      // Navigate to payment
-                      context.push('/branches/${widget.branchId}/book/payment');
-                    } else {
-                      _nextStep();
-                    }
-                  },
-                ),
-              ],
+            child: PageView(
+              controller: _pageController,
+              physics: const NeverScrollableScrollPhysics(),
+              children: _visibleSteps
+                  .map((si) => _buildStep(si, branch, wizardState))
+                  .toList(),
             ),
           ),
         );
@@ -275,7 +270,8 @@ class _AddonPickerStep extends ConsumerWidget {
     final selectedSvc = branch.services
         .where((s) => s.id == state.selectedService)
         .firstOrNull;
-    final addons = selectedSvc?.addons ?? [];
+    // ADR-0010 revised: use top-level branch.addons (tenant-wide).
+    final addons = branch.addons;
 
     var runningTotal = selectedSvc?.priceIdr ?? 0;
     for (final a in addons) {
@@ -331,24 +327,48 @@ class _AddonPickerStep extends ConsumerWidget {
 // ---------------------------------------------------------------------------
 // Step 3 — Pilih Tanggal & Slot (BK-A6)
 // ---------------------------------------------------------------------------
-class _SlotPickerStep extends ConsumerWidget {
+class _SlotPickerStep extends ConsumerStatefulWidget {
   const _SlotPickerStep({required this.branch, required this.state});
   final BranchDetail branch;
   final BookingWizardState state;
 
+  @override
+  ConsumerState<_SlotPickerStep> createState() => _SlotPickerStepState();
+}
+
+class _SlotPickerStepState extends ConsumerState<_SlotPickerStep> {
   static String _fmt(DateTime d) =>
       '${d.year.toString().padLeft(4, '0')}-'
       '${d.month.toString().padLeft(2, '0')}-'
       '${d.day.toString().padLeft(2, '0')}';
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  void initState() {
+    super.initState();
+    // Auto-select today when the user first lands on this step. Without this
+    // the date column shows today highlighted but state.selectedDate stays
+    // null, which keeps the "Lanjut" button disabled even though the visual
+    // suggests today is already chosen.
+    if (widget.state.selectedDate == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ref
+            .read(bookingWizardProvider(widget.state.branchId).notifier)
+            .selectDate(DateTime.now());
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final today = DateTime.now();
     final dates = List.generate(14, (i) => today.add(Duration(days: i)));
-    final selectedDate = state.selectedDate ?? today;
+    final selectedDate = widget.state.selectedDate ?? today;
     final dateStr = _fmt(selectedDate);
+    final state = widget.state;
+    final branch = widget.branch;
     final serviceId = state.selectedService ?? '';
 
     final slotsAsync = serviceId.isNotEmpty
@@ -475,9 +495,25 @@ class _SlotPickerStep extends ConsumerWidget {
                   ),
                 ),
               ),
-              error: (_, __) => Text(
-                'Gagal memuat slot. Coba lagi.',
-                style: theme.textTheme.bodyMedium,
+              error: (_, __) => Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Gagal memuat slot waktu.',
+                    style: theme.textTheme.bodyMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton(
+                    onPressed: () => ref.invalidate(
+                      availabilityProvider(
+                        branchId: branch.id,
+                        serviceId: serviceId,
+                        date: dateStr,
+                      ),
+                    ),
+                    child: const Text('Coba Lagi'),
+                  ),
+                ],
               ),
               data: (slots) {
                 if (slots.isEmpty) {
@@ -534,148 +570,614 @@ class _SlotPickerStep extends ConsumerWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Step 4 — Pilih Terapis (BK-A7)
+// Step 4 — Pilih Terapis (BK-A7) — swipeable card carousel
 // ---------------------------------------------------------------------------
-class _TherapistPickerStep extends ConsumerWidget {
+class _TherapistPickerStep extends ConsumerStatefulWidget {
   const _TherapistPickerStep({required this.therapists, required this.state});
   final List<TherapistItem> therapists;
   final BookingWizardState state;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_TherapistPickerStep> createState() =>
+      _TherapistPickerStepState();
+}
+
+class _TherapistPickerStepState extends ConsumerState<_TherapistPickerStep> {
+  late final PageController _carouselController;
+  int _currentPage = 0;
+
+  // Index 0 = "auto" card; indices 1..n = therapist cards.
+  int get _totalCards => widget.therapists.length + 1;
+
+  @override
+  void initState() {
+    super.initState();
+    // If a therapist is already selected, land on their card; otherwise auto (0).
+    final initial = widget.state.selectedTherapistId != null
+        ? widget.therapists.indexWhere(
+              (t) => t.id == widget.state.selectedTherapistId,
+            ) +
+              1
+        : 0;
+    _carouselController = PageController(
+      viewportFraction: 0.85,
+      initialPage: initial.clamp(0, _totalCards - 1),
+    );
+    _currentPage = initial.clamp(0, _totalCards - 1);
+  }
+
+  @override
+  void dispose() {
+    _carouselController.dispose();
+    super.dispose();
+  }
+
+  void _onPageChanged(int page) {
+    setState(() => _currentPage = page);
+  }
+
+  void _selectCurrentCard() {
+    final notifier =
+        ref.read(bookingWizardProvider(widget.state.branchId).notifier);
+    if (_currentPage == 0) {
+      notifier.selectTherapist(null);
+    } else {
+      final therapist = widget.therapists[_currentPage - 1];
+      notifier.selectTherapist(therapist.id);
+    }
+    // Auto-advance to next step via the parent wizard's _nextStep callback.
+    // We bubble via a post-frame to allow Riverpod state to settle first.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      // Walk up the widget tree to find the wizard state and trigger next step.
+      final wizardState = context.findAncestorStateOfType<_BookingWizardScreenState>();
+      wizardState?._nextStep();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
-    final isAuto = state.selectedTherapistId == null;
 
-    if (therapists.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+    if (widget.therapists.isEmpty) {
+      return _EmptyTherapistState(
+        state: widget.state,
+        onAutoSelect: () => ref
+            .read(bookingWizardProvider(widget.state.branchId).notifier)
+            .selectTherapist(null),
+      );
+    }
+
+    return Column(
+      children: [
+        const SizedBox(height: 12),
+        // Counter + hint label row
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Icon(Icons.person_off_outlined, size: 48, color: cs.error),
-              const SizedBox(height: 16),
               Text(
-                'Tidak ada terapis tersedia di slot ini. Coba slot atau tanggal lain.',
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodyMedium,
+                'Geser untuk pilih terapis',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: cs.onSurfaceVariant,
+                ),
+              ),
+              Text(
+                '${_currentPage + 1} / $_totalCards',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: cs.onSurfaceVariant,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ],
           ),
         ),
-      );
-    }
-
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Text('Pilih Terapis', style: theme.textTheme.titleLarge),
         const SizedBox(height: 8),
-        _autoCard(context, ref, cs, isAuto),
+        // Carousel
+        Expanded(
+          child: PageView.builder(
+            controller: _carouselController,
+            itemCount: _totalCards,
+            onPageChanged: _onPageChanged,
+            itemBuilder: (context, index) {
+              if (index == 0) {
+                return _AutoTherapistCard(
+                  isSelected: widget.state.selectedTherapistId == null,
+                  onSelect: _selectCurrentCard,
+                  isCurrentPage: _currentPage == 0,
+                );
+              }
+              final therapist = widget.therapists[index - 1];
+              return _TherapistCard(
+                therapist: therapist,
+                isSelected:
+                    widget.state.selectedTherapistId == therapist.id,
+                isCurrentPage: _currentPage == index,
+                onSelect: _selectCurrentCard,
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: 12),
+        // Page indicator dots
+        SmoothPageIndicator(
+          controller: _carouselController,
+          count: _totalCards,
+          effect: WormEffect(
+            dotHeight: 8,
+            dotWidth: 8,
+            activeDotColor: cs.primary,
+            dotColor: cs.outlineVariant,
+            spacing: 6,
+          ),
+        ),
         const SizedBox(height: 8),
-        ...therapists.map((t) => _therapistCard(context, ref, cs, t)),
+        // "Lewati & auto-pilih" text button — visible only when not on auto card
+        AnimatedOpacity(
+          opacity: _currentPage != 0 ? 1.0 : 0.0,
+          duration: const Duration(milliseconds: 200),
+          child: TextButton(
+            onPressed: _currentPage != 0
+                ? () {
+                    _carouselController.animateToPage(
+                      0,
+                      duration: const Duration(milliseconds: 300),
+                      curve: Curves.easeInOut,
+                    );
+                    ref
+                        .read(
+                          bookingWizardProvider(widget.state.branchId).notifier,
+                        )
+                        .selectTherapist(null);
+                  }
+                : null,
+            child: Text(
+              'Lewati & auto-pilih',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
       ],
     );
   }
+}
 
-  Widget _autoCard(
-    BuildContext context,
-    WidgetRef ref,
-    ColorScheme cs,
-    bool isAuto,
-  ) {
-    return Card(
-      color: isAuto ? cs.primaryContainer : null,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: isAuto
-            ? BorderSide(color: cs.primary, width: 2)
-            : BorderSide(color: cs.outlineVariant),
-      ),
-      child: Semantics(
-        label: 'Pilih saja — terapis dipilihkan otomatis',
-        child: ListTile(
-          leading: CircleAvatar(
-            radius: 24,
-            backgroundColor: cs.primaryContainer,
-            child: Icon(Icons.person_outline, color: cs.primary),
-          ),
-          title: const Text('Pilih Saja'),
-          subtitle: const Text(
-            'Kami pilihkan terapis terbaik yang tersedia untukmu',
-          ),
-          trailing: isAuto ? Icon(Icons.check_circle, color: cs.primary) : null,
-          onTap: () => ref
-              .read(bookingWizardProvider(state.branchId).notifier)
-              .selectTherapist(null),
-        ),
-      ),
-    );
-  }
+// ---------------------------------------------------------------------------
+// Auto-pick card (first card in carousel)
+// ---------------------------------------------------------------------------
+class _AutoTherapistCard extends StatelessWidget {
+  const _AutoTherapistCard({
+    required this.isSelected,
+    required this.onSelect,
+    required this.isCurrentPage,
+  });
 
-  Widget _therapistCard(
-    BuildContext context,
-    WidgetRef ref,
-    ColorScheme cs,
-    TherapistItem t,
-  ) {
+  final bool isSelected;
+  final VoidCallback onSelect;
+  final bool isCurrentPage;
+
+  @override
+  Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isSelected = state.selectedTherapistId == t.id;
-    return Semantics(
-      label:
-          '${t.fullName}${t.build != null ? ', ${t.build}' : ''}${t.heightCm != null ? ', tinggi ${t.heightCm} cm' : ''}${t.weightKg != null ? ', berat ${t.weightKg} kg' : ''}',
-      child: Card(
-        margin: const EdgeInsets.only(bottom: 8),
-        color: isSelected ? cs.primaryContainer : null,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-          side: isSelected
-              ? BorderSide(color: cs.primary, width: 2)
-              : BorderSide(color: cs.outlineVariant),
-        ),
-        child: ListTile(
-          leading: CircleAvatar(
-            radius: 24,
-            backgroundImage: t.photoUrl != null
-                ? NetworkImage(t.photoUrl!)
-                : null,
-            child: t.photoUrl == null
-                ? Text(t.initials, style: theme.textTheme.bodyMedium)
-                : null,
+    final cs = theme.colorScheme;
+
+    return AnimatedScale(
+      scale: isCurrentPage ? 1.0 : 0.94,
+      duration: const Duration(milliseconds: 200),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 400),
+          child: Card(
+            elevation: isCurrentPage ? 4 : 1,
+            clipBehavior: Clip.antiAlias,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+              side: isSelected
+                  ? BorderSide(color: cs.primary, width: 2)
+                  : BorderSide(color: cs.outlineVariant),
+            ),
+            child: Column(
+              children: [
+                // Photo area
+                Container(
+                  height: 280,
+                  color: cs.primaryContainer,
+                  child: Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.auto_awesome,
+                          size: 72,
+                          color: cs.primary,
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          'Sistem Pilihkan',
+                          style: theme.textTheme.titleLarge?.copyWith(
+                            color: cs.onPrimaryContainer,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                // Content
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Sistem Pilihkan',
+                          style: theme.textTheme.titleLarge?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Kami akan otomatis pilih terapis yang tersedia.',
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: cs.onSurfaceVariant,
+                          ),
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const Spacer(),
+                        SizedBox(
+                          width: double.infinity,
+                          child: FilledButton(
+                            onPressed: onSelect,
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                if (isSelected) ...[
+                                  const Icon(Icons.check_circle, size: 18),
+                                  const SizedBox(width: 6),
+                                ],
+                                const Text('Pilih Terapis Ini'),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
-          title: Text(t.fullName, style: theme.textTheme.titleMedium),
-          subtitle: Wrap(
-            spacing: 4,
-            children: [
-              if (t.heightCm != null) _BodyBadge('${t.heightCm} cm'),
-              if (t.weightKg != null) _BodyBadge('${t.weightKg} kg'),
-              if (t.build != null && t.build!.isNotEmpty) _BodyBadge(t.build!),
-            ],
-          ),
-          trailing: isSelected
-              ? Icon(Icons.check_circle, color: cs.primary)
-              : null,
-          onTap: () => ref
-              .read(bookingWizardProvider(state.branchId).notifier)
-              .selectTherapist(t.id),
         ),
       ),
     );
   }
 }
 
-class _BodyBadge extends StatelessWidget {
-  const _BodyBadge(this.label);
-  final String label;
+// ---------------------------------------------------------------------------
+// Individual therapist card
+// ---------------------------------------------------------------------------
+class _TherapistCard extends StatelessWidget {
+  const _TherapistCard({
+    required this.therapist,
+    required this.isSelected,
+    required this.isCurrentPage,
+    required this.onSelect,
+  });
+
+  final TherapistItem therapist;
+  final bool isSelected;
+  final bool isCurrentPage;
+  final VoidCallback onSelect;
+
+  String _capitalizeFirst(String s) =>
+      s.isEmpty ? s : s[0].toUpperCase() + s.substring(1).toLowerCase();
 
   @override
   Widget build(BuildContext context) {
-    return Chip(
-      label: Text(label, style: Theme.of(context).textTheme.bodySmall),
-      padding: const EdgeInsets.symmetric(horizontal: 6),
-      visualDensity: VisualDensity.compact,
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    return AnimatedScale(
+      scale: isCurrentPage ? 1.0 : 0.94,
+      duration: const Duration(milliseconds: 200),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 400),
+          child: Semantics(
+            label: 'Terapis ${therapist.fullName}',
+            child: Card(
+              elevation: isCurrentPage ? 4 : 1,
+              clipBehavior: Clip.antiAlias,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+                side: isSelected
+                    ? BorderSide(color: cs.primary, width: 2)
+                    : BorderSide(color: cs.outlineVariant),
+              ),
+              child: Column(
+                children: [
+                  // Photo — 280px tall, full-width within card
+                  SizedBox(
+                    height: 280,
+                    width: double.infinity,
+                    child: therapist.photoUrl != null
+                        ? CachedNetworkImage(
+                            imageUrl: therapist.photoUrl!,
+                            fit: BoxFit.cover,
+                            placeholder: (_, __) => Container(
+                              color: cs.surfaceContainerHighest,
+                              child: const Center(
+                                child: CircularProgressIndicator.adaptive(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                            ),
+                            errorWidget: (_, __, ___) =>
+                                _PhotoPlaceholder(cs: cs),
+                          )
+                        : _PhotoPlaceholder(cs: cs),
+                  ),
+                  // Card body
+                  Expanded(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Name
+                          Text(
+                            therapist.fullName,
+                            style: theme.textTheme.titleLarge?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          // Body badges row
+                          if (therapist.heightCm != null ||
+                              therapist.weightKg != null ||
+                              (therapist.build != null &&
+                                  therapist.build!.isNotEmpty)) ...[
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 4,
+                              children: [
+                                if (therapist.heightCm != null)
+                                  _BodyBadge(
+                                    '${therapist.heightCm} cm',
+                                    cs: cs,
+                                    theme: theme,
+                                  ),
+                                if (therapist.weightKg != null)
+                                  _BodyBadge(
+                                    '${therapist.weightKg} kg',
+                                    cs: cs,
+                                    theme: theme,
+                                  ),
+                                if (therapist.build != null &&
+                                    therapist.build!.isNotEmpty)
+                                  _BodyBadge(
+                                    _capitalizeFirst(therapist.build!),
+                                    cs: cs,
+                                    theme: theme,
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                          ],
+                          // CTA button
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton(
+                              onPressed: onSelect,
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  if (isSelected) ...[
+                                    const Icon(Icons.check_circle, size: 18),
+                                    const SizedBox(width: 6),
+                                  ],
+                                  const Text('Pilih Terapis Ini'),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Photo placeholder (no photo or load error)
+// ---------------------------------------------------------------------------
+class _PhotoPlaceholder extends StatelessWidget {
+  const _PhotoPlaceholder({required this.cs});
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: cs.surfaceContainerHighest,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.person, size: 72, color: cs.onSurfaceVariant),
+          const SizedBox(height: 8),
+          Text(
+            'Belum ada foto',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: cs.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Empty state — no therapists registered
+// ---------------------------------------------------------------------------
+class _EmptyTherapistState extends ConsumerWidget {
+  const _EmptyTherapistState({
+    required this.state,
+    required this.onAutoSelect,
+  });
+
+  final BookingWizardState state;
+  final VoidCallback onAutoSelect;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    return Column(
+      children: [
+        const SizedBox(height: 12),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Text(
+            'Geser untuk pilih terapis',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: cs.onSurfaceVariant,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Expanded(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 400),
+                child: Card(
+                  elevation: 4,
+                  clipBehavior: Clip.antiAlias,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20),
+                    side: BorderSide(color: cs.primary, width: 2),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        height: 280,
+                        color: cs.primaryContainer,
+                        child: Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.auto_awesome,
+                                size: 72,
+                                color: cs.primary,
+                              ),
+                              const SizedBox(height: 12),
+                              Text(
+                                'Sistem Pilihkan',
+                                style: theme.textTheme.titleLarge?.copyWith(
+                                  color: cs.onPrimaryContainer,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Belum ada terapis terdaftar di cabang ini.',
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              'Kami akan otomatis pilih saat hari pelayanan.',
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                color: cs.onSurfaceVariant,
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            SizedBox(
+                              width: double.infinity,
+                              child: FilledButton(
+                                onPressed: onAutoSelect,
+                                child: const Text('Lanjut'),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        // Static single dot indicator
+        Container(
+          width: 8,
+          height: 8,
+          margin: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            color: cs.primary,
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(height: 16),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Body badge pill chip
+// ---------------------------------------------------------------------------
+class _BodyBadge extends StatelessWidget {
+  const _BodyBadge(this.label, {required this.cs, required this.theme});
+  final String label;
+  final ColorScheme cs;
+  final ThemeData theme;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: cs.primaryContainer,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        label,
+        style: theme.textTheme.bodySmall?.copyWith(
+          color: cs.onPrimaryContainer,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
     );
   }
 }
@@ -892,6 +1394,7 @@ class _CustomerInfoStepState extends ConsumerState<_CustomerInfoStep> {
       child: Form(
         key: _formKey,
         onChanged: _save,
+        autovalidateMode: AutovalidateMode.onUserInteraction,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -944,12 +1447,7 @@ class _CustomerInfoStepState extends ConsumerState<_CustomerInfoStep> {
               },
             ),
             const SizedBox(height: 16),
-            Text(
-              'Dengan melanjutkan, kamu menyetujui Syarat & Ketentuan dan memahami bahwa booking yang sudah dibayar tidak dapat dibatalkan.',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
+            const _TncNotice(),
           ],
         ),
       ),
@@ -973,8 +1471,8 @@ class _SummaryStep extends ConsumerWidget {
     final service = branch.services
         .where((s) => s.id == state.selectedService)
         .firstOrNull;
-    final selectedAddons = branch.services
-        .expand((s) => s.addons)
+    // ADR-0010 revised: addons are top-level on branch, not nested per service.
+    final selectedAddons = branch.addons
         .where((a) => state.selectedAddonIds.contains(a.id))
         .toList();
     final therapist = state.selectedTherapistId != null
@@ -992,12 +1490,19 @@ class _SummaryStep extends ConsumerWidget {
     }
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text('Ringkasan Booking', style: theme.textTheme.titleLarge),
-          const SizedBox(height: 16),
+          const SizedBox(height: 4),
+          Text(
+            'Periksa kembali, lalu tap Bayar di bawah.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: cs.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 12),
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -1115,6 +1620,109 @@ class _PriceRow extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
+// T&C notice with tappable link (BK-R17)
+// ---------------------------------------------------------------------------
+class _TncNotice extends StatefulWidget {
+  const _TncNotice();
+
+  @override
+  State<_TncNotice> createState() => _TncNoticeState();
+}
+
+class _TncNoticeState extends State<_TncNotice> {
+  late final TapGestureRecognizer _tapRecognizer;
+
+  @override
+  void initState() {
+    super.initState();
+    _tapRecognizer = TapGestureRecognizer()
+      ..onTap = () => _showTncModal(context);
+  }
+
+  @override
+  void dispose() {
+    _tapRecognizer.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return RichText(
+      text: TextSpan(
+        style: theme.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+        children: [
+          const TextSpan(text: 'Dengan melanjutkan, kamu menyetujui '),
+          TextSpan(
+            text: 'Syarat & Ketentuan',
+            recognizer: _tapRecognizer,
+            style: TextStyle(
+              color: cs.primary,
+              decoration: TextDecoration.underline,
+            ),
+          ),
+          const TextSpan(
+            text:
+                ' dan memahami bahwa booking yang sudah dibayar tidak dapat dibatalkan.',
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showTncModal(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: 0.6,
+        expand: false,
+        builder: (_, ctrl) => Padding(
+          padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Syarat & Ketentuan',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child: SingleChildScrollView(
+                  controller: ctrl,
+                  child: const Text(
+                    '1. Booking yang sudah dibayar tidak dapat dibatalkan atau dikembalikan.\n\n'
+                    '2. Kode booking hanya berlaku untuk tanggal dan waktu yang telah dipilih.\n\n'
+                    '3. Lustia berhak membatalkan booking jika terdapat pelanggaran ketentuan, dengan pemberitahuan kepada pelanggan.\n\n'
+                    '4. Pelanggan wajib hadir tepat waktu. Keterlambatan lebih dari 15 menit dapat mengakibatkan pembatalan sesi.\n\n'
+                    '(Konten lengkap akan diperbarui sebelum peluncuran resmi.)',
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Bottom nav bar
 // ---------------------------------------------------------------------------
 class _BottomNavBar extends StatelessWidget {
@@ -1134,36 +1742,63 @@ class _BottomNavBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: EdgeInsets.fromLTRB(
-        16,
-        12,
-        16,
-        12 + MediaQuery.of(context).viewPadding.bottom,
-      ),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withAlpha(15),
-            blurRadius: 6,
-            offset: const Offset(0, -2),
+    final cs = Theme.of(context).colorScheme;
+    // Explicit colors so the button is visible regardless of theme override
+    // anomalies on Flutter web (FilledButton sometimes renders transparent
+    // when running in `flutter run -d chrome` debug build).
+    return Material(
+      elevation: 8,
+      color: cs.surface,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          child: Row(
+            children: [
+              if (showBack) ...[
+                SizedBox(
+                  height: 56,
+                  child: OutlinedButton(
+                    onPressed: onBack,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: cs.primary,
+                      side: BorderSide(color: cs.primary),
+                      textStyle: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    child: const Text('Kembali'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+              ],
+              Expanded(
+                child: SizedBox(
+                  height: 56,
+                  child: ElevatedButton(
+                    onPressed: isValid ? onNext : null,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: cs.primary,
+                      foregroundColor: cs.onPrimary,
+                      disabledBackgroundColor: cs.primary.withAlpha(80),
+                      disabledForegroundColor: cs.onPrimary.withAlpha(180),
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      textStyle: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    child: Text(isLastStep ? 'Bayar' : 'Lanjut'),
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: Row(
-        children: [
-          if (showBack) ...[
-            OutlinedButton(onPressed: onBack, child: const Text('Kembali')),
-            const SizedBox(width: 12),
-          ],
-          Expanded(
-            child: FilledButton(
-              onPressed: isValid ? onNext : null,
-              child: Text(isLastStep ? 'Bayar' : 'Lanjut'),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }

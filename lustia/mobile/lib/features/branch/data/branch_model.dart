@@ -2,6 +2,32 @@
 // dan GET /api/v1/public/branches/:id (full detail).
 // Menggunakan hand-written factory constructors karena freezed code-gen
 // memerlukan build_runner di CI — model ini cukup sederhana untuk manual.
+//
+// Kontrak backend (diperbarui Phase 5 — lihat docs/API_CONTRACT.md):
+//   operational_hours: [{day: int, open: "HH:MM", close: "HH:MM"}, ...]
+//   day: 1=Senin … 7=Minggu (ISO weekday)
+
+/// Satu entri jam operasional cabang.
+final class OperationalHourEntry {
+  const OperationalHourEntry({
+    required this.day,
+    required this.open,
+    required this.close,
+  });
+
+  /// ISO weekday: 1=Senin … 7=Minggu.
+  final int day;
+  final String open;
+  final String close;
+
+  factory OperationalHourEntry.fromJson(Map<String, dynamic> json) {
+    return OperationalHourEntry(
+      day: (json['day'] as num).toInt(),
+      open: (json['open'] as String?) ?? '',
+      close: (json['close'] as String?) ?? '',
+    );
+  }
+}
 
 /// Model ringkas untuk daftar cabang (dari /public/branches).
 final class BranchSummary {
@@ -18,7 +44,7 @@ final class BranchSummary {
     this.distanceMeters,
     this.photoUrl,
     this.categories = const [],
-    this.operationalHours,
+    this.operationalHours = const [],
   });
 
   final String id;
@@ -33,7 +59,7 @@ final class BranchSummary {
   final double? distanceMeters;
   final String? photoUrl;
   final List<String> categories;
-  final Map<String, dynamic>? operationalHours;
+  final List<OperationalHourEntry> operationalHours;
 
   factory BranchSummary.fromJson(Map<String, dynamic> json) {
     return BranchSummary(
@@ -53,8 +79,18 @@ final class BranchSummary {
               ?.map((e) => e as String)
               .toList() ??
           [],
-      operationalHours: json['operational_hours'] as Map<String, dynamic>?,
+      operationalHours: _parseOperationalHours(json['operational_hours']),
     );
+  }
+
+  static List<OperationalHourEntry> _parseOperationalHours(dynamic raw) {
+    if (raw is List) {
+      return raw
+          .whereType<Map<String, dynamic>>()
+          .map(OperationalHourEntry.fromJson)
+          .toList();
+    }
+    return [];
   }
 
   /// Singkatan alamat untuk card: "Kota" saja.
@@ -208,10 +244,11 @@ final class BranchDetail {
     required this.services,
     required this.therapists,
     required this.rooms,
+    this.addons = const [],
     this.latitude,
     this.longitude,
     this.photoUrl,
-    this.operationalHours,
+    this.operationalHours = const [],
   });
 
   final String id;
@@ -225,10 +262,20 @@ final class BranchDetail {
   final List<ServiceItem> services;
   final List<TherapistItem> therapists;
   final List<RoomItem> rooms;
+
+  /// Tenant-wide add-ons returned at the top level of the branch detail
+  /// response (ADR-0010 revised). Consumers should use this list; the
+  /// per-service [ServiceItem.addons] field is retained for compatibility
+  /// but is no longer populated by the API.
+  final List<AddonItem> addons;
+
   final double? latitude;
   final double? longitude;
   final String? photoUrl;
-  final Map<String, dynamic>? operationalHours;
+
+  /// Backend returns a list: [{day: int, open: "HH:MM", close: "HH:MM"}, ...]
+  /// day 1=Senin … 7=Minggu (ISO weekday).
+  final List<OperationalHourEntry> operationalHours;
 
   String get fullAddress {
     final parts = [
@@ -239,27 +286,21 @@ final class BranchDetail {
     return parts.join(', ');
   }
 
-  /// Jam buka hari ini dari operational_hours JSON.
-  /// Format operational_hours: {"1": {"open":"09:00","close":"21:00"}, ...}
-  /// weekday: 1=Senin … 7=Minggu
+  /// Jam buka hari ini.
   String get todayHours {
-    if (operationalHours == null) return 'Lihat di cabang';
+    if (operationalHours.isEmpty) return 'Lihat di cabang';
     final today = DateTime.now().weekday; // 1=Monday … 7=Sunday
-    final key = today.toString();
-    final dayData = operationalHours![key];
-    if (dayData == null) return 'Tutup hari ini';
-    if (dayData is Map) {
-      final open = dayData['open'] ?? '';
-      final close = dayData['close'] ?? '';
-      if (open.isNotEmpty && close.isNotEmpty) return '$open – $close';
+    final entry = operationalHours.where((e) => e.day == today).firstOrNull;
+    if (entry == null) return 'Tutup hari ini';
+    if (entry.open.isNotEmpty && entry.close.isNotEmpty) {
+      return '${entry.open} – ${entry.close}';
     }
     return 'Lihat di cabang';
   }
 
   bool get isOpenToday {
-    if (operationalHours == null) return false;
-    final today = DateTime.now().weekday.toString();
-    return operationalHours!.containsKey(today);
+    final today = DateTime.now().weekday;
+    return operationalHours.any((e) => e.day == today);
   }
 
   /// Services grouped by category.
@@ -296,10 +337,17 @@ final class BranchDetail {
               ?.map((e) => RoomItem.fromJson(e as Map<String, dynamic>))
               .toList() ??
           [],
+      addons:
+          (json['addons'] as List<dynamic>?)
+              ?.map((e) => AddonItem.fromJson(e as Map<String, dynamic>))
+              .toList() ??
+          [],
       latitude: (json['latitude'] as num?)?.toDouble(),
       longitude: (json['longitude'] as num?)?.toDouble(),
       photoUrl: json['photo_url'] as String?,
-      operationalHours: json['operational_hours'] as Map<String, dynamic>?,
+      operationalHours: BranchSummary._parseOperationalHours(
+        json['operational_hours'],
+      ),
     );
   }
 }

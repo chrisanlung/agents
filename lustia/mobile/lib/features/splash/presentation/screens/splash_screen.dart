@@ -33,8 +33,8 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
   }
 
   Future<void> _init() async {
-    // Minimum 1.5s splash
-    Future.delayed(const Duration(milliseconds: 1500), () {
+    // Minimum 400ms splash — just long enough to avoid flash, no slower.
+    Future.delayed(const Duration(milliseconds: 400), () {
       if (mounted) {
         setState(() => _splashMinDone = true);
         _maybeNavigate();

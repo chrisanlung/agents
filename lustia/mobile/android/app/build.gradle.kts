@@ -21,7 +21,7 @@ android {
 
     defaultConfig {
         applicationId = "id.lustia.lustia_mobile"
-        minSdk = 21  // Android 5.0 — ADR 0014a §14
+        minSdk = flutter.minSdkVersion  // Android 5.0 — ADR 0014a §14
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

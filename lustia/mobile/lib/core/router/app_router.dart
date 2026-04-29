@@ -12,6 +12,7 @@ import '../../features/booking/presentation/screens/payment_screen.dart';
 import '../../features/branch/presentation/screens/branch_detail_screen.dart';
 import '../../features/branch/presentation/screens/branch_list_screen.dart';
 import '../../features/favorites/presentation/screens/favorites_screen.dart';
+import '../../features/find_booking/presentation/screens/find_booking_screen.dart';
 import '../../features/my_bookings/presentation/screens/booking_detail_screen.dart';
 import '../../features/my_bookings/presentation/screens/my_bookings_screen.dart';
 import '../../features/settings/presentation/screens/settings_screen.dart';
@@ -33,6 +34,7 @@ abstract final class AppRoutes {
   static const String myBookings = '/my-bookings';
   static const String bookingDetail = '/my-bookings/:code';
   static const String settings = '/settings';
+  static const String findBooking = '/find-booking';
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +173,12 @@ GoRouter appRouter(AppRouterRef ref) {
             ],
           ),
         ],
+      ),
+
+      // Cari Booking by code — full-screen, bisa dibuka dari mana saja
+      GoRoute(
+        path: AppRoutes.findBooking,
+        builder: (context, state) => const FindBookingScreen(),
       ),
 
       // Branch detail — push di atas shell

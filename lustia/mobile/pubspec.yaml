@@ -14,6 +14,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   cached_network_image: ^3.4.1
   qr_flutter: ^4.1.0
+  smooth_page_indicator: ^1.2.0
 
   # State management
   flutter_riverpod: ^2.6.1

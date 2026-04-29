@@ -2,10 +2,12 @@
 // Menampilkan rincian harga + simulasi pembayaran.
 // Phase 6+: ganti dengan Midtrans Snap WebView.
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../../core/exceptions/app_exception.dart';
 import '../../../../core/storage/recent_bookings_storage.dart';
 import '../../../../shared/utils/currency_formatter.dart';
 import '../../../../shared/utils/date_formatter.dart';
@@ -13,6 +15,7 @@ import '../../../branch/presentation/providers/branch_detail_provider.dart';
 import '../../../my_bookings/data/recent_bookings_notifier.dart';
 import '../../data/booking_model.dart';
 import '../providers/booking_provider.dart';
+import 'booking_confirmation_screen.dart';
 
 class PaymentScreen extends ConsumerWidget {
   const PaymentScreen({super.key, required this.branchId});
@@ -224,12 +227,21 @@ class PaymentScreen extends ConsumerWidget {
     if (!context.mounted) return;
 
     if (response == null) {
-      final errMsg =
-          ref.read(bookingSubmitProvider).error?.toString() ??
-          'Terjadi kesalahan. Coba lagi.';
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(errMsg)));
+      final errMsg = _friendlyPaymentError(
+        ref.read(bookingSubmitProvider).error,
+      );
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(errMsg),
+          duration: const Duration(seconds: 5),
+          action: SnackBarAction(
+            label: 'Ganti Slot',
+            onPressed: () {
+              if (context.mounted) context.pop();
+            },
+          ),
+        ),
+      );
       return;
     }
 
@@ -250,7 +262,8 @@ class PaymentScreen extends ConsumerWidget {
     // Navigate to confirmation (replace so user can't go back to payment)
     context.go(
       '/confirmation/${response.code}',
-      extra: _ConfirmationExtra(
+      extra: BookingConfirmationData(
+        code: response.code,
         branchName: branchName,
         serviceName: serviceName,
         scheduledStart: response.scheduledStart,
@@ -260,25 +273,38 @@ class PaymentScreen extends ConsumerWidget {
       ),
     );
   }
-}
 
-/// Data passed to confirmation screen via go_router extra.
-class _ConfirmationExtra {
-  const _ConfirmationExtra({
-    required this.branchName,
-    required this.serviceName,
-    required this.scheduledStart,
-    required this.scheduledEnd,
-    required this.totalPriceIdr,
-    this.therapistName,
-  });
+  /// Converts a raw error to a user-friendly Indonesian message (BK-R15).
+  /// The ErrorInterceptor stashes an [AppException] in
+  /// [DioException.requestOptions.extra['appException']], so we extract it
+  /// from there when the provider error is a raw [DioException].
+  String _friendlyPaymentError(Object? raw) {
+    final err = _resolveAppException(raw) ?? raw;
+    if (err is ConflictException) {
+      return 'Slot ini baru saja terisi. Silakan pilih slot lain.';
+    }
+    if (err is NetworkException) {
+      return 'Tidak dapat terhubung ke server. Periksa koneksi internet Anda.';
+    }
+    if (err is RateLimitException) {
+      return 'Terlalu banyak percobaan. Coba lagi sebentar lagi.';
+    }
+    if (err is AppException) {
+      return err.message;
+    }
+    return 'Terjadi kesalahan. Coba lagi.';
+  }
 
-  final String branchName;
-  final String serviceName;
-  final String scheduledStart;
-  final String scheduledEnd;
-  final int totalPriceIdr;
-  final String? therapistName;
+  /// Extracts [AppException] from [DioException.requestOptions.extra] if
+  /// the ErrorInterceptor has stashed one there.
+  AppException? _resolveAppException(Object? err) {
+    if (err is AppException) return err;
+    if (err is DioException) {
+      final stashed = err.requestOptions.extra['appException'];
+      if (stashed is AppException) return stashed;
+    }
+    return null;
+  }
 }
 
 class _PriceRow extends StatelessWidget {
