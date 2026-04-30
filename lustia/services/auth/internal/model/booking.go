@@ -19,8 +19,10 @@ const (
 type BookingPaymentMethod = string
 
 const (
-	BookingPaymentMidtrans   BookingPaymentMethod = "midtrans"
-	BookingPaymentAtVenue    BookingPaymentMethod = "paid_at_venue"
+	BookingPaymentMidtrans BookingPaymentMethod = "midtrans"
+	BookingPaymentAtVenue  BookingPaymentMethod = "paid_at_venue"
+	BookingPaymentIPaymu   BookingPaymentMethod = "ipaymu"
+	BookingPaymentDummy    BookingPaymentMethod = "dummy"
 )
 
 // Booking maps to the booking table (migration 000025).

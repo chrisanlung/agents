@@ -6,7 +6,7 @@ part of 'booking_provider.dart';
 // RiverpodGenerator
 // **************************************************************************
 
-String _$bookingWizardHash() => r'aacb6ca68b7c77587fb23d091120d52dcc6f8c78';
+String _$paymentStatusHash() => r'1efea3e212ac0f4342352539b1d452e8349c301e';
 
 /// Copied from Dart SDK
 class _SystemHash {
@@ -28,6 +28,163 @@ class _SystemHash {
     return 0x1fffffff & (hash + ((0x00003fff & hash) << 15));
   }
 }
+
+/// Provider polling status pembayaran — ADR 0015 §2.7.
+///
+/// Emit stream [PaymentStatusResponse] setiap 5 detik.
+/// Stream berhenti secara otomatis saat status terminal
+/// (paid / expired / failed) atau saat provider di-dispose.
+///
+/// Copied from [paymentStatus].
+@ProviderFor(paymentStatus)
+const paymentStatusProvider = PaymentStatusFamily();
+
+/// Provider polling status pembayaran — ADR 0015 §2.7.
+///
+/// Emit stream [PaymentStatusResponse] setiap 5 detik.
+/// Stream berhenti secara otomatis saat status terminal
+/// (paid / expired / failed) atau saat provider di-dispose.
+///
+/// Copied from [paymentStatus].
+class PaymentStatusFamily extends Family<AsyncValue<PaymentStatusResponse>> {
+  /// Provider polling status pembayaran — ADR 0015 §2.7.
+  ///
+  /// Emit stream [PaymentStatusResponse] setiap 5 detik.
+  /// Stream berhenti secara otomatis saat status terminal
+  /// (paid / expired / failed) atau saat provider di-dispose.
+  ///
+  /// Copied from [paymentStatus].
+  const PaymentStatusFamily();
+
+  /// Provider polling status pembayaran — ADR 0015 §2.7.
+  ///
+  /// Emit stream [PaymentStatusResponse] setiap 5 detik.
+  /// Stream berhenti secara otomatis saat status terminal
+  /// (paid / expired / failed) atau saat provider di-dispose.
+  ///
+  /// Copied from [paymentStatus].
+  PaymentStatusProvider call(String bookingCode) {
+    return PaymentStatusProvider(bookingCode);
+  }
+
+  @override
+  PaymentStatusProvider getProviderOverride(
+    covariant PaymentStatusProvider provider,
+  ) {
+    return call(provider.bookingCode);
+  }
+
+  static const Iterable<ProviderOrFamily>? _dependencies = null;
+
+  @override
+  Iterable<ProviderOrFamily>? get dependencies => _dependencies;
+
+  static const Iterable<ProviderOrFamily>? _allTransitiveDependencies = null;
+
+  @override
+  Iterable<ProviderOrFamily>? get allTransitiveDependencies =>
+      _allTransitiveDependencies;
+
+  @override
+  String? get name => r'paymentStatusProvider';
+}
+
+/// Provider polling status pembayaran — ADR 0015 §2.7.
+///
+/// Emit stream [PaymentStatusResponse] setiap 5 detik.
+/// Stream berhenti secara otomatis saat status terminal
+/// (paid / expired / failed) atau saat provider di-dispose.
+///
+/// Copied from [paymentStatus].
+class PaymentStatusProvider
+    extends AutoDisposeStreamProvider<PaymentStatusResponse> {
+  /// Provider polling status pembayaran — ADR 0015 §2.7.
+  ///
+  /// Emit stream [PaymentStatusResponse] setiap 5 detik.
+  /// Stream berhenti secara otomatis saat status terminal
+  /// (paid / expired / failed) atau saat provider di-dispose.
+  ///
+  /// Copied from [paymentStatus].
+  PaymentStatusProvider(String bookingCode)
+    : this._internal(
+        (ref) => paymentStatus(ref as PaymentStatusRef, bookingCode),
+        from: paymentStatusProvider,
+        name: r'paymentStatusProvider',
+        debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
+            ? null
+            : _$paymentStatusHash,
+        dependencies: PaymentStatusFamily._dependencies,
+        allTransitiveDependencies:
+            PaymentStatusFamily._allTransitiveDependencies,
+        bookingCode: bookingCode,
+      );
+
+  PaymentStatusProvider._internal(
+    super._createNotifier, {
+    required super.name,
+    required super.dependencies,
+    required super.allTransitiveDependencies,
+    required super.debugGetCreateSourceHash,
+    required super.from,
+    required this.bookingCode,
+  }) : super.internal();
+
+  final String bookingCode;
+
+  @override
+  Override overrideWith(
+    Stream<PaymentStatusResponse> Function(PaymentStatusRef provider) create,
+  ) {
+    return ProviderOverride(
+      origin: this,
+      override: PaymentStatusProvider._internal(
+        (ref) => create(ref as PaymentStatusRef),
+        from: from,
+        name: null,
+        dependencies: null,
+        allTransitiveDependencies: null,
+        debugGetCreateSourceHash: null,
+        bookingCode: bookingCode,
+      ),
+    );
+  }
+
+  @override
+  AutoDisposeStreamProviderElement<PaymentStatusResponse> createElement() {
+    return _PaymentStatusProviderElement(this);
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return other is PaymentStatusProvider && other.bookingCode == bookingCode;
+  }
+
+  @override
+  int get hashCode {
+    var hash = _SystemHash.combine(0, runtimeType.hashCode);
+    hash = _SystemHash.combine(hash, bookingCode.hashCode);
+
+    return _SystemHash.finish(hash);
+  }
+}
+
+@Deprecated('Will be removed in 3.0. Use Ref instead')
+// ignore: unused_element
+mixin PaymentStatusRef on AutoDisposeStreamProviderRef<PaymentStatusResponse> {
+  /// The parameter `bookingCode` of this provider.
+  String get bookingCode;
+}
+
+class _PaymentStatusProviderElement
+    extends AutoDisposeStreamProviderElement<PaymentStatusResponse>
+    with PaymentStatusRef {
+  _PaymentStatusProviderElement(super.provider);
+
+  @override
+  String get bookingCode => (origin as PaymentStatusProvider).bookingCode;
+}
+
+String _$bookingWizardHash() => r'aacb6ca68b7c77587fb23d091120d52dcc6f8c78';
 
 abstract class _$BookingWizard
     extends BuildlessAutoDisposeNotifier<BookingWizardState> {
@@ -160,9 +317,11 @@ class _BookingWizardProviderElement
   String get branchId => (origin as BookingWizardProvider).branchId;
 }
 
-String _$bookingSubmitHash() => r'daf40d3c77f3deb440c08d308e3f70a9f3cad4f7';
+String _$bookingSubmitHash() => r'7bc5bc0005cc7936cb59d8a4a5ae88108e05b835';
 
-/// Provider untuk submit booking dan dummy payment.
+/// Provider untuk submit booking — ADR 0015 §2.8.
+/// Hanya membuat booking; tidak lagi memanggil dummy webhook.
+/// Setelah submit berhasil, PaymentScreen menangani polling status.
 ///
 /// Copied from [BookingSubmit].
 @ProviderFor(BookingSubmit)

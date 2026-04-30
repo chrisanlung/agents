@@ -1,24 +1,612 @@
-// Layar pembayaran DUMMY (BK-A10).
-// Menampilkan rincian harga + simulasi pembayaran.
-// Phase 6+: ganti dengan Midtrans Snap WebView.
+// Layar pembayaran QRIS (BK-A10) — ADR 0015 §2.7–§2.8.
+// Menampilkan QR QRIS dari response booking, countdown, polling status,
+// dan tombol simulasi untuk DEV flavor.
+
+import 'dart:async';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../../core/config/app_config.dart';
 import '../../../../core/exceptions/app_exception.dart';
 import '../../../../core/storage/recent_bookings_storage.dart';
 import '../../../../shared/utils/currency_formatter.dart';
-import '../../../../shared/utils/date_formatter.dart';
+import '../../../../shared/widgets/qr_display.dart';
 import '../../../branch/presentation/providers/branch_detail_provider.dart';
 import '../../../my_bookings/data/recent_bookings_notifier.dart';
 import '../../data/booking_model.dart';
+import '../../data/booking_repository.dart';
 import '../providers/booking_provider.dart';
 import 'booking_confirmation_screen.dart';
 
-class PaymentScreen extends ConsumerWidget {
-  const PaymentScreen({super.key, required this.branchId});
+// ---------------------------------------------------------------------------
+// Route extra — dados passados de BookingWizard → PaymentScreen.
+// ---------------------------------------------------------------------------
+
+/// Dados da resposta de criação de booking necessários na tela de pagamento.
+final class PaymentRouteData {
+  const PaymentRouteData({
+    required this.code,
+    required this.totalPriceIdr,
+    required this.scheduledStart,
+    required this.scheduledEnd,
+    required this.branchName,
+    required this.serviceName,
+    this.qrString,
+    this.qrExpiresAt,
+    this.paymentReference,
+  });
+
+  final String code;
+  final int totalPriceIdr;
+  final String scheduledStart;
+  final String scheduledEnd;
+  final String branchName;
+  final String serviceName;
+
+  /// QRIS string — dirender oleh qr_flutter.
+  final String? qrString;
+
+  /// ISO-8601 string batas waktu QR.
+  final String? qrExpiresAt;
+  final String? paymentReference;
+}
+
+// ---------------------------------------------------------------------------
+// Public entry-point widget — receives route data, handles submit if needed.
+// ---------------------------------------------------------------------------
+
+/// Layar pembayaran.
+/// Menerima [branchId] (untuk wizard state) dan [routeData] (route extra)
+/// yang sudah diisi oleh [BookingWizardScreen] setelah submit booking berhasil.
+class PaymentScreen extends ConsumerStatefulWidget {
+  const PaymentScreen({super.key, required this.branchId, this.routeData});
+
+  final String branchId;
+
+  /// Jika null, screen ini menampilkan form submit (legacy).
+  /// Jika tidak null, screen langsung ke mode QR polling.
+  final PaymentRouteData? routeData;
+
+  @override
+  ConsumerState<PaymentScreen> createState() => _PaymentScreenState();
+}
+
+class _PaymentScreenState extends ConsumerState<PaymentScreen> {
+  // -- Countdown timer state --
+  Timer? _countdownTimer;
+  Duration _remaining = Duration.zero;
+  bool _qrExpired = false;
+
+  // -- Polling state --
+  /// Last known status from polling; null = belum ada respons.
+  String? _polledStatus;
+
+  /// Pesan error polling inline (non-fatal).
+  String? _pollingError;
+  bool _simulatingPayment = false;
+
+  PaymentRouteData? get _data => widget.routeData;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_data?.qrExpiresAt != null) {
+      _startCountdown(_data!.qrExpiresAt!);
+    }
+  }
+
+  @override
+  void dispose() {
+    _countdownTimer?.cancel();
+    super.dispose();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Countdown
+  // ---------------------------------------------------------------------------
+
+  void _startCountdown(String isoExpiry) {
+    DateTime expiry;
+    try {
+      expiry = DateTime.parse(isoExpiry);
+    } catch (_) {
+      return;
+    }
+
+    void tick() {
+      if (!mounted) return;
+      final now = DateTime.now();
+      final diff = expiry.difference(now);
+      if (diff.isNegative || diff == Duration.zero) {
+        setState(() {
+          _remaining = Duration.zero;
+          _qrExpired = true;
+        });
+        _countdownTimer?.cancel();
+      } else {
+        setState(() => _remaining = diff);
+      }
+    }
+
+    tick(); // immediate first tick
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) => tick());
+  }
+
+  String get _countdownLabel {
+    final m = _remaining.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = _remaining.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  // ---------------------------------------------------------------------------
+  // Polling listener callback
+  // ---------------------------------------------------------------------------
+
+  void _onPollingUpdate(
+    AsyncValue<PaymentStatusResponse>? previous,
+    AsyncValue<PaymentStatusResponse> next,
+  ) {
+    if (!mounted) return;
+
+    next.whenOrNull(
+      data: (status) {
+        setState(() {
+          _polledStatus = status.status;
+          _pollingError = null;
+        });
+
+        if (_polledStatus == 'paid') {
+          _navigateToConfirmation();
+        } else if (_polledStatus == 'expired' || _polledStatus == 'failed') {
+          setState(() => _qrExpired = true);
+          _countdownTimer?.cancel();
+        }
+      },
+      error: (err, _) {
+        final friendly = _friendlyPollError(err);
+        setState(() => _pollingError = friendly);
+      },
+    );
+  }
+
+  String _friendlyPollError(Object? err) {
+    final app = _resolveAppException(err);
+    if (app is RateLimitException) {
+      return 'Terlalu banyak permintaan. Menunggu...';
+    }
+    if (app is NetworkException) {
+      return 'Tidak dapat terhubung. Memeriksa ulang...';
+    }
+    if (app is AppException) return app.message;
+    return 'Gagal memeriksa status. Memeriksa ulang...';
+  }
+
+  AppException? _resolveAppException(Object? err) {
+    if (err is AppException) return err;
+    if (err is DioException) {
+      final stashed = err.requestOptions.extra['appException'];
+      if (stashed is AppException) return stashed;
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Navigate to confirmation
+  // ---------------------------------------------------------------------------
+
+  void _navigateToConfirmation() {
+    if (!mounted || _data == null) return;
+    final d = _data!;
+    _countdownTimer?.cancel();
+
+    context.go(
+      '/confirmation/${d.code}',
+      extra: BookingConfirmationData(
+        code: d.code,
+        branchName: d.branchName,
+        serviceName: d.serviceName,
+        scheduledStart: d.scheduledStart,
+        scheduledEnd: d.scheduledEnd,
+        totalPriceIdr: d.totalPriceIdr,
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Dev simulate payment
+  // ---------------------------------------------------------------------------
+
+  Future<void> _simulatePayment() async {
+    if (_data == null || _simulatingPayment) return;
+    setState(() => _simulatingPayment = true);
+    try {
+      await ref
+          .read(bookingRepositoryProvider)
+          .triggerDummyPayment(_data!.code);
+    } catch (_) {
+      // Polling will detect state change; ignore errors here.
+    } finally {
+      if (mounted) setState(() => _simulatingPayment = false);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Build
+  // ---------------------------------------------------------------------------
+
+  @override
+  Widget build(BuildContext context) {
+    // If routeData is null, this is in legacy-submit mode (shouldn't happen
+    // post-Phase-6 but guard gracefully).
+    if (_data == null) {
+      return _LegacySubmitPaymentScreen(branchId: widget.branchId);
+    }
+
+    // Watch polling stream — listen for side-effects (navigate / update state).
+    ref.listen(paymentStatusProvider(_data!.code), _onPollingUpdate);
+
+    if (_qrExpired) {
+      return _ExpiredScreen(
+        onNewBooking: () => context.go('/branches/${widget.branchId}/book'),
+      );
+    }
+
+    return _QrPaymentBody(
+      data: _data!,
+      countdownLabel: _countdownLabel,
+      polledStatus: _polledStatus,
+      pollingError: _pollingError,
+      simulatingPayment: _simulatingPayment,
+      onSimulate: AppConfig.isDev ? _simulatePayment : null,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// QR payment body
+// ---------------------------------------------------------------------------
+
+class _QrPaymentBody extends StatelessWidget {
+  const _QrPaymentBody({
+    required this.data,
+    required this.countdownLabel,
+    required this.polledStatus,
+    required this.pollingError,
+    required this.simulatingPayment,
+    required this.onSimulate,
+  });
+
+  final PaymentRouteData data;
+  final String countdownLabel;
+  final String? polledStatus;
+  final String? pollingError;
+  final bool simulatingPayment;
+  final VoidCallback? onSimulate; // null in prod
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final qrValue = data.qrString ?? data.code;
+
+    // Format booking code as XXXX-XXXX
+    final rawCode = data.code.replaceAll('-', '');
+    final formattedCode = rawCode.length >= 8
+        ? '${rawCode.substring(0, 4)}-${rawCode.substring(4, 8)}'
+        : data.code;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Pembayaran')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+        child: Column(
+          children: [
+            // -- Total & code --
+            Text(
+              CurrencyFormatter.formatRupiah(data.totalPriceIdr),
+              style: theme.textTheme.headlineMedium?.copyWith(
+                fontWeight: FontWeight.w700,
+                color: cs.primary,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Booking #$formattedCode',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 24),
+
+            // -- QR code --
+            Card(
+              elevation: 2,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Semantics(
+                  label:
+                      'QR QRIS untuk pembayaran booking $formattedCode. '
+                      'Scan dengan aplikasi e-wallet atau m-banking.',
+                  child: QrDisplay(data: qrValue),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // -- Instruction --
+            Text(
+              'Scan QR ini dengan Dana / GoPay / OVO / m-banking BCA / dll.',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: cs.onSurfaceVariant,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 20),
+
+            // -- Countdown --
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.timer_outlined, size: 18, color: cs.primary),
+                const SizedBox(width: 6),
+                Text(
+                  'Sisa waktu: $countdownLabel',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // -- Polling status indicator --
+            _PollingStatusBadge(
+              status: polledStatus,
+              errorMessage: pollingError,
+            ),
+            const SizedBox(height: 24),
+
+            // -- Action buttons --
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.copy_outlined),
+                    label: const Text('Salin QRIS'),
+                    onPressed: () => _copyQris(context, qrValue),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.close),
+                    label: const Text('Batal'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: cs.error,
+                      side: BorderSide(color: cs.error),
+                    ),
+                    onPressed: () => _confirmCancel(context),
+                  ),
+                ),
+              ],
+            ),
+
+            // -- DEV mode only --
+            if (onSimulate != null) ...[
+              const SizedBox(height: 24),
+              const _DevModeDivider(),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                icon: simulatingPayment
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator.adaptive(
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : const Icon(Icons.bolt),
+                label: Text(
+                  simulatingPayment ? 'Memproses...' : 'Simulasikan Pembayaran',
+                ),
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 48),
+                  backgroundColor: Colors.amber.shade700,
+                  foregroundColor: Colors.black,
+                ),
+                onPressed: simulatingPayment ? null : onSimulate,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _copyQris(BuildContext context, String qrValue) {
+    Clipboard.setData(ClipboardData(text: qrValue));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('QRIS disalin ke clipboard.')));
+  }
+
+  void _confirmCancel(BuildContext context) {
+    showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Batalkan pembayaran?'),
+        content: const Text(
+          'Booking akan tetap tersimpan namun belum dibayar. '
+          'Kamu bisa melanjutkan pembayaran nanti via "Cari Booking".',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Kembali'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Batalkan'),
+          ),
+        ],
+      ),
+    ).then((confirmed) {
+      if (confirmed == true && context.mounted) {
+        context.go('/');
+      }
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sub-widgets
+// ---------------------------------------------------------------------------
+
+class _PollingStatusBadge extends StatelessWidget {
+  const _PollingStatusBadge({required this.status, this.errorMessage});
+
+  final String? status;
+  final String? errorMessage;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
+    if (errorMessage != null) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.warning_amber_outlined, size: 16, color: cs.error),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              errorMessage!,
+              style: TextStyle(color: cs.error, fontSize: 13),
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        SizedBox(
+          width: 16,
+          height: 16,
+          child: CircularProgressIndicator.adaptive(
+            strokeWidth: 2,
+            valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          'Menunggu pembayaran...',
+          style: TextStyle(color: cs.onSurfaceVariant, fontSize: 14),
+        ),
+      ],
+    );
+  }
+}
+
+class _DevModeDivider extends StatelessWidget {
+  const _DevModeDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        const Expanded(child: Divider()),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Text(
+            'DEV MODE',
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.amber.shade700,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1,
+            ),
+          ),
+        ),
+        const Expanded(child: Divider()),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Expired screen
+// ---------------------------------------------------------------------------
+
+class _ExpiredScreen extends StatelessWidget {
+  const _ExpiredScreen({required this.onNewBooking});
+
+  final VoidCallback onNewBooking;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Pembayaran')),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.timer_off_outlined, size: 64, color: cs.error),
+              const SizedBox(height: 16),
+              Text(
+                'QR kadaluarsa',
+                style: theme.textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Waktu pembayaran sudah habis. Silakan buat booking baru.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: cs.onSurfaceVariant,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 32),
+              FilledButton.icon(
+                icon: const Icon(Icons.refresh),
+                label: const Text('Buat Booking Baru'),
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 52),
+                ),
+                onPressed: onNewBooking,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy submit screen — shown only when routeData is null.
+// Handles booking submission then navigates to QR mode.
+// ---------------------------------------------------------------------------
+
+class _LegacySubmitPaymentScreen extends ConsumerWidget {
+  const _LegacySubmitPaymentScreen({required this.branchId});
+
   final String branchId;
 
   @override
@@ -44,16 +632,6 @@ class PaymentScreen extends ConsumerWidget {
             .expand((s) => s.addons)
             .where((a) => wizardState.selectedAddonIds.contains(a.id))
             .toList();
-        final therapist = wizardState.selectedTherapistId != null
-            ? branch.therapists
-                  .where((t) => t.id == wizardState.selectedTherapistId)
-                  .firstOrNull
-            : null;
-        final room = wizardState.selectedRoomId != null
-            ? branch.rooms
-                  .where((r) => r.id == wizardState.selectedRoomId)
-                  .firstOrNull
-            : null;
 
         var total = service?.priceIdr ?? 0;
         for (final a in selectedAddons) {
@@ -74,137 +652,27 @@ class PaymentScreen extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // DUMMY MODE notice
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Theme.of(
-                        context,
-                      ).colorScheme.secondary.withAlpha(30),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.info_outline,
-                          color: Theme.of(context).colorScheme.secondary,
-                        ),
-                        const SizedBox(width: 8),
-                        const Expanded(
-                          child: Text(
-                            'MODE PENGUJIAN — Klik Bayar untuk simulasi pembayaran sukses.',
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Price breakdown
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Rincian Pembayaran',
-                            style: Theme.of(context).textTheme.titleMedium,
-                          ),
-                          const Divider(height: 20),
-                          if (service != null)
-                            _PriceRow(
-                              'Layanan: ${service.name}',
-                              service.priceIdr,
-                            ),
-                          ...selectedAddons.map(
-                            (a) => _PriceRow(a.name, a.priceIdr),
-                          ),
-                          const Divider(height: 20),
-                          _PriceRow('Total', total, bold: true),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Booking summary
-                  Card(
-                    child: Column(
-                      children: [
-                        if (wizardState.selectedSlot != null)
-                          ListTile(
-                            leading: const Icon(Icons.calendar_today_outlined),
-                            title: Text(
-                              '${DateFormatter.formatDate(wizardState.selectedSlot!.start)} • ${DateFormatter.formatTime(wizardState.selectedSlot!.start)}',
-                            ),
-                          ),
-                        ListTile(
-                          leading: const Icon(Icons.person_outlined),
-                          title: Text(
-                            therapist?.fullName ??
-                                'Terapis dipilihkan otomatis',
-                          ),
-                        ),
-                        ListTile(
-                          leading: const Icon(Icons.meeting_room_outlined),
-                          title: Text(
-                            room?.name ?? 'Ruangan dipilihkan otomatis',
-                          ),
-                        ),
-                      ],
-                    ),
+                  _PriceCard(
+                    service: service,
+                    selectedAddons: selectedAddons,
+                    total: total,
                   ),
                 ],
               ),
             ),
-            bottomNavigationBar: Container(
-              padding: EdgeInsets.fromLTRB(
-                16,
-                12,
-                16,
-                12 + MediaQuery.of(context).viewPadding.bottom,
-              ),
-              color: Theme.of(context).colorScheme.surface,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  FilledButton.icon(
-                    icon: isLoading
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator.adaptive(
-                              strokeWidth: 2,
-                            ),
-                          )
-                        : const Icon(Icons.lock_outlined),
-                    label: Text(
-                      isLoading
-                          ? 'Memproses...'
-                          : 'Bayar — ${CurrencyFormatter.formatRupiah(total)}',
+            bottomNavigationBar: _SubmitBar(
+              isLoading: isLoading,
+              total: total,
+              onTap: isLoading
+                  ? null
+                  : () => _submitPayment(
+                      context,
+                      ref,
+                      wizardState,
+                      branch.name,
+                      service?.name ?? '',
+                      total,
                     ),
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size(double.infinity, 52),
-                    ),
-                    onPressed: isLoading
-                        ? null
-                        : () => _submitPayment(
-                            context,
-                            ref,
-                            wizardState,
-                            branch.name,
-                            service?.name ?? '',
-                            total,
-                          ),
-                  ),
-                  if (isLoading)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 4),
-                      child: LinearProgressIndicator(),
-                    ),
-                ],
-              ),
             ),
           ),
         );
@@ -215,7 +683,7 @@ class PaymentScreen extends ConsumerWidget {
   Future<void> _submitPayment(
     BuildContext context,
     WidgetRef ref,
-    BookingWizardState wizard,
+    dynamic wizard,
     String branchName,
     String serviceName,
     int total,
@@ -255,29 +723,28 @@ class PaymentScreen extends ConsumerWidget {
     );
     await ref.read(recentBookingsProvider.notifier).add(recentBooking);
 
-    // Reset wizard state
+    // Reset wizard
     ref.read(bookingWizardProvider(branchId).notifier).reset();
 
     if (!context.mounted) return;
-    // Navigate to confirmation (replace so user can't go back to payment)
-    context.go(
-      '/confirmation/${response.code}',
-      extra: BookingConfirmationData(
-        code: response.code,
-        branchName: branchName,
-        serviceName: serviceName,
-        scheduledStart: response.scheduledStart,
-        scheduledEnd: response.scheduledEnd,
-        totalPriceIdr: response.totalPriceIdr,
-        therapistName: null,
-      ),
+
+    // Navigate to payment QR screen with data
+    final routeData = PaymentRouteData(
+      code: response.code,
+      totalPriceIdr: response.totalPriceIdr,
+      scheduledStart: response.scheduledStart,
+      scheduledEnd: response.scheduledEnd,
+      branchName: branchName,
+      serviceName: serviceName,
+      qrString: response.qrString,
+      qrExpiresAt: response.qrExpiresAt,
+      paymentReference: response.paymentReference,
     );
+
+    // Replace current route so back-button from QR screen goes to wizard.
+    context.replace('/branches/$branchId/book/payment', extra: routeData);
   }
 
-  /// Converts a raw error to a user-friendly Indonesian message (BK-R15).
-  /// The ErrorInterceptor stashes an [AppException] in
-  /// [DioException.requestOptions.extra['appException']], so we extract it
-  /// from there when the provider error is a raw [DioException].
   String _friendlyPaymentError(Object? raw) {
     final err = _resolveAppException(raw) ?? raw;
     if (err is ConflictException) {
@@ -295,8 +762,6 @@ class PaymentScreen extends ConsumerWidget {
     return 'Terjadi kesalahan. Coba lagi.';
   }
 
-  /// Extracts [AppException] from [DioException.requestOptions.extra] if
-  /// the ErrorInterceptor has stashed one there.
   AppException? _resolveAppException(Object? err) {
     if (err is AppException) return err;
     if (err is DioException) {
@@ -307,8 +772,104 @@ class PaymentScreen extends ConsumerWidget {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Price card sub-widget (used in legacy submit mode)
+// ---------------------------------------------------------------------------
+
+class _PriceCard extends StatelessWidget {
+  const _PriceCard({
+    required this.service,
+    required this.selectedAddons,
+    required this.total,
+  });
+
+  final dynamic service;
+  final List<dynamic> selectedAddons;
+  final int total;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Rincian Pembayaran',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const Divider(height: 20),
+            if (service != null)
+              _PriceRow('Layanan: ${service.name}', service.priceIdr as int),
+            ...selectedAddons.map(
+              (a) => _PriceRow(a.name as String, a.priceIdr as int),
+            ),
+            const Divider(height: 20),
+            _PriceRow('Total', total, bold: true),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SubmitBar extends StatelessWidget {
+  const _SubmitBar({
+    required this.isLoading,
+    required this.total,
+    required this.onTap,
+  });
+
+  final bool isLoading;
+  final int total;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: EdgeInsets.fromLTRB(
+        16,
+        12,
+        16,
+        12 + MediaQuery.of(context).viewPadding.bottom,
+      ),
+      color: Theme.of(context).colorScheme.surface,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FilledButton.icon(
+            icon: isLoading
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator.adaptive(strokeWidth: 2),
+                  )
+                : const Icon(Icons.lock_outlined),
+            label: Text(
+              isLoading
+                  ? 'Memproses...'
+                  : 'Bayar — ${CurrencyFormatter.formatRupiah(total)}',
+            ),
+            style: FilledButton.styleFrom(
+              minimumSize: const Size(double.infinity, 52),
+            ),
+            onPressed: onTap,
+          ),
+          if (isLoading)
+            const Padding(
+              padding: EdgeInsets.only(top: 4),
+              child: LinearProgressIndicator(),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _PriceRow extends StatelessWidget {
   const _PriceRow(this.label, this.amount, {this.bold = false});
+
   final String label;
   final int amount;
   final bool bold;

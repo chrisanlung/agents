@@ -46,11 +46,14 @@ type BookingService struct {
 	therapists   TherapistRepository
 	therapistSvc TherapistServiceRepository
 	availability TherapistAvailabilityRepository
-	payment      MidtransClient
-	audit        AuditRepository
-	email        EmailSender
-	clock        Clock
-	tx           TxManager
+	// payment is the Phase 6 PaymentProvider (ADR 0015). Replaces Phase 5
+	// MidtransClient. BookingService only calls InitiateForBooking — the
+	// webhook path is now handled by PaymentService.
+	paymentSvc PaymentServiceIface
+	audit       AuditRepository
+	email       EmailSender
+	clock       Clock
+	tx          TxManager
 	// storage digunakan untuk menghasilkan signed URL foto terapis/ruangan
 	// pada endpoint publik (ADR 0011).
 	storage Storage
@@ -68,7 +71,7 @@ func NewBookingService(
 	therapists TherapistRepository,
 	therapistSvc TherapistServiceRepository,
 	availability TherapistAvailabilityRepository,
-	payment MidtransClient,
+	paymentSvc PaymentServiceIface,
 	audit AuditRepository,
 	email EmailSender,
 	clock Clock,
@@ -85,7 +88,7 @@ func NewBookingService(
 		therapists:   therapists,
 		therapistSvc: therapistSvc,
 		availability: availability,
-		payment:      payment,
+		paymentSvc:   paymentSvc,
 		audit:        audit,
 		email:        email,
 		clock:        clock,
@@ -252,35 +255,25 @@ func (s *BookingService) CreatePublic(ctx context.Context, in PublicCreateBookin
 		return CreateBookingOutput{}, fmt.Errorf("save booking addons: %w", err)
 	}
 
-	// Create payment transaction via the injected adapter.
-	payResp, err := s.payment.CreateTransaction(ctx, MidtransPaymentRequest{
-		OrderID:       code,
-		GrossAmount:   total,
-		CustomerName:  in.CustomerName,
-		CustomerEmail: in.CustomerEmail,
-		CustomerPhone: in.CustomerPhone,
-		Description:   fmt.Sprintf("Booking %s di %s", svc.Name, branch.Name),
-	})
+	// Phase 6 (ADR 0015 §2.8): Initiate QRIS payment transaction.
+	// PaymentService creates the payment_transaction row + calls provider.CreateQR.
+	// BookingService stays HTTP-agnostic — no provider details leak here.
+	payOut, err := s.paymentSvc.InitiateForBooking(
+		ctx,
+		b.ID,
+		tenantID,
+		total,
+		code, // orderID = booking.code
+		in.CustomerName,
+		in.CustomerEmail,
+		in.CustomerPhone,
+		fmt.Sprintf("Booking %s di %s", svc.Name, branch.Name),
+	)
 	if err != nil {
-		slog.WarnContext(ctx, "payment create_transaction failed (non-fatal; booking still created)", "error", err)
-	}
-
-	// For dummy adapter: immediately set payment_reference and mark pending.
-	// The real adapter will receive webhook confirmation later.
-	if payResp.Status == MidtransStatusPaid {
-		paidAt := now.Format(time.RFC3339)
-		snapToken := payResp.SnapToken
-		_, _ = s.bookings.TransitionStatus(ctx, TransitionStatusInput{
-			BookingID:        b.ID,
-			ExpectedStatus:   model.BookingStatusPendingPayment,
-			NewStatus:        model.BookingStatusPaid,
-			PaidAt:           &paidAt,
-			PaymentReference: &snapToken,
-		})
-		b.Status = model.BookingStatusPaid
-	} else if payResp.SnapToken != "" {
-		// Store the snap token as payment reference for later webhook resolution.
-		_ = s.storePaymentReference(ctx, b.ID, payResp.SnapToken)
+		// Non-fatal: booking is created; QR generation failed.
+		// Customer can retry via RetryQR endpoint. Log + continue.
+		slog.WarnContext(ctx, "payment initiate failed (non-fatal; booking still created)",
+			"booking_id", b.ID, "error", err)
 	}
 
 	// Send confirmation email (non-fatal on error).
@@ -299,11 +292,14 @@ func (s *BookingService) CreatePublic(ctx context.Context, in PublicCreateBookin
 		return CreateBookingOutput{}, err
 	}
 
-	return CreateBookingOutput{
-		BookingDetail: detail,
-		SnapToken:     payResp.SnapToken,
-		RedirectURL:   payResp.RedirectURL,
-	}, nil
+	out := CreateBookingOutput{BookingDetail: detail}
+	if payOut.QRString != "" {
+		out.QRString = payOut.QRString
+		out.QRImageURL = payOut.QRImageURL
+		out.QRExpiresAt = payOut.QRExpiresAt.Format(time.RFC3339)
+		out.PaymentReference = payOut.ProviderReference
+	}
+	return out, nil
 }
 
 // GetPublicByCode returns a masked booking view for the public code-lookup endpoint.
@@ -782,10 +778,21 @@ func (s *BookingService) Cancel(ctx context.Context, in CancelInput) (BookingDet
 	return s.buildBookingDetail(ctx, b)
 }
 
-// SweepExpired transitions all overdue pending_payment bookings to expired.
-// Returns the count of swept rows. Called lazily; also safe to call from a cron.
+// SweepExpired transitions all overdue pending_payment bookings AND their
+// associated payment_transaction rows to expired in the same call.
+// Returns the count of booking rows swept.
+// ADR 0015 §5: payment_transaction rows WHERE status='awaiting' AND
+// qr_expires_at < now() are also expired here.
 func (s *BookingService) SweepExpired(ctx context.Context) (int, error) {
-	return s.bookings.SweepExpired(ctx)
+	swept, err := s.bookings.SweepExpired(ctx)
+	if err != nil {
+		return swept, err
+	}
+	// Sweep expired payment_transaction rows alongside bookings (non-fatal).
+	if _, ptxnErr := s.paymentSvc.SweepExpiredTransactions(ctx); ptxnErr != nil {
+		slog.WarnContext(ctx, "payment_transaction expiry sweep error (non-fatal)", "error", ptxnErr)
+	}
+	return swept, nil
 }
 
 // GetReportSummary returns aggregate booking metrics for the reports page.
@@ -798,123 +805,14 @@ func (s *BookingService) GetReportSummary(ctx context.Context, in GetReportInput
 	})
 }
 
-// HandlePaymentWebhook processes a Midtrans webhook notification.
-// Implements H-4 (amount validation) and H-5 (race condition handling).
-func (s *BookingService) HandlePaymentWebhook(ctx context.Context, n MidtransWebhookNotification) error {
-	// Delegate signature verification + status normalisation to the adapter.
-	// The real adapter (when implemented) verifies SHA-512 signature (H-3)
-	// before calling HandleNotification. The dummy adapter skips signature.
-	status, err := s.payment.HandleNotification(ctx, n)
-	if err != nil {
-		return fmt.Errorf("payment handle notification: %w", err)
-	}
-
-	if status != MidtransStatusPaid {
-		// Not a settlement/capture — nothing to transition.
-		return nil
-	}
-
-	// Find booking by payment_reference (= code, which is used as order_id).
-	b, err := s.bookings.FindByPaymentReference(ctx, n.OrderID)
-	if err != nil {
-		if errors.Is(err, constants.ErrBookingNotFound) {
-			// Unknown reference — log and return 200 (no retry storm).
-			slog.WarnContext(ctx, "webhook: booking not found for order_id", "order_id", n.OrderID)
-			return nil
-		}
-		return fmt.Errorf("webhook find booking: %w", err)
-	}
-
-	// H-4: Validate gross_amount >= booking total.
-	// Dummy adapter sends empty GrossAmount — skip check for dummy (always paid).
-	if n.GrossAmount != "" {
-		paid, err := parseIDRAmount(n.GrossAmount)
-		if err != nil || paid < b.TotalPriceIDR {
-			slog.WarnContext(ctx, "webhook: payment amount mismatch",
-				"order_id", n.OrderID,
-				"expected", b.TotalPriceIDR,
-				"received_str", n.GrossAmount,
-			)
-			_ = s.audit.Append(ctx, AuditEntry{
-				TenantID:     &b.TenantID,
-				Action:       "payment.amount_mismatch",
-				ResourceType: "booking",
-				ResourceID:   b.ID,
-				Meta: map[string]interface{}{
-					"order_id":     n.OrderID,
-					"expected_idr": b.TotalPriceIDR,
-					"received_str": n.GrossAmount,
-				},
-			})
-			// Return nil so the caller returns HTTP 200 (no Midtrans retry).
-			return nil
-		}
-	}
-
-	// H-5: Conditional UPDATE — WHERE status='pending_payment'.
-	now := s.clock.Now().Format(time.RFC3339)
-	ref := n.OrderID
-	rowsAffected, err := s.bookings.TransitionStatus(ctx, TransitionStatusInput{
-		BookingID:        b.ID,
-		ExpectedStatus:   model.BookingStatusPendingPayment,
-		NewStatus:        model.BookingStatusPaid,
-		PaidAt:           &now,
-		PaymentReference: &ref,
-	})
-	if err != nil {
-		return fmt.Errorf("webhook transition status: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		// H-5: No rows updated — look up current status to diagnose.
-		current, lookupErr := s.bookings.FindByID(ctx, b.ID)
-		if lookupErr != nil {
-			slog.ErrorContext(ctx, "webhook: cannot look up booking after zero rowsAffected",
-				"booking_id", b.ID, "error", lookupErr)
-			return nil
-		}
-		switch current.Status {
-		case model.BookingStatusPaid:
-			// Idempotent webhook delivery — already paid, do nothing.
-			slog.InfoContext(ctx, "webhook: idempotent — booking already paid",
-				"booking_id", b.ID, "order_id", n.OrderID)
-		case model.BookingStatusExpired:
-			// H-5: Customer paid at T=14m59s, expiry sweep ran before webhook.
-			// Alert ops — may need manual intervention.
-			slog.WarnContext(ctx, "webhook: payment for expired booking",
-				"booking_id", b.ID, "order_id", n.OrderID)
-			_ = s.audit.Append(ctx, AuditEntry{
-				TenantID:     &b.TenantID,
-				Action:       "payment.expired_booking_payment",
-				ResourceType: "booking",
-				ResourceID:   b.ID,
-				Meta: map[string]interface{}{
-					"order_id":          n.OrderID,
-					"payment_reference": n.OrderID,
-				},
-			})
-		default:
-			slog.WarnContext(ctx, "webhook: unexpected status after zero rowsAffected",
-				"booking_id", b.ID, "status", current.Status)
-		}
-		return nil
-	}
-
-	// Send confirmation email after successful payment (non-fatal).
-	go func() {
-		svc, _ := s.services.FindByID(context.Background(), b.ServiceID)
-		branch, _ := s.branches.FindByID(context.Background(), b.BranchID)
-		svcName, branchName := "", ""
-		if svc != nil {
-			svcName = svc.Name
-		}
-		if branch != nil {
-			branchName = branch.Name
-		}
-		s.sendConfirmationEmail(context.Background(), b, svcName, branchName)
-	}()
-
-	return nil
+// HandlePaymentWebhook is kept for backward-compat on the BookingServiceIface.
+// Phase 6: this method is a thin pass-through to PaymentService.HandleWebhook.
+// The raw-body + headers path is handled by the payment controller directly;
+// this shim exists so the controller interface does not break during transition.
+//
+// Deprecated: call PaymentServiceIface.HandleWebhook directly from the controller.
+func (s *BookingService) HandlePaymentWebhook(ctx context.Context, rawPayload []byte, headers map[string]string) error {
+	return s.paymentSvc.HandleWebhook(ctx, rawPayload, headers)
 }
 
 // ListAvailableSlots computes available time slots for a service on a given date.

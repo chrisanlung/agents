@@ -150,6 +150,24 @@ func RespondDomainError(c *gin.Context, err error) {
 	case errors.Is(err, constants.ErrTherapistNotForService):
 		RespondError(c, http.StatusConflict, constants.CodeTherapistNotForService, err.Error())
 
+	// ADR 0015 — Phase 6 Payment + Settlement.
+	case errors.Is(err, constants.ErrPaymentTransactionNotFound):
+		RespondError(c, http.StatusNotFound, "PAYMENT_TRANSACTION_NOT_FOUND", "payment transaction not found")
+	case errors.Is(err, constants.ErrPaymentQRExpired):
+		RespondError(c, http.StatusGone, "PAYMENT_QR_EXPIRED", err.Error())
+	case errors.Is(err, constants.ErrPaymentAlreadyPaid):
+		RespondError(c, http.StatusConflict, "PAYMENT_ALREADY_PAID", err.Error())
+	case errors.Is(err, constants.ErrPaymentRetryNotAllowed):
+		RespondError(c, http.StatusUnprocessableEntity, "PAYMENT_RETRY_NOT_ALLOWED", err.Error())
+	case errors.Is(err, constants.ErrSettlementBatchNotFound):
+		RespondError(c, http.StatusNotFound, "SETTLEMENT_BATCH_NOT_FOUND", "settlement batch not found")
+	case errors.Is(err, constants.ErrDisbursementNotFound):
+		RespondError(c, http.StatusNotFound, "DISBURSEMENT_NOT_FOUND", err.Error())
+	case errors.Is(err, constants.ErrDisbursementInvalidTransition):
+		RespondError(c, http.StatusUnprocessableEntity, "DISBURSEMENT_INVALID_TRANSITION", err.Error())
+	case errors.Is(err, constants.ErrDisbursementNotCancellable):
+		RespondError(c, http.StatusUnprocessableEntity, "DISBURSEMENT_NOT_CANCELLABLE", err.Error())
+
 	// Generic service-layer validation error — 400 VALIDATION with the
 	// service's message so the caller sees what went wrong.
 	case errors.Is(err, constants.ErrInvalidInput):

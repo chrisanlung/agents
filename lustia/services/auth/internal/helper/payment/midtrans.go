@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // RealMidtransClient is a STUB for the real Midtrans Snap adapter.
@@ -42,52 +43,43 @@ func NewRealMidtrans(serverKey, clientKey, environment string) (*RealMidtransCli
 	}, nil
 }
 
-// CreateTransaction creates a Midtrans Snap transaction.
-// STUB — returns ErrNotImplemented until real integration ships.
-func (r *RealMidtransClient) CreateTransaction(_ context.Context, _ PaymentRequest) (PaymentResponse, error) {
-	return PaymentResponse{}, errors.New("midtrans adapter not yet implemented")
+// CreateQR is a stub — RealMidtransClient is superseded by IPaymuProvider in
+// Phase 6 (ADR 0015). Kept in the codebase for historical reference only.
+// Returns an error on any call.
+func (r *RealMidtransClient) CreateQR(_ context.Context, _ CreateQRRequest) (CreateQRResponse, error) {
+	return CreateQRResponse{}, errors.New("midtrans adapter superseded by ipaymu in Phase 6 (ADR 0015)")
 }
 
-// HandleNotification processes a Midtrans webhook notification.
-//
-// H-3 (SECURITY.md): When implemented, this method MUST:
-//  1. Verify the SHA-512 signature using subtle.ConstantTimeCompare before
-//     any DB read or state transition:
-//
-//     expected := sha512.Sum512([]byte(
-//         notification.OrderID + notification.StatusCode +
-//         notification.GrossAmount + r.serverKey,
-//     ))
-//     if !subtle.ConstantTimeCompare(
-//         []byte(hex.EncodeToString(expected[:])),
-//         []byte(notification.SignatureKey),
-//     ) {
-//         return StatusFailed, ErrWebhookSignatureInvalid
-//     }
-//
-//  2. Only proceed to status mapping after signature passes.
-//  3. Return StatusPaid only for "settlement" or "capture" transaction status.
-//
-// STUB — returns ErrNotImplemented until real integration ships.
-func (r *RealMidtransClient) HandleNotification(_ context.Context, _ WebhookNotification) (PaymentStatus, error) {
-	return StatusFailed, errors.New("midtrans adapter not yet implemented")
+// VerifyWebhook is a stub — see CreateQR comment.
+func (r *RealMidtransClient) VerifyWebhook(_ context.Context, _ []byte, _ map[string]string) (PaymentNotification, error) {
+	return PaymentNotification{}, errors.New("midtrans adapter superseded by ipaymu in Phase 6 (ADR 0015)")
+}
+
+// GetStatus is a stub — see CreateQR comment.
+func (r *RealMidtransClient) GetStatus(_ context.Context, _ string) (PaymentStatus, error) {
+	return StatusFailed, errors.New("midtrans adapter superseded by ipaymu in Phase 6 (ADR 0015)")
+}
+
+// ListSettlements is a stub — see CreateQR comment.
+func (r *RealMidtransClient) ListSettlements(_ context.Context, _ time.Time) ([]SettlementItem, error) {
+	return nil, errors.New("midtrans adapter superseded by ipaymu in Phase 6 (ADR 0015)")
 }
 
 // VerifySignature verifies the Midtrans SHA-512 webhook signature.
-// Exposed for testing and for the real HandleNotification implementation.
+// Kept for reference; not used in Phase 6 (iPaymu uses HMAC-SHA256).
 //
 // Signature formula (Midtrans docs):
 //
 //	SHA-512(order_id + status_code + gross_amount + server_key)
 //
 // Uses subtle.ConstantTimeCompare to prevent timing-oracle attacks (H-3).
-func (r *RealMidtransClient) VerifySignature(n WebhookNotification) bool {
-	raw := n.OrderID + n.StatusCode + n.GrossAmount + r.serverKey
+func (r *RealMidtransClient) VerifySignature(orderID, statusCode, grossAmount, signatureKey string) bool {
+	raw := orderID + statusCode + grossAmount + r.serverKey
 	computed := sha512.Sum512([]byte(raw))
 	expected := hex.EncodeToString(computed[:])
 	return subtle.ConstantTimeCompare(
 		[]byte(strings.ToLower(expected)),
-		[]byte(strings.ToLower(n.SignatureKey)),
+		[]byte(strings.ToLower(signatureKey)),
 	) == 1
 }
 

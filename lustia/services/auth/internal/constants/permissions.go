@@ -57,4 +57,11 @@ const (
 	PermBookingCheckin  = "booking.checkin"
 	PermBookingComplete = "booking.complete"
 	PermBookingNoShow   = "booking.no_show"
+
+	// ADR 0015 — Phase 6 Payment + Settlement (migration 000030).
+	PermFinanceRead         = "finance.read"
+	PermFinanceReadAll      = "finance.read_all"
+	PermDisbursementCreate  = "disbursement.create"
+	PermDisbursementTransfer = "disbursement.transfer"
+	PermSettlementReconcile = "settlement.reconcile"
 )

@@ -39,6 +39,11 @@ type Deps struct {
 	// ADR 0014 — Phase 5 Booking Engine.
 	Booking *controller.BookingController
 
+	// ADR 0015 — Phase 6 Payment + Settlement.
+	Payment *controller.PaymentController
+	Finance *controller.FinanceController
+	Payout  *controller.PayoutController
+
 	// ADR 0011 — Local static file serving (driver=local only).
 	// When non-empty, a StaticFS route is registered at /uploads.
 	LocalStoragePath string
@@ -129,20 +134,18 @@ func Register(r *gin.Engine, deps Deps) {
 	}
 
 	// ADR 0014 — Phase 5 Booking Engine.
+	// ADR 0015 — Phase 6 Payment endpoints (webhook moved to PaymentController).
 	// H-2 (SECURITY.md): Public booking endpoints have per-route rate limits
 	// applied BEFORE the handler. The per-route limiters enforce the concrete
 	// thresholds from the security review:
-	//   POST /public/bookings             : 5 req/min + 20 req/hour per IP
-	//   GET  /public/bookings/:code       : 20 req/min per IP
-	//   GET  /public/branches/:id/availability : 30 req/min per IP
-	//   GET  /public/branches             : 60 req/min per IP
-	//   POST /public/payments/webhook     : not rate-limited (Midtrans retries)
+	//   POST /public/bookings                       : 5 req/min per IP
+	//   GET  /public/bookings/:code                 : 20 req/min per IP
+	//   GET  /public/bookings/:code/payment-status  : 12 req/min per IP (ADR 0015 §2.7)
+	//   GET  /public/branches/:id/availability      : 30 req/min per IP
+	//   GET  /public/branches                       : 60 req/min per IP
+	//   POST /public/payments/webhook               : not rate-limited (provider retries)
 	if deps.Booking != nil {
-		// Public group — tenant middleware sets __public__ sentinel.
-		// Each sub-route gets its own per-IP limiter at the specified threshold.
-
 		// POST /public/bookings: 5 req/min per IP.
-		// burst=5, refill=5/60 tokens/sec ≈ 5 per minute.
 		createBookingLimiter := middleware.RateLimit(helper.NewMemoryRateLimiter(5, float64(5)/60))
 
 		// GET /public/bookings/:code: 20 req/min per IP.
@@ -155,17 +158,38 @@ func Register(r *gin.Engine, deps Deps) {
 		branchListLimiter := middleware.RateLimit(helper.NewMemoryRateLimiter(60, float64(60)/60))
 
 		// Public group — no JWT, tenant middleware sets __platform__ default.
-		// We override to __public__ per-request in the booking service.
 		publicBookingGroup := v1.Group("", tenantMW)
 		publicBookingGroup.POST("/public/bookings", createBookingLimiter, deps.Booking.CreatePublic)
 		publicBookingGroup.GET("/public/bookings/:code", codeBookingLimiter, deps.Booking.GetPublicByCode)
-		publicBookingGroup.POST("/public/payments/webhook", deps.Booking.HandleWebhook) // not rate-limited
 		publicBookingGroup.GET("/public/branches", branchListLimiter, deps.Booking.ListPublicBranches)
 		publicBookingGroup.GET("/public/branches/:id", branchListLimiter, deps.Booking.GetPublicBranchDetail)
 		publicBookingGroup.GET("/public/branches/:id/availability", availabilityLimiter, deps.Booking.GetAvailability)
 
 		// Operator group — JWT required.
 		deps.Booking.RegisterOperator(tenantGroup, rbacMW)
+	}
+
+	// ADR 0015 — Phase 6 Payment controller (webhook + polling + dev trigger).
+	if deps.Payment != nil {
+		// GET /public/bookings/:code/payment-status: 12 req/min per IP (ADR 0015 §2.7).
+		paymentStatusLimiter := middleware.RateLimit(helper.NewMemoryRateLimiter(12, float64(12)/60))
+
+		publicPaymentGroup := v1.Group("", tenantMW)
+		// Webhook: not rate-limited (provider retries on non-200).
+		publicPaymentGroup.POST("/public/payments/webhook", deps.Payment.HandleWebhook)
+		// Polling: 12/min per IP.
+		publicPaymentGroup.GET("/public/bookings/:code/payment-status", paymentStatusLimiter, deps.Payment.GetPaymentStatus)
+
+		// Dev-only dummy trigger (build-tag gated; no-op in prod binary).
+		registerDummyTrigger(publicPaymentGroup, deps.Payment)
+	}
+
+	// ADR 0015 — Finance (tenant-facing) + Payout (platform-admin).
+	if deps.Finance != nil {
+		deps.Finance.Register(tenantGroup, rbacMW)
+	}
+	if deps.Payout != nil {
+		deps.Payout.Register(tenantGroup, rbacMW)
 	}
 
 	// ADR 0011 — Static file serving for local storage driver only.

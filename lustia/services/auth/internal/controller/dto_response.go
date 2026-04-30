@@ -531,11 +531,17 @@ type BookingResponse struct {
 }
 
 // CreateBookingResponse is returned by POST /public/bookings and
-// POST /tenant/bookings. Includes the snap token for payment initiation.
+// POST /tenant/bookings. Phase 6 (ADR 0015 §2.8): returns QRIS fields.
 type CreateBookingResponse struct {
 	BookingResponse
-	SnapToken   string `json:"snap_token"`
-	RedirectURL string `json:"redirect_url"`
+	// Phase 6 QRIS payment fields (public bookings only).
+	QRString         string `json:"qr_string,omitempty"`
+	QRImageURL       string `json:"qr_image_url,omitempty"`
+	QRExpiresAt      string `json:"qr_expires_at,omitempty"`
+	PaymentReference string `json:"payment_reference,omitempty"`
+	// Deprecated Phase 5 fields — kept for concierge path compatibility.
+	SnapToken   string `json:"snap_token,omitempty"`
+	RedirectURL string `json:"redirect_url,omitempty"`
 }
 
 // PublicBookingResponse is the masked view returned by GET /public/bookings/:code.

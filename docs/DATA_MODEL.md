@@ -1996,3 +1996,232 @@ This is the same risk profile as the `__platform__` sentinel: a bug that forgets
 14. **Public read scoping:** call `GET /public/bookings/:code` for a valid code. Assert response does not include `customer_email` or `customer_phone`.
 
 15. **Dev seed bookings (migration 000027):** verify the 5 seed bookings are present in a fresh dev DB after running all migrations; check that `booking_addon` rows exist for bookings 2 and 4; verify no exclusion constraint violations in the seed data (no overlapping slots for the same therapist/room).
+
+---
+
+## Phase 6 — Payment + Settlement Lifecycle
+
+### Phase 6 ERD (migration 000029)
+
+```mermaid
+erDiagram
+    booking ||--o| payment_transaction : "pays via"
+    payment_transaction }o--|| settlement_batch : "settled in"
+    payment_transaction }o--|| tenant_disbursement : "disbursed via"
+    tenant ||--o{ payment_transaction : "owns"
+    tenant ||--o{ tenant_disbursement : "receives"
+    "user" ||--o{ settlement_batch : "created by"
+    "user" ||--o{ tenant_disbursement : "transferred by"
+```
+
+### `settlement_batch` (new — migration 000029)
+
+Platform-level table. No `tenant_id`. One row per iPaymu daily settlement reconciliation run. Represents money that has landed in Lustia's bank account.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | `gen_random_uuid()` |
+| `provider` | TEXT NOT NULL | CHECK: `dummy`, `ipaymu`, `midtrans` |
+| `settled_at` | TIMESTAMPTZ NOT NULL | Timestamp from provider report (not row creation time) |
+| `total_amount_idr` | BIGINT NOT NULL | Sum of all transactions in batch |
+| `transaction_count` | INT NOT NULL | Row count for reconciliation sanity check |
+| `raw_payload` | JSONB NULL | Provider's full settlement report; kept for audit |
+| `created_at` | TIMESTAMPTZ NOT NULL | When this row was created |
+| `created_by` | UUID NULL FK → `user(id)` SET NULL | Platform admin who triggered reconciliation |
+
+**Indexes:** `(provider, settled_at DESC)` for reconciliation history list; partial index on `created_by` WHERE NOT NULL.
+
+**RLS:** `__platform__` sentinel only (mirrors `tenant_registration` from migration 11). Policy `sb_platform_only` is `FOR ALL` — single policy covering SELECT, INSERT, UPDATE with the same `__platform__` check.
+
+**Grant:** `SELECT, INSERT` to `lustia_app`. No UPDATE (immutable once created). No DELETE (financial audit record).
+
+**Why platform-level, not tenant-scoped:** settlement is Lustia's relationship with iPaymu, not a per-tenant concern. One iPaymu settlement batch may contain transactions from multiple tenants. The per-tenant split happens in `tenant_disbursement`.
+
+---
+
+### `tenant_disbursement` (new — migration 000029)
+
+Per-tenant weekly payout record. Phase 6: manual bank transfer by Lustia platform-admin. Phase 7+: auto-disbursement via banking API (Flip / BRI Open Banking).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | `gen_random_uuid()` |
+| `tenant_id` | UUID NOT NULL FK → `tenant(id)` RESTRICT | |
+| `period_start` | DATE NOT NULL | Inclusive period start |
+| `period_end` | DATE NOT NULL | Inclusive period end |
+| `gross_amount_idr` | BIGINT NOT NULL | SUM of `received_amount_idr` for disbursed txns |
+| `platform_fee_idr` | BIGINT NOT NULL | SUM of `platform_fee_idr` for disbursed txns |
+| `net_amount_idr` | BIGINT NOT NULL | `gross - fee`; computed by service layer at creation |
+| `transaction_count` | INT NOT NULL | |
+| `status` | TEXT NOT NULL | CHECK: `pending`, `processing`, `transferred`, `failed`, `cancelled` |
+| `bank_reference` | TEXT NULL | Bank transfer confirmation number |
+| `notes` | TEXT NULL | Platform admin notes; max 2000 chars |
+| `transferred_at` | TIMESTAMPTZ NULL | Set when `status → transferred` |
+| `transferred_by` | UUID NULL FK → `user(id)` SET NULL | Platform admin who marked transferred |
+| `created_at`, `updated_at` | TIMESTAMPTZ NOT NULL | `set_updated_at` trigger |
+
+**Status state machine (ADR 0015 §2.6):**
+```
+pending ──[admin starts]──▶ processing ──[bank done]──▶ transferred
+        ──[admin cancels]──▶ cancelled
+                                │
+                                └──[bank rejects]──▶ failed ──[admin retries]──▶ processing
+```
+
+**Indexes:**
+- `(tenant_id, period_start DESC)` — tenant disbursement history ("Riwayat Pencairan")
+- `(status, created_at)` partial WHERE status IN (`pending`,`processing`) — admin work queue
+- `(tenant_id)` — RLS predicate
+
+**RLS:** standard tenant isolation (SELECT, INSERT, UPDATE policies). Platform-admin operates by setting `app.current_tenant = <tenant_uuid>` for UPDATE transitions. No `__platform__` bypass for this table — platform-admin must identify the target tenant explicitly.
+
+**Grant:** `SELECT, INSERT, UPDATE` to `lustia_app`. No DELETE.
+
+**Why manual transfer in Phase 6:** per ADR 0015 §2.6, Lustia is pre-revenue/usaha kecil scale. Manual bank transfer is acceptable for the initial rollout. The schema fully supports future auto-disbursement — `bank_reference` stores the confirmation number, and `transferred_by` records the admin or (Phase 7+) the system user that triggered the automated transfer.
+
+---
+
+### `payment_transaction` (new — migration 000029)
+
+One row per booking. Full lifecycle record from customer QR scan through iPaymu settlement to Lustia disbursement to tenant.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | `gen_random_uuid()` |
+| `tenant_id` | UUID NOT NULL FK → `tenant(id)` RESTRICT | Denormalised from `booking` for tenant finance queries |
+| `booking_id` | UUID NOT NULL FK → `booking(id)` CASCADE | One booking → one txn (Phase 6 invariant) |
+| `provider` | TEXT NOT NULL | CHECK: `dummy`, `ipaymu`, `midtrans` |
+| `provider_reference` | TEXT NOT NULL | iPaymu trx id; idempotency key for webhooks |
+| `qr_string` | TEXT NULL | QRIS payload for customer display; kept post-payment for audit |
+| `qr_image_url` | TEXT NULL | Provider-hosted QR image URL (optional) |
+| `qr_expires_at` | TIMESTAMPTZ NOT NULL | 15-min hard cap from creation (ADR 0015 §2.7) |
+| `expected_amount_idr` | BIGINT NOT NULL | From `booking.total_price_idr` at transaction creation |
+| `received_amount_idr` | BIGINT NULL | Populated on paid webhook |
+| `platform_fee_idr` | BIGINT NULL | `floor(received * 0.05)`; computed at settlement; immutable after |
+| `tenant_net_idr` | BIGINT NULL | `received - platform_fee`; immutable after `settled` |
+| `status` | TEXT NOT NULL | CHECK: `awaiting`, `paid`, `settled`, `failed`, `expired`, `disbursed`, `voided` |
+| `paid_at` | TIMESTAMPTZ NULL | Set on `awaiting → paid` |
+| `settled_at` | TIMESTAMPTZ NULL | Set on `paid → settled` |
+| `disbursed_at` | TIMESTAMPTZ NULL | Set on `settled → disbursed` |
+| `settlement_batch_id` | UUID NULL FK → `settlement_batch(id)` RESTRICT | Set when settled |
+| `disbursement_id` | UUID NULL FK → `tenant_disbursement(id)` RESTRICT | Set when disbursed |
+| `raw_webhook` | JSONB NULL | Last inbound webhook payload; updated on re-delivery |
+| `created_at`, `updated_at` | TIMESTAMPTZ NOT NULL | `set_updated_at` trigger |
+
+**Status state machine (ADR 0015 §2.1):**
+```
+awaiting ──[webhook paid]──▶ paid ──[settlement run]──▶ settled ──[disbursement]──▶ disbursed
+         ──[qr_expires_at passed]──▶ expired
+         ──[webhook failed]──▶ failed
+any live state ──[ops override]──▶ voided
+```
+
+**Indexes:**
+- `UNIQUE (booking_id)` — Phase 6 invariant; NON-PARTIAL (one txn per booking, no exceptions)
+- `UNIQUE (provider_reference)` — webhook idempotency; same provider reference must not credit twice
+- `(tenant_id)` — RLS predicate + tenant finance list
+- `(tenant_id, status)` partial WHERE status IN (`paid`,`settled`) — tenant balance ("Saldo Anda") queries
+- `(status, qr_expires_at)` partial WHERE status=`awaiting` — expiry sweep
+- `(settlement_batch_id)` partial WHERE NOT NULL — FK support
+- `(disbursement_id)` partial WHERE NOT NULL — FK support
+
+**RLS:** standard tenant isolation (SELECT, INSERT, UPDATE) + additive `__public__` SELECT policy. Public SELECT mirrors the `booking` table pattern from ADR 0014 §3.17 — the policy permits reads when `__public__` sentinel is set and the booking's branch/tenant is active. **Service layer MUST add `WHERE booking_id = ?` on all public-path reads** (same risk profile as `booking_public_select`; repository function makes `booking_id` mandatory). No `ListPayments` function exists on the public path.
+
+**`UNIQUE (booking_id)` is NON-PARTIAL:** phase 6 enforces exactly one payment transaction per booking, regardless of status. If a booking is re-attempted after expiry or failure, the implementation must UPDATE the existing row (not INSERT a new one) or the `booking_id` UNIQUE constraint prevents it. This is a deliberate design choice — the single-txn-per-booking model simplifies the finance rollup at the cost of preventing multi-attempt payment rows. Phase 7 can relax to a partial unique if retry-as-new-row becomes necessary.
+
+**Platform fee computation (ADR 0015 §2.4):**
+```
+platform_fee_idr = floor(received_amount_idr * 0.05)
+tenant_net_idr   = received_amount_idr - platform_fee_idr
+```
+Computed by the settlement service at reconciliation time, not at payment time. Once `status = settled`, both fields are immutable. Phase 7+ may introduce per-tenant `platform_fee_pct` column on `tenant`.
+
+**PII / security note:** `raw_webhook` may contain payment card or customer PII depending on provider. Must be masked in application logs. Flag for `security-expert`.
+
+---
+
+### Permission matrix update — `finance.*` / `disbursement.*` / `settlement.*` (migration 000030)
+
+UUID namespace `c0000000-0000-0000-0030-*`. Verified zero pre-existing matches in `lustia/migrations/` before writing.
+
+| Permission | Description | UUID |
+|---|---|---|
+| `finance.read` | View payment transactions + disbursement history (own tenant) | `c0000000-0000-0000-0030-000000000001` |
+| `finance.read_all` | Platform-wide view of all tenant finances | `c0000000-0000-0000-0030-000000000002` |
+| `disbursement.create` | Create a tenant disbursement payout record | `c0000000-0000-0000-0030-000000000003` |
+| `disbursement.transfer` | Mark disbursement transferred + record bank reference | `c0000000-0000-0000-0030-000000000004` |
+| `settlement.reconcile` | Trigger iPaymu settlement reconciliation | `c0000000-0000-0000-0030-000000000005` |
+
+Role wiring:
+
+| Permission | `super_admin` | `tenant_admin` | `branch_admin` | `therapist` | `customer` |
+|---|:---:|:---:|:---:|:---:|:---:|
+| `finance.read` | Y | Y | Y | — | — |
+| `finance.read_all` | Y | — | — | — | — |
+| `disbursement.create` | Y | — | — | — | — |
+| `disbursement.transfer` | Y | — | — | — | — |
+| `settlement.reconcile` | Y | — | — | — | — |
+
+_`branch_admin` holds `finance.read`; service layer filters to own-tenant transactions only (same branch-scope pattern as `booking.read`)._
+
+---
+
+### Phase 6 — Migration Log
+
+| Migration | Date | Summary |
+|---|---|---|
+| 000029 | 2026-04-26 | Payment lifecycle: `settlement_batch` (platform), `tenant_disbursement` (tenant), `payment_transaction` (tenant). RLS, indexes, triggers, grants. |
+| 000030 | 2026-04-26 | Finance permissions: `finance.read/read_all`, `disbursement.create/transfer`, `settlement.reconcile`. UUID namespace `c0000000-0000-0000-0030-*`. |
+| 000031 | 2026-04-26 | Dev-only seed: 1 settlement_batch + 1 tenant_disbursement + 4 payment_transaction rows for acme-spa. Fixed UUIDs `e0000000-0000-0000-0031-*`. |
+
+---
+
+### Phase 6 — Design Decision Log
+
+**`payment_transaction` created before `booking` in FK order, but defined last in the migration:** `settlement_batch` and `tenant_disbursement` have no FK to `payment_transaction`; `payment_transaction` holds FKs to both. Migration 000029 therefore creates `settlement_batch` and `tenant_disbursement` first, then `payment_transaction`. This is the correct FK-safe order.
+
+**`UNIQUE (booking_id)` is non-partial:** phase 6 model is one-txn-per-booking, no exceptions. A partial unique (e.g. WHERE status != 'expired') would allow re-INSERT after failure/expiry but silently permits rows that are logically incorrect (two rows for the same booking at different statuses). Service layer handles retries by UPDATE on the existing row, keeping the model clean.
+
+**`tenant_id` denormalised on `payment_transaction`:** most tenant finance queries are `WHERE tenant_id = ?` — adding it avoids a join through `booking` on every list view. The value is always equal to `booking.tenant_id` and is set by the service layer at creation (same pattern as other tenant-scoped tables). If they diverge, the CHECK is a service-layer bug.
+
+**`settlement_batch` uses `__platform__` RLS (FOR ALL policy):** the table has no `tenant_id`, so the tenant isolation policy cannot apply. Platform-admin is the only actor who creates or reads settlement batch rows. This mirrors `tenant_registration` from migration 11 exactly.
+
+**Platform fee computed at settlement, not payment:** per ADR 0015 §2.4, computing at payment time would require re-computing if `received_amount_idr` differs from `expected_amount_idr` (partial payment, which iPaymu QRIS should not allow but is theoretically possible). Computing at settlement — when the actual received amount is confirmed — is more correct and simpler.
+
+**`raw_webhook` JSONB on `payment_transaction`:** overwritten on each delivery of the same `provider_reference` (idempotent). Keeping the last payload is sufficient for ops debugging. If full delivery history is needed (Phase 7+), a separate `payment_webhook_log` table is the right approach — not adding `version`/`sequence` columns to `payment_transaction`.
+
+---
+
+### Phase 6 — Open Questions / Cross-Agent Flags
+
+#### For `go-expert`
+
+1. **`payment_transaction` retry on expiry/failure:** the `UNIQUE (booking_id)` constraint means re-attempting a payment for an expired or failed transaction must UPDATE the existing row (reset status → `awaiting`, new `provider_reference`, new `qr_expires_at`). The service layer must implement `UpsertPaymentTransaction` or `ResetPaymentTransaction` that does an UPDATE rather than INSERT. Confirm this is the intended UX (re-use same booking → same row).
+
+2. **Webhook idempotency guard:** on `POST /api/v1/public/payments/webhook`, look up `payment_transaction` by `provider_reference`. If found with `status = paid`, return 200 immediately (no-op). If found with `status = awaiting` and `received_amount_idr < expected_amount_idr`, log audit warning and return 200 without crediting (ADR 0015 §2.7 amount-mismatch guard).
+
+3. **Settlement service — `app.current_tenant` for `settlement_batch` INSERT:** `settlement_batch` uses the `__platform__` sentinel. The settlement service must `SET LOCAL app.current_tenant = '__platform__'` before INSERT. Then switch to each tenant's UUID for the bulk `UPDATE payment_transaction SET status = 'settled'` calls.
+
+4. **Disbursement service — cross-table UPDATE in one tx:** when marking `tenant_disbursement.status = transferred`, update all `payment_transaction` rows with `disbursement_id = <this_disbursement_id>` to `status = disbursed, disbursed_at = now()` in the same DB transaction.
+
+5. **`booking.payment_method` CHECK constraint update:** migration 000025 has `CHECK (payment_method IN ('midtrans', 'paid_at_venue'))`. Phase 6 adds `ipaymu` as a payment method. A new migration or ALTER is needed to add `'ipaymu'` to that CHECK. Flag for `go-expert` to include in the Phase 6 backend migration or request `db-designer` to add migration 000032 (additive ALTER).
+
+6. **DTOs needed:** `PaymentTransactionResponse`, `SettlementBatchResponse`, `TenantDisbursementResponse`, `CreateDisbursementRequest`, `TransferDisbursementRequest`, `ReconcileSettlementRequest`. Add to `docs/API_CONTRACT.md`.
+
+#### For `security-expert`
+
+7. **`raw_webhook` column PII:** the iPaymu webhook payload may contain customer identifiable data. Ensure `raw_webhook` is masked/excluded from structured application logs. Review whether it should be encrypted at rest (AES-256 via pgcrypto) given it contains payment provider data.
+
+8. **`provider_reference` is a financial idempotency key:** a spoofed webhook with a duplicate `provider_reference` is silently dropped (no-op). Verify that iPaymu webhook HMAC-SHA256 signature verification (ADR 0015 §2.7) is implemented before the idempotency check — otherwise an attacker could replay a previously-valid reference to suppress a legitimate payment notification.
+
+9. **`settlement_batch.__platform__` bypass:** the `__platform__` sentinel is a broad bypass. Confirm that the settlement reconciliation endpoint (`POST /api/v1/platform/settlement/reconcile`) is behind `super_admin` JWT + `settlement.reconcile` permission check before the `SET LOCAL app.current_tenant = '__platform__'` call.
+
+#### For `qa-expert`
+
+10. **`UNIQUE (booking_id)` enforcement:** attempt to INSERT two `payment_transaction` rows for the same `booking_id`. Assert the second INSERT fails with a unique violation (mapped to 409 CONFLICT in the API).
+
+11. **Webhook idempotency:** send the same `provider_reference` webhook twice. Assert the second delivery returns 200 and does not double-credit `received_amount_idr`.
+
+12. **Platform fee arithmetic:** for a booking with `received_amount_idr = 100001`, assert `platform_fee_idr = 5000` (floor(100001 * 0.05) = floor(5000.05) = 5000) and `tenant_net_idr = 95001`.
+
+13. **Settlement sentinel isolation:** verify a `SELECT * FROM settlement_batch` query with `app.current_tenant = 'd0000000-...'` (a tenant UUID) returns zero rows. Only `__platform__` sentinel returns rows.

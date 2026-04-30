@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"io"
 	"testing"
 	"time"
@@ -74,23 +73,45 @@ func (r *stubTenantRepo) CountActiveBranches(_ context.Context, _ string) (int, 
 	return 0, nil
 }
 
-// stubPayment returns MidtransStatusPaid always (simulates dummy adapter).
-type stubPayment struct {
-	status MidtransPaymentStatus
+// stubPaymentSvc is a minimal PaymentServiceIface stub for booking service tests.
+// Phase 6: BookingService no longer calls CreateTransaction/HandleNotification
+// directly — it delegates to PaymentServiceIface.
+type stubPaymentSvc struct {
+	initiateErr error
+	webhookErr  error
 }
 
-func (p *stubPayment) CreateTransaction(_ context.Context, _ MidtransPaymentRequest) (MidtransPaymentResponse, error) {
-	return MidtransPaymentResponse{
-		SnapToken:   "dummy-token",
-		RedirectURL: "http://localhost/pay",
-		Status:      p.status,
+func (p *stubPaymentSvc) InitiateForBooking(_ context.Context, _, _ string, _ int64, _, _, _, _, _ string) (InitiatePaymentOutput, error) {
+	if p.initiateErr != nil {
+		return InitiatePaymentOutput{}, p.initiateErr
+	}
+	return InitiatePaymentOutput{
+		TransactionID:     "stub-txn-id",
+		ProviderReference: "stub-ref",
+		QRString:          "00020101...STUB",
+		QRImageURL:        "http://localhost/qr.png",
+		QRExpiresAt:       time.Now().Add(15 * time.Minute),
 	}, nil
 }
-func (p *stubPayment) HandleNotification(_ context.Context, n MidtransWebhookNotification) (MidtransPaymentStatus, error) {
-	if n.OrderID == "" {
-		return MidtransStatusFailed, errors.New("missing order_id")
-	}
-	return p.status, nil
+
+func (p *stubPaymentSvc) HandleWebhook(_ context.Context, _ []byte, _ map[string]string) error {
+	return p.webhookErr
+}
+
+func (p *stubPaymentSvc) GetStatus(_ context.Context, _ string) (PaymentStatusView, error) {
+	return PaymentStatusView{Status: "awaiting"}, nil
+}
+
+func (p *stubPaymentSvc) RetryQR(_ context.Context, _ string) (InitiatePaymentOutput, error) {
+	return InitiatePaymentOutput{}, nil
+}
+
+func (p *stubPaymentSvc) GetTenantBalance(_ context.Context, _ string) (BalanceSummary, error) {
+	return BalanceSummary{}, nil
+}
+
+func (p *stubPaymentSvc) SweepExpiredTransactions(_ context.Context) (int, error) {
+	return 0, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -318,7 +339,7 @@ func newTestService(
 	roomRepo RoomRepository,
 	therapistRepo TherapistRepository,
 	therapistSvcRepo TherapistServiceRepository,
-	payment MidtransClient,
+	paymentSvc PaymentServiceIface,
 ) *BookingService {
 	return NewBookingService(
 		bookingRepo,
@@ -329,7 +350,7 @@ func newTestService(
 		therapistRepo,
 		therapistSvcRepo,
 		&stubAvailabilityRepo{},
-		payment,
+		paymentSvc,
 		&stubAudit{},
 		&stubEmail{},
 		&stubClock{t: time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC)},
@@ -425,7 +446,7 @@ func TestCreatePublic_C1_PriceComputedServerSide(t *testing.T) {
 		&stubRoomRepo{rooms: []*model.Room{testRoom()}},
 		&stubTherapistRepo{therapists: []*model.Therapist{testTherapistModel()}},
 		&stubTherapistSvcRepo{mappings: []*model.TherapistService{testTherapistMapping()}},
-		&stubPayment{status: MidtransStatusPaid},
+		&stubPaymentSvc{},
 	)
 
 	out, err := svc.CreatePublic(context.Background(), PublicCreateBookingInput{
@@ -465,7 +486,7 @@ func TestCreatePublic_H1_CrossTenantServiceRejected(t *testing.T) {
 		&stubRoomRepo{},
 		&stubTherapistRepo{},
 		&stubTherapistSvcRepo{},
-		&stubPayment{status: MidtransStatusPaid},
+		&stubPaymentSvc{},
 	)
 
 	_, err := svc.CreatePublic(context.Background(), PublicCreateBookingInput{
@@ -497,7 +518,7 @@ func TestCreatePublic_H1_CrossTenantAddonRejected(t *testing.T) {
 		&stubRoomRepo{},
 		&stubTherapistRepo{},
 		&stubTherapistSvcRepo{},
-		&stubPayment{status: MidtransStatusPaid},
+		&stubPaymentSvc{},
 	)
 
 	_, err := svc.CreatePublic(context.Background(), PublicCreateBookingInput{
@@ -518,23 +539,14 @@ func TestCreatePublic_H1_CrossTenantAddonRejected(t *testing.T) {
 // H-5: Expiry sweep race condition
 // ---------------------------------------------------------------------------
 
-func TestWebhook_H5_RowsAffectedZero_AlreadyExpired(t *testing.T) {
+// TestWebhook_BookingService_DelegatesTo_PaymentService verifies that the
+// BookingService.HandlePaymentWebhook shim delegates to the injected
+// PaymentServiceIface without error. Full H-4/H-5 coverage lives in
+// payment_service_test.go.
+func TestWebhook_BookingService_DelegatesTo_PaymentService(t *testing.T) {
 	t.Parallel()
 
-	booking := &model.Booking{
-		ID:            "booking-expired-id",
-		TenantID:      testTenantID,
-		TotalPriceIDR: 150000,
-		Status:        model.BookingStatusExpired,
-		Code:          "TEST-CODE",
-	}
-
-	bookingRepo := &stubBookingRepo{
-		findPaymentRefResult:   booking,
-		findByIDResult:         booking,
-		transitionRowsAffected: 0, // H-5: simulate sweep already ran
-	}
-
+	bookingRepo := &stubBookingRepo{}
 	svc := newTestService(
 		bookingRepo,
 		&stubBranchRepo{branch: testBranch()},
@@ -543,104 +555,14 @@ func TestWebhook_H5_RowsAffectedZero_AlreadyExpired(t *testing.T) {
 		&stubRoomRepo{},
 		&stubTherapistRepo{},
 		&stubTherapistSvcRepo{},
-		&stubPayment{status: MidtransStatusPaid},
+		&stubPaymentSvc{},
 	)
 
-	// The webhook should return nil (HTTP 200, no retry storm) even when
-	// rowsAffected == 0 due to expiry race.
-	err := svc.HandlePaymentWebhook(context.Background(), MidtransWebhookNotification{
-		OrderID:           "TEST-CODE",
-		TransactionStatus: "settlement",
-		GrossAmount:       "150000",
-	})
-
-	// H-5: must return nil — no retry, no panic.
-	assert.NoError(t, err, "H-5: webhook must return nil when booking is expired (no retry storm)")
-}
-
-func TestWebhook_H5_RowsAffectedZero_AlreadyPaid_Idempotent(t *testing.T) {
-	t.Parallel()
-
-	booking := &model.Booking{
-		ID:            "booking-paid-id",
-		TenantID:      testTenantID,
-		TotalPriceIDR: 150000,
-		Status:        model.BookingStatusPaid, // already paid
-		Code:          "TEST-PAID",
-	}
-
-	bookingRepo := &stubBookingRepo{
-		findPaymentRefResult:   booking,
-		findByIDResult:         booking,
-		transitionRowsAffected: 0, // idempotent — already paid
-	}
-
-	svc := newTestService(
-		bookingRepo,
-		&stubBranchRepo{branch: testBranch()},
-		&stubServiceRepo{svc: testService()},
-		&stubAddonRepo{addons: map[string]*model.Addon{}},
-		&stubRoomRepo{},
-		&stubTherapistRepo{},
-		&stubTherapistSvcRepo{},
-		&stubPayment{status: MidtransStatusPaid},
+	err := svc.HandlePaymentWebhook(context.Background(),
+		[]byte(`{"provider_reference":"ref","amount_idr":150000}`),
+		map[string]string{},
 	)
-
-	err := svc.HandlePaymentWebhook(context.Background(), MidtransWebhookNotification{
-		OrderID:           "TEST-PAID",
-		TransactionStatus: "settlement",
-		GrossAmount:       "150000",
-	})
-	// M-5: idempotent — second webhook for already-paid booking is a no-op.
-	assert.NoError(t, err, "H-5/M-5: second webhook for already-paid booking must be no-op")
-}
-
-// ---------------------------------------------------------------------------
-// H-4: Webhook amount mismatch
-// ---------------------------------------------------------------------------
-
-func TestWebhook_H4_AmountMismatch_DoesNotMarkPaid(t *testing.T) {
-	t.Parallel()
-
-	booking := &model.Booking{
-		ID:            "booking-underpay",
-		TenantID:      testTenantID,
-		TotalPriceIDR: 150000,
-		Status:        model.BookingStatusPendingPayment,
-		Code:          "UNDERPAY",
-	}
-
-	transitionCalled := false
-	bookingRepo := &stubBookingRepo{
-		findPaymentRefResult: booking,
-		findByIDResult:       booking,
-		// We track if TransitionStatus is called — it must NOT be.
-		transitionRowsAffected: 1,
-	}
-	// Override TransitionStatus to record calls.
-	_ = transitionCalled
-
-	svc := newTestService(
-		bookingRepo,
-		&stubBranchRepo{branch: testBranch()},
-		&stubServiceRepo{svc: testService()},
-		&stubAddonRepo{addons: map[string]*model.Addon{}},
-		&stubRoomRepo{},
-		&stubTherapistRepo{},
-		&stubTherapistSvcRepo{},
-		// Use dummy payment but with non-paid status so HandleNotification returns Paid
-		// to let H-4 check run.
-		&stubPayment{status: MidtransStatusPaid},
-	)
-
-	// Gross amount is LESS than booking total.
-	err := svc.HandlePaymentWebhook(context.Background(), MidtransWebhookNotification{
-		OrderID:           "UNDERPAY",
-		TransactionStatus: "settlement",
-		GrossAmount:       "1", // only IDR 1 vs 150000
-	})
-	// H-4: must return nil (HTTP 200) but must NOT call TransitionStatus to paid.
-	assert.NoError(t, err, "H-4: underpayment must return nil (no retry storm)")
+	assert.NoError(t, err, "booking service webhook shim must delegate cleanly")
 }
 
 // ---------------------------------------------------------------------------
@@ -659,7 +581,7 @@ func TestCreateConcierge_H6_BranchScopeRejected(t *testing.T) {
 		&stubRoomRepo{},
 		&stubTherapistRepo{},
 		&stubTherapistSvcRepo{},
-		&stubPayment{status: MidtransStatusPaid},
+		&stubPaymentSvc{},
 	)
 
 	_, err := svc.CreateConcierge(context.Background(), ConciergeCreateBookingInput{
@@ -691,7 +613,7 @@ func TestCreateConcierge_H6_AdminBypassesBranchScope(t *testing.T) {
 		&stubRoomRepo{rooms: []*model.Room{testRoom()}},
 		&stubTherapistRepo{therapists: []*model.Therapist{testTherapistModel()}},
 		&stubTherapistSvcRepo{mappings: []*model.TherapistService{testTherapistMapping()}},
-		&stubPayment{status: MidtransStatusPaid},
+		&stubPaymentSvc{},
 	)
 
 	_, err := svc.CreateConcierge(context.Background(), ConciergeCreateBookingInput{
@@ -726,7 +648,7 @@ func TestGetPublicByCode_H7_EmptyCodeRejected(t *testing.T) {
 		&stubRoomRepo{},
 		&stubTherapistRepo{},
 		&stubTherapistSvcRepo{},
-		&stubPayment{status: MidtransStatusPaid},
+		&stubPaymentSvc{},
 	)
 
 	_, err := svc.GetPublicByCode(context.Background(), "")
@@ -764,7 +686,7 @@ func TestGetPublicByCode_H7_ValidCodeReturnsView(t *testing.T) {
 		&stubRoomRepo{},
 		&stubTherapistRepo{},
 		&stubTherapistSvcRepo{},
-		&stubPayment{status: MidtransStatusPaid},
+		&stubPaymentSvc{},
 	)
 
 	view, err := svc.GetPublicByCode(context.Background(), "ABCD-EFGH")
@@ -794,7 +716,7 @@ func TestGenerateBookingCode_Format(t *testing.T) {
 		&stubRoomRepo{},
 		&stubTherapistRepo{},
 		&stubTherapistSvcRepo{},
-		&stubPayment{status: MidtransStatusPaid},
+		&stubPaymentSvc{},
 	)
 
 	code, err := svc.generateUniqueCode(context.Background())

@@ -327,6 +327,97 @@ export interface BookingReportBranch {
   no_show_count: number;
 }
 
+// ─── Phase 6 — Finance (ADR 0015 §2.12) ─────────────────────────────────────
+
+export type PaymentTransactionStatus =
+  | "awaiting"
+  | "paid"
+  | "settled"
+  | "disbursed"
+  | "failed"
+  | "expired"
+  | "voided";
+
+export type DisbursementStatus =
+  | "pending"
+  | "processing"
+  | "transferred"
+  | "failed"
+  | "cancelled";
+
+/** GET /api/v1/tenant/finance/balance response (ADR 0015 §15.3). */
+export interface FinanceBalance {
+  in_process_idr: number;
+  ready_to_disburse_idr: number;
+  disbursed_idr: number;
+}
+
+/** One payment_transaction row in the tenant finance list (ADR 0015 §15.3). */
+export interface PaymentTransaction {
+  id: string;
+  booking_id: string;
+  booking_code: string;
+  customer_name: string;
+  provider: "ipaymu" | "dummy" | "midtrans";
+  provider_reference: string;
+  status: PaymentTransactionStatus;
+  expected_amount_idr: number;
+  received_amount_idr: number | null;
+  platform_fee_idr: number | null;
+  tenant_net_idr: number | null;
+  paid_at: string | null;
+  settled_at: string | null;
+  disbursed_at: string | null;
+  created_at: string;
+}
+
+export interface PaymentTransactionListResponse {
+  data: PaymentTransaction[];
+  total: number;
+  page: number;
+  total_pages: number;
+}
+
+/** One tenant_disbursement row (ADR 0015 §2.3). */
+export interface TenantDisbursement {
+  id: string;
+  tenant_id: string;
+  period_start: string;
+  period_end: string;
+  gross_amount_idr: number;
+  platform_fee_idr: number;
+  net_amount_idr: number;
+  transaction_count: number;
+  status: DisbursementStatus;
+  bank_reference: string | null;
+  notes: string | null;
+  transferred_at: string | null;
+  transferred_by_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TenantDisbursementListResponse {
+  data: TenantDisbursement[];
+  total: number;
+  page: number;
+  total_pages: number;
+}
+
+/** Disbursement detail with contributing transactions (ADR 0015 §15.3). */
+export interface DisbursementDetail extends TenantDisbursement {
+  transactions: Array<{
+    id: string;
+    booking_id: string;
+    booking_code: string;
+    customer_name: string;
+    received_amount_idr: number;
+    platform_fee_idr: number;
+    tenant_net_idr: number;
+    paid_at: string | null;
+  }>;
+}
+
 // ─── Onboarding state (ADR 0008 §2.3.3) ─────────────────────────────────────
 
 /**

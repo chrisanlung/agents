@@ -2606,3 +2606,272 @@ The lazy expiry sweep runs on `POST /public/bookings` and `GET /public/branches/
   "updated_at": "2026-04-26T09:55:00Z"
 }
 ```
+
+
+---
+
+## §15 Payment + Finance + Payout (ADR 0015)
+
+_Last updated: 2026-05-01 (Phase 6 — ADR 0015)_
+
+### 15.1 Conventions for this section
+
+| Item | Value |
+|---|---|
+| Auth | Public endpoints: no JWT. Tenant endpoints: `Bearer` JWT. Admin endpoints: `Bearer` JWT with `super_admin` role. |
+| Rate limits | Webhook: none. Polling: 12/min per IP. Booking create: 5/min per IP. |
+| Language | Error messages on `/tenant/*` and `/admin/*` endpoints are in Indonesian. `/public/*` errors are in English. |
+
+---
+
+### 15.2 Public — Payment
+
+#### POST `/api/v1/public/payments/webhook`
+
+Receives iPaymu payment notification. Always returns HTTP 200 (provider must not retry on non-200). Raw body bytes are passed to the adapter for HMAC verification before JSON decode.
+
+**Request:** raw JSON body (provider-specific; no fixed schema)
+
+**Response 200:**
+```json
+{ "status": "ok" }
+```
+
+---
+
+#### GET `/api/v1/public/bookings/:code/payment-status`
+
+Polling endpoint for Flutter app. Rate-limited 12/min per IP.
+
+**Response 200:**
+```json
+{
+  "status": "awaiting | paid | expired | failed",
+  "paid_at": "2026-04-30T10:15:00Z",
+  "qr_expires_at": "2026-04-30T10:30:00Z"
+}
+```
+
+**Errors:** `404 BOOKING_NOT_FOUND`, `400 BOOKING_CODE_INVALID`
+
+---
+
+#### POST `/api/v1/public/payments/dummy-trigger` _(dev/local only)_
+
+Simulates a payment confirmation for testing. Build-tag gated — not present in production binary.
+
+**Request:**
+```json
+{ "code": "AB12-CD34", "amount_idr": 150000 }
+```
+
+**Response 200:**
+```json
+{ "status": "ok", "triggered_for": "AB12-CD34" }
+```
+
+---
+
+#### POST `/api/v1/public/bookings` — Phase 6 response shape change
+
+Response now includes QRIS fields instead of Midtrans snap token:
+
+```json
+{
+  "id": "...", "code": "AB12-CD34", "total_price_idr": 150000,
+  "qr_string": "00020101...",
+  "qr_image_url": "https://api.qrserver.com/...",
+  "qr_expires_at": "2026-04-30T10:30:00+07:00",
+  "payment_reference": "ipaymu-trx-uuid",
+  "status": "pending_payment"
+}
+```
+
+Fields `snap_token` and `redirect_url` are empty strings (deprecated).
+
+**Flags for frontends:** `flutter-expert` must update `PaymentScreen` to render `qr_string` via `qr_flutter`. `nextjs-expert` no change (concierge flow unaffected).
+
+---
+
+### 15.3 Tenant — Finance (requires `finance.read`)
+
+#### GET `/api/v1/tenant/finance/balance`
+
+Three-tier balance summary card.
+
+**Response 200:**
+```json
+{
+  "in_process_idr": 500000,
+  "ready_to_disburse_idr": 1200000,
+  "disbursed_idr": 3500000
+}
+```
+
+---
+
+#### GET `/api/v1/tenant/finance/transactions`
+
+**Query:** `?status=&from_date=&to_date=&page=1&limit=10`
+
+**Response 200:**
+```json
+{
+  "data": [{
+    "id": "...", "booking_id": "...", "provider_reference": "...", "provider": "ipaymu",
+    "status": "paid", "expected_amount_idr": 150000, "received_amount_idr": 150000,
+    "platform_fee_idr": 7500, "tenant_net_idr": 142500,
+    "paid_at": "2026-04-30T10:15:00Z", "settled_at": null, "disbursed_at": null,
+    "created_at": "2026-04-30T10:00:00Z"
+  }],
+  "total": 1, "page": 1, "total_pages": 1
+}
+```
+
+---
+
+#### GET `/api/v1/tenant/finance/disbursements`
+
+**Query:** `?status=&page=1&limit=10`
+
+**Response 200:** paginated list of `tenant_disbursement` rows.
+
+---
+
+#### GET `/api/v1/tenant/finance/disbursements/:id`
+
+**Response 200:** disbursement detail + contributing transactions array.
+
+---
+
+### 15.4 Platform Admin — Settlement (requires `settlement.reconcile` / `finance.read_all`)
+
+#### POST `/api/v1/admin/settlement/reconcile`
+
+Triggers iPaymu daily settlement report fetch and bulk-marks transactions settled.
+
+**Request:**
+```json
+{ "date": "2026-04-30" }
+```
+
+**Response 200:**
+```json
+{
+  "batch_id": "...", "settled_at": "2026-04-30",
+  "transaction_count": 12, "total_amount_idr": 1800000, "mismatch_count": 0
+}
+```
+
+**Errors:** `400 INVALID_DATE`
+
+---
+
+#### GET `/api/v1/admin/settlement-batches`
+
+**Query:** `?provider=&page=1&limit=10`
+
+---
+
+#### GET `/api/v1/admin/settlement-batches/:id`
+
+Returns batch detail + transactions + mismatches array.
+
+---
+
+### 15.5 Platform Admin — Payout (requires `disbursement.create` / `disbursement.transfer`)
+
+#### GET `/api/v1/admin/payout/tenant-summary`
+
+**Query:** `?period_start=YYYY-MM-DD&period_end=YYYY-MM-DD`
+
+Phase 6: returns placeholder message; per-tenant balance listing is Phase 7.
+
+---
+
+#### POST `/api/v1/admin/disbursements`
+
+Calculates payout and creates a pending disbursement row.
+
+**Request:**
+```json
+{ "tenant_id": "...", "period_start": "2026-04-21", "period_end": "2026-04-27" }
+```
+
+**Response 201:** full `DisbursementDetail` (same shape as GET /:id).
+
+---
+
+#### GET `/api/v1/admin/disbursements`
+
+**Query:** `?status=&page=1&limit=10`
+
+---
+
+#### GET `/api/v1/admin/disbursements/:id`
+
+---
+
+#### POST `/api/v1/admin/disbursements/:id/processing`
+
+Transitions `pending → processing`. No body required.
+
+**Response 200:** `{ "status": "processing" }`
+
+---
+
+#### POST `/api/v1/admin/disbursements/:id/transferred`
+
+Transitions `processing → transferred`. Also bulk-marks linked payment_transactions as `disbursed` in the same DB transaction (flag #4).
+
+**Request (optional):**
+```json
+{ "bank_reference": "BCA-TRF-20260430", "notes": "Transfer via BCA m-banking" }
+```
+
+**Response 200:** `{ "status": "transferred" }`
+
+---
+
+#### POST `/api/v1/admin/disbursements/:id/failed`
+
+Transitions `processing → failed`.
+
+**Request (optional):**
+```json
+{ "reason": "Bank rejected: invalid account number" }
+```
+
+---
+
+#### POST `/api/v1/admin/disbursements/:id/cancel`
+
+Transitions `pending → cancelled` only.
+
+**Errors:** `409 DISBURSEMENT_NOT_CANCELLABLE` if not pending.
+
+---
+
+### 15.6 Permission matrix (Phase 6)
+
+| Permission | super_admin | tenant_admin | branch_admin |
+|---|---|---|---|
+| `finance.read` | ✓ | ✓ | ✓ |
+| `finance.read_all` | ✓ | — | — |
+| `disbursement.create` | ✓ | — | — |
+| `disbursement.transfer` | ✓ | — | — |
+| `settlement.reconcile` | ✓ | — | — |
+
+---
+
+### 15.7 Error codes (Phase 6)
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `PAYMENT_TRANSACTION_NOT_FOUND` | 404 | No payment_transaction for the given booking/reference |
+| `PAYMENT_RETRY_NOT_ALLOWED` | 422 | RetryQR attempted on non-pending_payment booking |
+| `DISBURSEMENT_NOT_FOUND` | 404 | Disbursement ID not found or access denied |
+| `DISBURSEMENT_INVALID_TRANSITION` | 422 | State machine violation |
+| `DISBURSEMENT_NOT_CANCELLABLE` | 422 | Cancel attempted on non-pending disbursement |
+| `SETTLEMENT_BATCH_NOT_FOUND` | 404 | Settlement batch ID not found |
+| `INVALID_DATE` | 400 | date field not in YYYY-MM-DD format |

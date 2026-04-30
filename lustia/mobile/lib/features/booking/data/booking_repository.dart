@@ -18,7 +18,13 @@ abstract interface class BookingRepository {
 
   Future<CreateBookingResponse> createBooking(CreateBookingRequest request);
 
-  Future<void> sendDummyWebhook(String bookingCode, int totalPriceIdr);
+  /// Polling — ADR 0015 §2.7.
+  /// Rate limited 12/min per IP; caller responsible for 5-second interval.
+  Future<PaymentStatusResponse> getPaymentStatus(String bookingCode);
+
+  /// DEV-only short-circuit — ADR 0015 §2.7.
+  /// Triggers webhook handler internally; body: {code}.
+  Future<void> triggerDummyPayment(String bookingCode);
 
   Future<PublicBookingDetail> getBookingByCode(String code);
 }
@@ -53,17 +59,18 @@ class BookingRepositoryImpl implements BookingRepository {
   }
 
   @override
-  Future<void> sendDummyWebhook(String bookingCode, int totalPriceIdr) async {
+  Future<PaymentStatusResponse> getPaymentStatus(String bookingCode) async {
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/api/v1/public/bookings/$bookingCode/payment-status',
+    );
+    return PaymentStatusResponse.fromJson(response.data!);
+  }
+
+  @override
+  Future<void> triggerDummyPayment(String bookingCode) async {
     await _dio.post<dynamic>(
-      '/api/v1/public/payments/webhook',
-      data: {
-        'order_id': bookingCode,
-        'transaction_status': 'settlement',
-        'status_code': '200',
-        'gross_amount': totalPriceIdr.toString(),
-        'signature_key': 'dummy-signature',
-        'payment_type': 'dummy',
-      },
+      '/api/v1/public/payments/dummy-trigger',
+      data: {'code': bookingCode},
       options: Options(extra: {'noRetry': true}),
     );
   }

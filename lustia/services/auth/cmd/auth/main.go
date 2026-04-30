@@ -241,30 +241,59 @@ func main() {
 		localStoragePath = absLocalPath
 	}
 
-	// ADR 0014 — Phase 5 Booking Engine.
-	// C-2 (SECURITY.md): payment adapter selection with fail-fast guard.
-	// If PAYMENT_ADAPTER=dummy and APP_ENV is not dev/local, NewClient returns
-	// an error and we log.Fatal — an accidental dummy adapter in staging/prod
-	// is a critical security hole (free paid bookings).
+	// ADR 0015 — Phase 6 Payment Provider.
+	// C-2 (SECURITY.md): fail-fast on misconfiguration — dummy adapter only
+	// in dev/local. PAYMENT_PROVIDER replaces the old PAYMENT_ADAPTER env var.
 	appEnv := envStr("APP_ENV", "dev")
-	paymentAdapter := envStr("PAYMENT_ADAPTER", "dummy")
-	paymentClient, err := helperPayment.NewClient(helperPayment.Config{
-		Adapter:             paymentAdapter,
+	paymentProvider := envStr("PAYMENT_PROVIDER", envStr("PAYMENT_ADAPTER", "dummy"))
+	rawProvider, err := helperPayment.NewProvider(helperPayment.ProviderConfig{
+		Provider:            paymentProvider,
 		AppEnv:              appEnv,
-		MidtransServerKey:   os.Getenv("MIDTRANS_SERVER_KEY"),
-		MidtransClientKey:   os.Getenv("MIDTRANS_CLIENT_KEY"),
-		MidtransEnvironment: envStr("MIDTRANS_ENVIRONMENT", "sandbox"),
+		IPaymuVA:            os.Getenv("IPAYMU_VA"),
+		IPaymuAPIKey:        os.Getenv("IPAYMU_API_KEY"),
+		IPaymuSecret:        os.Getenv("IPAYMU_SECRET"),
+		IPaymuWebhookSecret: os.Getenv("IPAYMU_WEBHOOK_SECRET"),
 	})
 	if err != nil {
-		log.Fatal(ctx, err, "payment adapter misconfiguration (C-2)")
+		log.Fatal(ctx, err, "payment provider misconfiguration (C-2)")
 	}
-	log.Infof(ctx, "payment adapter: %s (APP_ENV=%s)", paymentAdapter, appEnv)
+	log.Infof(ctx, "payment provider: %s (APP_ENV=%s)", paymentProvider, appEnv)
 
-	// paymentAdapter bridges helper/payment.MidtransClientIface → service.MidtransClient
+	// paymentProviderBridge bridges helper/payment.ProviderIface → service.PaymentProvider
 	// so the service package does not import the helper package (layering rule).
-	paymentBridge := &paymentAdapterBridge{inner: paymentClient}
+	paymentProviderBridge := &paymentProviderBridge{inner: rawProvider}
 
+	// Phase 6 repositories.
 	bookingRepo := repository.NewBookingRepository(gormDB)
+	paymentTxnRepo := repository.NewPaymentTransactionRepository(gormDB)
+	settlementBatchRepo := repository.NewSettlementBatchRepository(gormDB)
+	disbursementRepo := repository.NewTenantDisbursementRepository(gormDB)
+
+	// Phase 6 services.
+	paymentSvc := service.NewPaymentService(
+		paymentTxnRepo,
+		bookingRepo,
+		paymentProviderBridge,
+		auditRepo,
+		clock,
+		txManager,
+	)
+	settlementSvc := service.NewSettlementService(
+		settlementBatchRepo,
+		paymentTxnRepo,
+		paymentProviderBridge,
+		auditRepo,
+		clock,
+		txManager,
+	)
+	disbursementSvc := service.NewDisbursementService(
+		disbursementRepo,
+		paymentTxnRepo,
+		auditRepo,
+		clock,
+		txManager,
+	)
+
 	bookingSvc := service.NewBookingService(
 		bookingRepo,
 		branchRepo,
@@ -274,13 +303,13 @@ func main() {
 		therapistRepo,
 		therapistServiceRepo,
 		therapistAvailabilityRepo,
-		paymentBridge,
+		paymentSvc,  // Phase 6: PaymentServiceIface replaces MidtransClient
 		auditRepo,
 		mailer,
 		clock,
 		txManager,
-		stor,       // ADR 0011: storage untuk URL foto terapis/ruangan pada endpoint publik
-		tenantRepo, // digunakan oleh GetPublicBranchDetail untuk mengambil nama tenant
+		stor,       // ADR 0011: storage for therapist/room photo URLs on public endpoints
+		tenantRepo, // used by GetPublicBranchDetail to fetch tenant name
 	)
 
 	// -------------------------------------------------------------------------
@@ -312,6 +341,11 @@ func main() {
 
 	// ADR 0014 — Phase 5 Booking Engine.
 	bookingCtrl := controller.NewBookingController(bookingSvc)
+
+	// ADR 0015 — Phase 6 Payment + Settlement + Payout.
+	paymentCtrl := controller.NewPaymentController(paymentSvc)
+	financeCtrl := controller.NewFinanceController(paymentSvc, paymentTxnRepo, disbursementSvc)
+	payoutCtrl := controller.NewPayoutController(settlementSvc, disbursementSvc)
 
 	// -------------------------------------------------------------------------
 	// Gin engine + routes
@@ -354,6 +388,10 @@ func main() {
 		Room: roomCtrl,
 		// ADR 0014 — Phase 5 Booking Engine.
 		Booking: bookingCtrl,
+		// ADR 0015 — Phase 6 Payment + Settlement + Payout.
+		Payment: paymentCtrl,
+		Finance: financeCtrl,
+		Payout:  payoutCtrl,
 		// ADR 0011 — Static file serving (driver=local only; empty = skip).
 		LocalStoragePath: localStoragePath,
 	})
@@ -433,42 +471,68 @@ func (a emailAdapter) Send(ctx context.Context, msg service.EmailMessage) error 
 	})
 }
 
-// paymentAdapterBridge bridges helper/payment.MidtransClientIface →
-// service.MidtransClient so the service package does not import the helper
-// package (layering rule). The two interface shapes are identical.
-type paymentAdapterBridge struct {
-	inner helperPayment.MidtransClientIface
+// paymentProviderBridge bridges helper/payment.ProviderIface →
+// service.PaymentProvider so the service package does not import the helper
+// package (layering rule). Method signatures are identical; this is a
+// transparent translation layer.
+type paymentProviderBridge struct {
+	inner helperPayment.ProviderIface
 }
 
-func (b *paymentAdapterBridge) CreateTransaction(ctx context.Context, req service.MidtransPaymentRequest) (service.MidtransPaymentResponse, error) {
-	resp, err := b.inner.CreateTransaction(ctx, helperPayment.PaymentRequest{
-		OrderID:       req.OrderID,
-		GrossAmount:   req.GrossAmount,
-		CustomerName:  req.CustomerName,
-		CustomerEmail: req.CustomerEmail,
-		CustomerPhone: req.CustomerPhone,
-		Description:   req.Description,
+func (b *paymentProviderBridge) CreateQR(ctx context.Context, req service.CreateQRRequest) (service.CreateQRResponse, error) {
+	resp, err := b.inner.CreateQR(ctx, helperPayment.CreateQRRequest{
+		ProviderReference: req.ProviderReference,
+		OrderID:           req.OrderID,
+		AmountIDR:         req.AmountIDR,
+		CustomerName:      req.CustomerName,
+		CustomerEmail:     req.CustomerEmail,
+		CustomerPhone:     req.CustomerPhone,
+		Description:       req.Description,
+		ExpiryMinutes:     req.ExpiryMinutes,
 	})
 	if err != nil {
-		return service.MidtransPaymentResponse{}, err
+		return service.CreateQRResponse{}, err
 	}
-	return service.MidtransPaymentResponse{
-		SnapToken:   resp.SnapToken,
-		RedirectURL: resp.RedirectURL,
-		Status:      service.MidtransPaymentStatus(resp.Status),
+	return service.CreateQRResponse{
+		ProviderReference: resp.ProviderReference,
+		QRString:          resp.QRString,
+		QRImageURL:        resp.QRImageURL,
+		ExpiresAt:         resp.ExpiresAt,
 	}, nil
 }
 
-func (b *paymentAdapterBridge) HandleNotification(ctx context.Context, n service.MidtransWebhookNotification) (service.MidtransPaymentStatus, error) {
-	status, err := b.inner.HandleNotification(ctx, helperPayment.WebhookNotification{
-		OrderID:           n.OrderID,
-		TransactionStatus: n.TransactionStatus,
-		StatusCode:        n.StatusCode,
-		GrossAmount:       n.GrossAmount,
-		SignatureKey:      n.SignatureKey,
-		PaymentType:       n.PaymentType,
-	})
-	return service.MidtransPaymentStatus(status), err
+func (b *paymentProviderBridge) VerifyWebhook(ctx context.Context, payload []byte, headers map[string]string) (service.PaymentNotification, error) {
+	notif, err := b.inner.VerifyWebhook(ctx, payload, headers)
+	if err != nil {
+		return service.PaymentNotification{}, err
+	}
+	return service.PaymentNotification{
+		ProviderReference: notif.ProviderReference,
+		Status:            service.ProviderPaymentStatus(notif.Status),
+		ReceivedAmountIDR: notif.ReceivedAmountIDR,
+		RawPayload:        notif.RawPayload,
+	}, nil
+}
+
+func (b *paymentProviderBridge) GetStatus(ctx context.Context, providerReference string) (service.ProviderPaymentStatus, error) {
+	status, err := b.inner.GetStatus(ctx, providerReference)
+	return service.ProviderPaymentStatus(status), err
+}
+
+func (b *paymentProviderBridge) ListSettlements(ctx context.Context, date time.Time) ([]service.SettlementItem, error) {
+	items, err := b.inner.ListSettlements(ctx, date)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]service.SettlementItem, len(items))
+	for i, item := range items {
+		out[i] = service.SettlementItem{
+			ProviderReference: item.ProviderReference,
+			SettledAmountIDR:  item.SettledAmountIDR,
+			SettledAt:         item.SettledAt,
+		}
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------

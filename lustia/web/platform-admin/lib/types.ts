@@ -85,3 +85,128 @@ export interface ApproveRegistrationResponse {
   };
   registration: TenantRegistration;
 }
+
+// ─── Phase 6 — Finance / Payout (ADR 0015) ───────────────────────────────────
+
+export type DisbursementStatus =
+  | "pending"
+  | "processing"
+  | "transferred"
+  | "failed"
+  | "cancelled";
+
+export type PaymentTransactionStatus =
+  | "awaiting"
+  | "paid"
+  | "settled"
+  | "disbursed"
+  | "failed"
+  | "expired"
+  | "voided";
+
+/** GET /api/v1/admin/settlement-batches list item. */
+export interface SettlementBatch {
+  id: string;
+  provider: string;
+  settled_at: string;
+  total_amount_idr: number;
+  transaction_count: number;
+  created_at: string;
+  created_by_name: string | null;
+  mismatch_count: number;
+}
+
+export interface SettlementBatchListResponse {
+  data: SettlementBatch[];
+  total: number;
+  page: number;
+  total_pages: number;
+}
+
+export interface MismatchItem {
+  provider_reference: string;
+  amount_idr: number;
+  issue: "not_in_lustia" | "not_in_provider";
+}
+
+export interface SettlementBatchDetail extends SettlementBatch {
+  mismatches: MismatchItem[];
+  transactions: Array<{
+    id: string;
+    provider_reference: string;
+    tenant_name: string;
+    received_amount_idr: number;
+    status: PaymentTransactionStatus;
+    settled_at: string | null;
+  }>;
+}
+
+/** GET /api/v1/admin/payout/tenant-summary one item. */
+export interface TenantPayoutSummary {
+  tenant_id: string;
+  tenant_name: string;
+  tenant_slug: string;
+  branch_count: number;
+  settled_amount_idr: number;
+  transaction_count: number;
+}
+
+export interface TenantPayoutSummaryResponse {
+  data: TenantPayoutSummary[];
+}
+
+/** POST /api/v1/admin/disbursements request body. */
+export interface CreateDisbursementInput {
+  tenant_id: string;
+  period_start: string;
+  period_end: string;
+}
+
+/** Disbursement row (list + detail). */
+export interface AdminDisbursement {
+  id: string;
+  tenant_id: string;
+  tenant_name: string;
+  period_start: string;
+  period_end: string;
+  gross_amount_idr: number;
+  platform_fee_idr: number;
+  net_amount_idr: number;
+  transaction_count: number;
+  status: DisbursementStatus;
+  bank_reference: string | null;
+  notes: string | null;
+  transferred_at: string | null;
+  transferred_by_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminDisbursementListResponse {
+  data: AdminDisbursement[];
+  total: number;
+  page: number;
+  total_pages: number;
+}
+
+export interface AdminDisbursementDetail extends AdminDisbursement {
+  transactions: Array<{
+    id: string;
+    booking_id: string;
+    booking_code: string;
+    customer_name: string;
+    received_amount_idr: number;
+    platform_fee_idr: number;
+    tenant_net_idr: number;
+    paid_at: string | null;
+  }>;
+}
+
+/** Reconcile response (POST /admin/settlement/reconcile). */
+export interface ReconcileResponse {
+  batch_id: string;
+  settled_at: string;
+  transaction_count: number;
+  total_amount_idr: number;
+  mismatch_count: number;
+}

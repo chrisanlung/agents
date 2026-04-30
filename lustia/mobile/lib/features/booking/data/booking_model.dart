@@ -25,6 +25,7 @@ final class BookingAddonItem {
 }
 
 /// Response dari POST /api/v1/public/bookings (201 Created).
+/// ADR 0015 §2.8 — Phase 6 shape: QR-based payment fields.
 final class CreateBookingResponse {
   const CreateBookingResponse({
     required this.id,
@@ -33,8 +34,10 @@ final class CreateBookingResponse {
     required this.totalPriceIdr,
     required this.scheduledStart,
     required this.scheduledEnd,
-    this.snapToken,
-    this.redirectUrl,
+    this.qrString,
+    this.qrImageUrl,
+    this.qrExpiresAt,
+    this.paymentReference,
     this.addons = const [],
   });
 
@@ -44,8 +47,18 @@ final class CreateBookingResponse {
   final int totalPriceIdr;
   final String scheduledStart;
   final String scheduledEnd;
-  final String? snapToken;
-  final String? redirectUrl;
+
+  /// QRIS string untuk di-render via qr_flutter.
+  final String? qrString;
+
+  /// URL gambar QR dari provider (opsional — fallback ke qr_flutter).
+  final String? qrImageUrl;
+
+  /// Batas waktu QR dalam ISO-8601; null jika provider tidak mengisi.
+  final String? qrExpiresAt;
+
+  /// Referensi transaksi di sisi provider (misal: ipaymu_trx_xxx).
+  final String? paymentReference;
   final List<BookingAddonItem> addons;
 
   factory CreateBookingResponse.fromJson(Map<String, dynamic> json) {
@@ -56,13 +69,41 @@ final class CreateBookingResponse {
       totalPriceIdr: (json['total_price_idr'] as num?)?.toInt() ?? 0,
       scheduledStart: json['scheduled_start'] as String,
       scheduledEnd: json['scheduled_end'] as String,
-      snapToken: json['snap_token'] as String?,
-      redirectUrl: json['redirect_url'] as String?,
+      qrString: json['qr_string'] as String?,
+      qrImageUrl: json['qr_image_url'] as String?,
+      qrExpiresAt: json['qr_expires_at'] as String?,
+      paymentReference: json['payment_reference'] as String?,
       addons:
           (json['addons'] as List<dynamic>?)
               ?.map((e) => BookingAddonItem.fromJson(e as Map<String, dynamic>))
               .toList() ??
           [],
+    );
+  }
+}
+
+/// Response dari GET /api/v1/public/bookings/:code/payment-status.
+/// ADR 0015 §2.7 — polling endpoint.
+final class PaymentStatusResponse {
+  const PaymentStatusResponse({
+    required this.status,
+    this.paidAt,
+    this.qrExpiresAt,
+  });
+
+  /// 'awaiting' | 'paid' | 'expired' | 'failed'
+  final String status;
+  final String? paidAt;
+  final String? qrExpiresAt;
+
+  bool get isTerminal =>
+      status == 'paid' || status == 'expired' || status == 'failed';
+
+  factory PaymentStatusResponse.fromJson(Map<String, dynamic> json) {
+    return PaymentStatusResponse(
+      status: json['status'] as String,
+      paidAt: json['paid_at'] as String?,
+      qrExpiresAt: json['qr_expires_at'] as String?,
     );
   }
 }

@@ -5,6 +5,7 @@ import {
   LayoutDashboard,
   MapPin,
   Stethoscope,
+  Wallet,
 } from "lucide-react";
 
 import { WorkspaceSwitcher, type MembershipSummary } from "@/components/workspace-switcher";
@@ -13,7 +14,7 @@ import { cn } from "@/lib/utils";
 
 const appName = process.env.NEXT_PUBLIC_APP_NAME ?? "Lustia Tenant Portal";
 
-type NavKey = "dashboard" | "branches" | "operasional" | "booking";
+type NavKey = "dashboard" | "branches" | "operasional" | "booking" | "keuangan";
 
 interface NavItem {
   key: NavKey;
@@ -27,8 +28,9 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { key: "dashboard", href: "/dashboard", label: "Dasbor", icon: LayoutDashboard },
   { key: "branches", href: "/branches", label: "Cabang", icon: MapPin },
-  { key: "operasional", href: "/master/therapists", label: "Operasional", icon: Stethoscope },
   { key: "booking", href: "/booking", label: "Booking", icon: Calendar, activePrefix: "/booking" },
+  { key: "keuangan", href: "/keuangan", label: "Keuangan", icon: Wallet, activePrefix: "/keuangan" },
+  { key: "operasional", href: "/master/therapists", label: "Operasional", icon: Stethoscope },
 ];
 
 interface AppHeaderProps {
@@ -120,6 +122,7 @@ export type { NavKey };
  */
 export function getActiveNavKey(pathname: string): NavKey {
   if (pathname.startsWith("/booking")) return "booking";
+  if (pathname.startsWith("/keuangan")) return "keuangan";
   if (pathname.startsWith("/master")) return "operasional";
   if (pathname.startsWith("/branches")) return "branches";
   return "dashboard";

@@ -203,6 +203,40 @@ var (
 	// is attempted (not allowed in Phase 5 — ops-only cancel).
 	ErrBookingCancellationForbidden = errors.New("pembatalan hanya dapat dilakukan oleh operator")
 
+	// ADR 0015 — Phase 6 Payment + Settlement.
+
+	// ErrPaymentTransactionNotFound is returned when no payment_transaction row
+	// exists for the given ID or booking.
+	ErrPaymentTransactionNotFound = errors.New("payment transaction not found")
+
+	// ErrPaymentQRExpired is returned when the customer tries to view or retry
+	// an already-expired QR code outside the retry window.
+	ErrPaymentQRExpired = errors.New("QR code has expired")
+
+	// ErrPaymentAlreadyPaid is returned when a webhook or retry arrives for a
+	// booking that is already in the paid (or later) status.
+	ErrPaymentAlreadyPaid = errors.New("booking sudah terbayar")
+
+	// ErrPaymentRetryNotAllowed is returned when RetryQR is attempted on a
+	// booking that is not in pending_payment status.
+	ErrPaymentRetryNotAllowed = errors.New("QR baru hanya dapat dibuat untuk booking yang menunggu pembayaran")
+
+	// ErrSettlementBatchNotFound is returned when no settlement_batch row
+	// exists for the given ID.
+	ErrSettlementBatchNotFound = errors.New("settlement batch not found")
+
+	// ErrDisbursementNotFound is returned when no tenant_disbursement row
+	// exists for the given ID.
+	ErrDisbursementNotFound = errors.New("disbursement tidak ditemukan")
+
+	// ErrDisbursementInvalidTransition is returned when a disbursement status
+	// transition violates the state machine (ADR 0015 §2.6).
+	ErrDisbursementInvalidTransition = errors.New("transisi status disbursement tidak valid")
+
+	// ErrDisbursementNotCancellable is returned when a cancel is attempted on
+	// a disbursement that is not in the pending state.
+	ErrDisbursementNotCancellable = errors.New("hanya disbursement dengan status pending yang dapat dibatalkan")
+
 	// ADR 0011 — Storage abstraction + therapist extended profile.
 
 	// ErrUploadQuotaExceeded is returned when a tenant exceeds the per-hour

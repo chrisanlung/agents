@@ -1197,9 +1197,16 @@ type WebhookHandleInput struct {
 }
 
 // CreateBookingOutput is returned after a successful booking creation.
-// It includes the snap token for the client to initiate payment.
+// Phase 6 (ADR 0015 §2.8): returns QRIS fields instead of Midtrans snap token.
 type CreateBookingOutput struct {
 	BookingDetail
+	// Phase 6 QRIS fields — populated for public (non-concierge) bookings.
+	QRString          string
+	QRImageURL        string
+	QRExpiresAt       string // RFC3339
+	PaymentReference  string // provider_reference stored in payment_transaction
+	// Deprecated Phase 5 fields — kept to avoid breaking the concierge path
+	// which doesn't use QR. Will be removed in a future cleanup pass.
 	SnapToken   string
 	RedirectURL string
 }

@@ -13,6 +13,77 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// ADR 0015 — Phase 6 Payment Provider (consumer-owned, declared here).
+// ---------------------------------------------------------------------------
+
+// PaymentProvider is the interface for payment gateway operations.
+// Consumer-owned: declared in the service package; concrete implementations
+// live in internal/helper/payment/ and are bridged in main.go.
+//
+// Methods per ADR 0015 §2.2.
+type PaymentProvider interface {
+	// CreateQR initiates a QRIS transaction. Returns QRIS string + provider txn id.
+	CreateQR(ctx context.Context, req CreateQRRequest) (CreateQRResponse, error)
+
+	// VerifyWebhook validates signature + parses payload.
+	// Signature check happens inside the adapter before any DB access (H-3 equivalent).
+	VerifyWebhook(ctx context.Context, payload []byte, headers map[string]string) (PaymentNotification, error)
+
+	// GetStatus polls the provider for transaction state.
+	// Used as a fallback if webhook was missed.
+	GetStatus(ctx context.Context, providerReference string) (ProviderPaymentStatus, error)
+
+	// ListSettlements fetches the daily settlement report.
+	// Returns items eligible to mark payment_transaction.status = settled.
+	ListSettlements(ctx context.Context, date time.Time) ([]SettlementItem, error)
+}
+
+// ProviderPaymentStatus is the normalised payment state returned by the provider.
+type ProviderPaymentStatus string
+
+const (
+	ProviderStatusPending ProviderPaymentStatus = "pending"
+	ProviderStatusPaid    ProviderPaymentStatus = "paid"
+	ProviderStatusFailed  ProviderPaymentStatus = "failed"
+	ProviderStatusExpired ProviderPaymentStatus = "expired"
+)
+
+// CreateQRRequest carries data to create a QRIS payment transaction.
+type CreateQRRequest struct {
+	ProviderReference string
+	OrderID           string
+	AmountIDR         int64
+	CustomerName      string
+	CustomerEmail     string
+	CustomerPhone     string
+	Description       string
+	ExpiryMinutes     int
+}
+
+// CreateQRResponse is returned by PaymentProvider.CreateQR.
+type CreateQRResponse struct {
+	ProviderReference string
+	QRString          string
+	QRImageURL        string
+	ExpiresAt         time.Time
+}
+
+// PaymentNotification is the normalised webhook payload.
+type PaymentNotification struct {
+	ProviderReference string
+	Status            ProviderPaymentStatus
+	ReceivedAmountIDR int64
+	RawPayload        []byte
+}
+
+// SettlementItem represents one transaction in a provider daily settlement report.
+type SettlementItem struct {
+	ProviderReference string
+	SettledAmountIDR  int64
+	SettledAt         time.Time
+}
+
+// ---------------------------------------------------------------------------
 // ADR 0011 — Storage abstraction (consumer-owned, declared in service package).
 // ---------------------------------------------------------------------------
 
@@ -612,4 +683,224 @@ type MidtransWebhookNotification struct {
 	GrossAmount       string // string in Midtrans API; parse to int64 before comparison
 	SignatureKey      string
 	PaymentType       string
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0015 — Phase 6 Repository interfaces (consumer-owned).
+// ---------------------------------------------------------------------------
+
+// PaymentTransactionRepository is the interface for payment_transaction persistence.
+type PaymentTransactionRepository interface {
+	// Save inserts a new payment_transaction row.
+	Save(ctx context.Context, txn *model.PaymentTransaction) error
+
+	// Reset performs an UPDATE on the existing row for bookingID — used when
+	// the QR has expired and the customer retries. Updates provider_reference,
+	// qr_string, qr_image_url, and qr_expires_at. The UNIQUE(booking_id)
+	// invariant means we can never INSERT a second row for the same booking.
+	Reset(ctx context.Context, bookingID, newReference, newQRString, newQRImageURL string, newExpiresAt time.Time) error
+
+	// FindByID returns a payment_transaction by primary key.
+	FindByID(ctx context.Context, id string) (*model.PaymentTransaction, error)
+
+	// FindByBookingID returns the payment_transaction for the given booking.
+	FindByBookingID(ctx context.Context, bookingID string) (*model.PaymentTransaction, error)
+
+	// FindByProviderReference returns the payment_transaction for the given
+	// provider_reference (idempotency key for webhooks).
+	FindByProviderReference(ctx context.Context, providerRef string) (*model.PaymentTransaction, error)
+
+	// FindByTenant returns a paginated list of payment_transactions for a tenant
+	// with optional filters.
+	FindByTenant(ctx context.Context, tenantID string, filter PaymentTxnFilter) ([]*model.PaymentTransaction, int64, error)
+
+	// MarkPaid atomically updates status awaiting→paid with amount + timestamps.
+	// WHERE status='awaiting' protects idempotency and race conditions.
+	// Returns rowsAffected so callers can detect duplicate webhooks.
+	MarkPaid(ctx context.Context, providerRef string, receivedAmount int64, paidAt time.Time, rawWebhook []byte) (int64, error)
+
+	// BulkMarkSettled updates matching rows to status=settled within the given
+	// settlement batch. Returns the count of rows updated.
+	BulkMarkSettled(ctx context.Context, batchID string, providerRefs []string, settledAt time.Time) (int, error)
+
+	// BulkMarkDisbursed updates matching rows to status=disbursed within the
+	// given disbursement. Must run inside the same transaction as the
+	// disbursement status update (flag #4). Returns the count of rows updated.
+	BulkMarkDisbursed(ctx context.Context, disbursementID string, txnIDs []string, disbursedAt time.Time) (int, error)
+
+	// SumByTenantStatus returns the sum of received_amount_idr for a given
+	// (tenantID, status) pair. Used for the balance card.
+	SumByTenantStatus(ctx context.Context, tenantID string, status string) (int64, error)
+
+	// SweepExpiredTransactions transitions awaiting rows past their qr_expires_at
+	// to status=expired. Called alongside booking expiry sweep. Returns count swept.
+	SweepExpiredTransactions(ctx context.Context) (int, error)
+}
+
+// PaymentTxnFilter carries optional filters for the payment transaction list.
+type PaymentTxnFilter struct {
+	Status   *string
+	FromDate *string // RFC3339
+	ToDate   *string // RFC3339
+	Page     int
+	Limit    int
+}
+
+// SettlementBatchRepository is the interface for settlement_batch persistence.
+type SettlementBatchRepository interface {
+	// Save inserts a new settlement_batch row.
+	// Callers must SET LOCAL app.current_tenant = '__platform__' before this call
+	// (handled by service layer via TxManager — flag #3).
+	Save(ctx context.Context, batch *model.SettlementBatch) error
+
+	// FindByID returns a settlement_batch by primary key.
+	FindByID(ctx context.Context, id string) (*model.SettlementBatch, error)
+
+	// FindByDate returns all batches whose settled_at falls on the given date.
+	FindByDate(ctx context.Context, date time.Time) ([]*model.SettlementBatch, error)
+
+	// List returns a paginated list of settlement batches.
+	List(ctx context.Context, filter SettlementBatchFilter) ([]*model.SettlementBatch, int64, error)
+}
+
+// SettlementBatchFilter carries optional filters for the settlement batch list.
+type SettlementBatchFilter struct {
+	Provider *string
+	Page     int
+	Limit    int
+}
+
+// TenantDisbursementRepository is the interface for tenant_disbursement persistence.
+type TenantDisbursementRepository interface {
+	// Save inserts a new tenant_disbursement row (status=pending).
+	Save(ctx context.Context, d *model.TenantDisbursement) error
+
+	// FindByID returns a disbursement by primary key.
+	FindByID(ctx context.Context, id string) (*model.TenantDisbursement, error)
+
+	// FindByTenant returns a paginated list of disbursements for a tenant.
+	FindByTenant(ctx context.Context, tenantID string, filter DisbursementFilter) ([]*model.TenantDisbursement, int64, error)
+
+	// List returns a paginated list of all disbursements (platform admin view).
+	List(ctx context.Context, filter DisbursementFilter) ([]*model.TenantDisbursement, int64, error)
+
+	// UpdateStatus transitions a disbursement to a new status.
+	// For the transferred transition, bankReference and notes are stored.
+	// transferredByUserID is set when newStatus = "transferred".
+	UpdateStatus(ctx context.Context, id, newStatus string, transferredByUserID *string, bankReference, notes *string) error
+}
+
+// DisbursementFilter carries optional filters for the disbursement list.
+type DisbursementFilter struct {
+	TenantID *string
+	Status   *string
+	Page     int
+	Limit    int
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0015 — Service I/O types
+// ---------------------------------------------------------------------------
+
+// InitiatePaymentOutput is returned by PaymentService.InitiateForBooking.
+type InitiatePaymentOutput struct {
+	TransactionID     string
+	ProviderReference string
+	QRString          string
+	QRImageURL        string
+	QRExpiresAt       time.Time
+}
+
+// PaymentStatusView is returned by PaymentService.GetStatus (polling endpoint).
+type PaymentStatusView struct {
+	Status      string
+	PaidAt      *time.Time
+	QRExpiresAt time.Time
+}
+
+// BalanceSummary is returned by PaymentService.GetTenantBalance.
+type BalanceSummary struct {
+	// InProcessIDR = sum of received_amount where status='paid' (awaiting settlement).
+	InProcessIDR int64
+	// ReadyToDisburseIDR = sum of tenant_net_idr where status='settled' and no disbursement_id.
+	ReadyToDisburseIDR int64
+	// DisbursedIDR = sum of tenant_net_idr where status='disbursed' (all time).
+	DisbursedIDR int64
+}
+
+// SettlementBatchSummary is returned by SettlementService.Reconcile.
+type SettlementBatchSummary struct {
+	BatchID          string
+	SettledAt        time.Time
+	TransactionCount int
+	TotalAmountIDR   int64
+	MismatchCount    int // provider items not in our DB or vice versa
+}
+
+// SettlementBatchDetail includes the summary plus matching/mismatch diagnostics.
+type SettlementBatchDetail struct {
+	SettlementBatchSummary
+	Transactions []PaymentTxnSummary
+	Mismatches   []SettlementMismatch
+}
+
+// SettlementMismatch describes a discrepancy between the provider report and our DB.
+type SettlementMismatch struct {
+	ProviderReference string
+	Issue             string // "not_in_our_db" | "not_in_provider_report"
+	AmountIDR         int64
+}
+
+// PaymentTxnSummary is a condensed view of a payment_transaction row.
+type PaymentTxnSummary struct {
+	ID                string
+	BookingID         string
+	ProviderReference string
+	Status            string
+	ExpectedAmountIDR int64
+	ReceivedAmountIDR *int64
+	PlatformFeeIDR    *int64
+	TenantNetIDR      *int64
+	PaidAt            *time.Time
+	SettledAt         *time.Time
+}
+
+// PayoutPreview is returned by DisbursementService.CalculatePayout.
+type PayoutPreview struct {
+	TenantID         string
+	PeriodStart      time.Time
+	PeriodEnd        time.Time
+	GrossAmountIDR   int64
+	PlatformFeeIDR   int64
+	NetAmountIDR     int64
+	TransactionCount int
+	Transactions     []PaymentTxnSummary
+}
+
+// CreateDisbursementInput is the input for DisbursementService.Create.
+type CreateDisbursementInput struct {
+	CallerUserID string
+	TenantID     string
+	PeriodStart  time.Time
+	PeriodEnd    time.Time
+}
+
+// DisbursementDetail is the full view of a tenant_disbursement row.
+type DisbursementDetail struct {
+	ID               string
+	TenantID         string
+	PeriodStart      time.Time
+	PeriodEnd        time.Time
+	GrossAmountIDR   int64
+	PlatformFeeIDR   int64
+	NetAmountIDR     int64
+	TransactionCount int
+	Status           string
+	BankReference    *string
+	Notes            *string
+	TransferredAt    *time.Time
+	TransferredBy    *string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	Transactions     []PaymentTxnSummary
 }

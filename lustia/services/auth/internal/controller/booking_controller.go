@@ -27,7 +27,9 @@ type BookingServiceIface interface {
 	Complete(ctx context.Context, in service.CompleteInput) (service.BookingDetail, error)
 	MarkNoShow(ctx context.Context, in service.NoShowInput) (service.BookingDetail, error)
 	Cancel(ctx context.Context, in service.CancelInput) (service.BookingDetail, error)
-	HandlePaymentWebhook(ctx context.Context, n service.MidtransWebhookNotification) error
+	// HandlePaymentWebhook is a thin shim kept for backward-compat.
+	// Phase 6: webhook is handled by PaymentController → PaymentServiceIface.HandleWebhook.
+	HandlePaymentWebhook(ctx context.Context, rawPayload []byte, headers map[string]string) error
 	GetReportSummary(ctx context.Context, in service.GetReportInput) (service.BookingReportSummary, error)
 	ListAvailableSlots(ctx context.Context, in service.AvailableSlotsInput) ([]service.Slot, error)
 	ListPublicBranches(ctx context.Context, filter service.PublicBranchFilter) ([]service.PublicBranchSummary, int64, error)
@@ -102,9 +104,14 @@ func (c *BookingController) CreatePublic(ctx *gin.Context) {
 	}
 
 	resp := CreateBookingResponse{
-		BookingResponse: toBookingResponse(out.BookingDetail),
-		SnapToken:       out.SnapToken,
-		RedirectURL:     out.RedirectURL,
+		BookingResponse:  toBookingResponse(out.BookingDetail),
+		QRString:         out.QRString,
+		QRImageURL:       out.QRImageURL,
+		QRExpiresAt:      out.QRExpiresAt,
+		PaymentReference: out.PaymentReference,
+		// Phase 5 compat fields — empty for Phase 6 QR bookings.
+		SnapToken:   out.SnapToken,
+		RedirectURL: out.RedirectURL,
 	}
 	ctx.JSON(http.StatusCreated, resp)
 }
@@ -127,26 +134,27 @@ func (c *BookingController) GetPublicByCode(ctx *gin.Context) {
 }
 
 // HandleWebhook handles POST /api/v1/public/payments/webhook.
-// Not rate-limited (Midtrans retries on non-200 responses).
+// Phase 6: passes raw body bytes + headers to PaymentService.HandleWebhook
+// (via the BookingService shim) so the adapter can verify the HMAC signature
+// before any JSON decode (H-3 equivalent for iPaymu).
+// Always returns HTTP 200 — provider must not retry on non-200.
 func (c *BookingController) HandleWebhook(ctx *gin.Context) {
-	var req WebhookNotificationRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		// Malformed body — return 200 anyway so Midtrans doesn't retry.
+	rawBody, err := ctx.GetRawData()
+	if err != nil || len(rawBody) == 0 {
+		// Unreadable body — ack silently; nothing to process.
 		ctx.JSON(http.StatusOK, gin.H{"status": "ok"})
 		return
 	}
 
-	err := c.svc.HandlePaymentWebhook(ctx.Request.Context(), service.MidtransWebhookNotification{
-		OrderID:           req.OrderID,
-		TransactionStatus: req.TransactionStatus,
-		StatusCode:        req.StatusCode,
-		GrossAmount:       req.GrossAmount,
-		SignatureKey:      req.SignatureKey,
-		PaymentType:       req.PaymentType,
-	})
-	if err != nil {
-		// Internal error — log but still return 200 to suppress Midtrans retries
-		// for errors that are not recoverable (e.g. DB down is retried by ops).
+	headers := make(map[string]string, 4)
+	for key, vals := range ctx.Request.Header {
+		if len(vals) > 0 {
+			headers[key] = vals[0]
+		}
+	}
+
+	if err := c.svc.HandlePaymentWebhook(ctx.Request.Context(), rawBody, headers); err != nil {
+		// Internal error — log but still return 200 to suppress provider retries.
 		ctx.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
 		return
 	}

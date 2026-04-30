@@ -196,8 +196,13 @@ GoRouter appRouter(AppRouterRef ref) {
               // Payment
               GoRoute(
                 path: 'payment',
-                builder: (context, state) =>
-                    PaymentScreen(branchId: state.pathParameters['id']!),
+                builder: (context, state) {
+                  final extra = state.extra;
+                  return PaymentScreen(
+                    branchId: state.pathParameters['id']!,
+                    routeData: extra is PaymentRouteData ? extra : null,
+                  );
+                },
               ),
             ],
           ),

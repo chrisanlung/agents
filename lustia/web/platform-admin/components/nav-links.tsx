@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Building2, ClipboardList } from "lucide-react";
+import { LayoutDashboard, Building2, ClipboardList, Banknote } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -15,6 +15,7 @@ interface NavLinksProps {
 const links = [
   { href: "/dashboard", label: "Dasbor", icon: LayoutDashboard },
   { href: "/tenants", label: "Tenant", icon: Building2 },
+  { href: "/payout", label: "Payout", icon: Banknote },
   { href: "/tenants/registrations", label: "Registrasi", icon: ClipboardList },
 ] as const;
 

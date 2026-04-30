@@ -1,5 +1,6 @@
 // Provider wizard booking — state multi-step form booking.
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../data/availability_model.dart';
@@ -81,7 +82,9 @@ class BookingWizard extends _$BookingWizard {
   }
 }
 
-/// Provider untuk submit booking dan dummy payment.
+/// Provider untuk submit booking — ADR 0015 §2.8.
+/// Hanya membuat booking; tidak lagi memanggil dummy webhook.
+/// Setelah submit berhasil, PaymentScreen menangani polling status.
 @riverpod
 class BookingSubmit extends _$BookingSubmit {
   @override
@@ -103,14 +106,22 @@ class BookingSubmit extends _$BookingSubmit {
       therapistId: wizard.selectedTherapistId,
     );
 
-    final result = await AsyncValue.guard(() async {
-      final response = await repo.createBooking(request);
-      // Dummy webhook — simulates Midtrans callback immediately
-      await repo.sendDummyWebhook(response.code, response.totalPriceIdr);
-      return response;
-    });
+    final result = await AsyncValue.guard(() => repo.createBooking(request));
 
     state = result;
     return result.valueOrNull;
   }
+}
+
+/// Provider polling status pembayaran — ADR 0015 §2.7.
+///
+/// Emit stream [PaymentStatusResponse] setiap 5 detik.
+/// Stream berhenti secara otomatis saat status terminal
+/// (paid / expired / failed) atau saat provider di-dispose.
+@riverpod
+Stream<PaymentStatusResponse> paymentStatus(Ref ref, String bookingCode) {
+  final repo = ref.read(bookingRepositoryProvider);
+  return Stream.periodic(const Duration(seconds: 5))
+      .asyncMap((_) => repo.getPaymentStatus(bookingCode))
+      .takeWhile((status) => !status.isTerminal);
 }
