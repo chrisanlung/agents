@@ -63,7 +63,6 @@ export default async function UbahKataSandiPage({ searchParams }: PageProps) {
       <AppHeader
         fullName={me.user.full_name}
         email={me.user.email}
-        activeNav="dashboard"
         tenant={me.tenant ? { name: me.tenant.name, slug: me.tenant.slug } : null}
         memberships={me.memberships}
       />

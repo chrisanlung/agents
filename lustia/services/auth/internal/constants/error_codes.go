@@ -20,6 +20,8 @@ const (
 	CodeNotFound               = "NOT_FOUND"
 	CodeConflict               = "CONFLICT"
 	CodeDuplicateEmail         = "DUPLICATE_EMAIL"
+	CodeUsernameInvalid        = "USERNAME_INVALID"
+	CodeUsernameAlreadyTaken   = "USERNAME_ALREADY_TAKEN"
 	CodeUserAlreadyInTenant    = "CONFLICT_USER_ALREADY_IN_TENANT"
 	CodeRateLimited            = "RATE_LIMITED"
 	CodeInternal               = "INTERNAL"
@@ -56,6 +58,7 @@ const (
 	CodeNoTherapistAvailable          = "NO_THERAPIST_AVAILABLE"
 	CodeNoRoomAvailable               = "NO_ROOM_AVAILABLE"
 	CodeTherapistNotForService        = "THERAPIST_NOT_FOR_SERVICE"
+	CodeBookingTherapistConflict      = "BOOKING_THERAPIST_CONFLICT"
 
 	// ADR 0011 — Storage abstraction + therapist extended profile.
 	CodeUploadQuotaExceeded    = "UPLOAD_QUOTA_EXCEEDED"

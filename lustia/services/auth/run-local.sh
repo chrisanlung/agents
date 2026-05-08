@@ -27,16 +27,32 @@ export LOG_LEVEL=info
 export CONFIG_PATH="$(pwd)/config/app.yaml"
 export APP_DISPLAY_NAME="Lustia"
 
-# --- Phase 5: Payment adapter (ADR 0014, SECURITY.md C-2) ---
-# APP_ENV must be "dev" or "local" when PAYMENT_ADAPTER=dummy.
-# The service will log.Fatal at startup if PAYMENT_ADAPTER=dummy and
+# --- Phase 6: Payment adapter (ADR 0015, SECURITY.md C-2) ---
+# APP_ENV must be "dev" or "local" when PAYMENT_PROVIDER=dummy.
+# The service will log.Fatal at startup if PAYMENT_PROVIDER=dummy and
 # APP_ENV is anything else (production safety gate).
 export APP_ENV=dev
-export PAYMENT_ADAPTER=dummy
-# Real Midtrans keys — leave blank until keys are provisioned.
-export MIDTRANS_SERVER_KEY=${MIDTRANS_SERVER_KEY:-}
-export MIDTRANS_CLIENT_KEY=${MIDTRANS_CLIENT_KEY:-}
-export MIDTRANS_ENVIRONMENT=sandbox
+# export PAYMENT_PROVIDER=dummy
+
+# --- iPaymu sandbox (Phase 6) ---
+# Switch to the iPaymu sandbox by commenting out PAYMENT_PROVIDER=dummy above
+# and uncommenting the five lines below. Steps to bring up the tunnel first:
+#   1. ngrok http 8080  (already authed; run in a separate shell, leave open)
+#   2. Confirm the public URL: curl -s http://127.0.0.1:4040/api/tunnels
+#   3. If the ngrok URL changes (free plan rotates), update IPAYMU_NOTIFY_URL
+#      below and re-source this file + restart the auth service.
+#   4. Test path: create a booking via mobile -> grab trx_id from auth logs ->
+#      visit https://sandbox.ipaymu.com/send-notify and push a synthetic
+#      notification to the IPAYMU_NOTIFY_URL value below.
+#
+export PAYMENT_PROVIDER=ipaymu
+export IPAYMU_BASE_URL=https://sandbox.ipaymu.com
+export IPAYMU_VA=0000005714983489
+export IPAYMU_API_KEY=SANDBOX429CAC48-22DE-43FE-9153-26DD0BB5671D
+export IPAYMU_NOTIFY_URL=https://darkish-trifle-kept.ngrok-free.dev/api/v1/public/payments/webhook
+# Sandbox-only: simulator emits a static placeholder X-Signature, not a real
+# HMAC. Skip verification so end-to-end testing works. NEVER set in prod.
+export IPAYMU_SKIP_SIGNATURE_VERIFY=true
 
 # --- Database (local Postgres 17) ---
 #
@@ -69,7 +85,7 @@ export PASSWORD_RESET_URL_BASE=${PASSWORD_RESET_URL_BASE:-http://localhost:3002/
 
 # --- CORS — dev web frontends ---
 # Comma-separated exact origins. Leave unset to disable CORS entirely.
-export CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3001,http://localhost:3002,http://localhost:3003,http://localhost:5000}
+export CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3001,http://localhost:3002,http://localhost:3003,http://localhost:5000,http://localhost:8081}
 
 # --- Storage (ADR 0011) ---
 # Local driver writes to a sub-directory of the repo checkout (gitignored).

@@ -8,11 +8,19 @@ import "time"
 
 // LoginInput carries the credentials supplied by the caller.
 // TenantSlug is removed in ADR 0007: login is now email+password only.
+//
+// Identifier is the preferred field (accepts either email or username).
+// For backward compatibility, Email is also accepted; when Identifier is
+// non-empty it takes precedence. The auth service resolves which lookup to
+// perform based on whether Identifier contains an "@" sign.
+//
+// Deprecated: Email — use Identifier instead; kept so Phase 1–6 clients keep working.
 type LoginInput struct {
-	Email     string
-	Password  string
-	UserAgent string
-	IP        string
+	Identifier string // email OR username; takes precedence over Email when non-empty
+	Email      string // deprecated: use Identifier; preserved for backward compat
+	Password   string
+	UserAgent  string
+	IP         string
 }
 
 // MembershipSummary is a read-only projection of a membership with its tenant,
@@ -102,17 +110,32 @@ type SwitchTenantOutput struct {
 // Me
 // ---------------------------------------------------------------------------
 
-// UserProfile is a read-only projection used in GetMe and LoginOutput.
-// It carries only identity fields; roles and branches live on MembershipSummary.
+// UserProfile is a read-only projection used in GetMe, LoginOutput, and admin
+// user endpoints. The base identity fields are always present. RoleIDs,
+// RoleNames, BranchIDs, and BranchNames are populated only for admin endpoints
+// (GET /admin/users/:id, GET /admin/users, and CreateUser / UpdateUser responses)
+// — they are empty slices on the GetMe / login path where membership context is
+// already carried by MembershipSummary.
 type UserProfile struct {
 	ID                 string
 	Email              string
+	Username           *string // nil when not set
 	FullName           string
 	Phone              string
 	AvatarURL          string
 	IsActive           bool
 	IsSuperAdmin       bool
 	MustChangePassword bool
+	// Admin-only enrichment — populated from the user's active membership in
+	// the calling tenant. Empty (not nil) when not loaded.
+	RoleIDs     []string
+	RoleNames   []string
+	BranchIDs   []string
+	BranchNames []string
+	// Timestamps shown on user detail page. Empty string when not set.
+	CreatedAt   string
+	LastLoginAt string
+	LockedUntil string
 }
 
 // GetMeOutput wraps the UserProfile with membership info.
@@ -181,13 +204,14 @@ type ResetPasswordInput struct {
 
 // CreateUserInput carries the data for admin-initiated user creation.
 type CreateUserInput struct {
-	CallerUserID   string
-	CallerTenantID string
-	Email          string
-	FullName       string
-	Phone          string
-	RoleIDs        []string
-	BranchIDs      []string
+	CallerUserID    string
+	CallerTenantID  string
+	Email           string
+	Username        *string // optional; service lowercases + validates before save
+	FullName        string
+	Phone           string
+	RoleIDs         []string
+	BranchIDs       []string
 	InitialPassword string // generated server-side; returned once in response
 }
 
@@ -231,6 +255,8 @@ type UpdateUserInput struct {
 	CallerTenantID string
 	TargetUserID   string
 	FullName       *string
+	Username       *string  // nil = no change; pointer to empty string = clear username
+	UsernameSet    bool     // true when the caller explicitly supplied the username field
 	Phone          *string
 	AvatarURL      *string
 	IsActive       *bool
@@ -442,6 +468,9 @@ type UpdateBranchInput struct {
 	Timezone       *string
 	ContactPhone   *string
 	ContactEmail   *string
+	// OperationalHours: raw JSON bytes (object), e.g.
+	// {"mon":"09:00-17:00","sun":null}. Nil = no change.
+	OperationalHours []byte
 }
 
 // ChangeBranchStatusInput carries the status-transition request.
@@ -468,17 +497,26 @@ type BranchDetail struct {
 	Timezone     string
 	ContactPhone *string
 	ContactEmail *string
-	ActivatedAt  *string // RFC3339 or nil
-	CreatedAt    string
-	UpdatedAt    string
+	// OperationalHours: raw JSONB bytes from the DB; opaque to the service —
+	// the controller serialises directly into the response.
+	OperationalHours []byte
+	ActivatedAt      *string // RFC3339 or nil
+	CreatedAt        string
+	UpdatedAt        string
 }
 
 // ListBranchesInput carries filter + pagination for the branch list.
 type ListBranchesInput struct {
 	CallerTenantID string
-	Status         string // active|inactive|all
-	Page           int
-	Limit          int
+	CallerBranches []string // from JWT branches claim; only consulted when ScopeToCallerBranches=true
+	IsAdmin        bool     // true for tenant_admin / super_admin — bypasses branch-scope filter
+	// ScopeToCallerBranches is opt-in (mapped from `?scope=mine` on the controller).
+	// When true and !IsAdmin, the listing is narrowed to CallerBranches. Default
+	// false so tenant-admin surfaces always receive the full list.
+	ScopeToCallerBranches bool
+	Status                string // active|inactive|all
+	Page                  int
+	Limit                 int
 }
 
 // ListBranchesOutput carries a page of branches and pagination metadata.
@@ -534,6 +572,8 @@ type TherapistDetail struct {
 	WeightKg    int16
 	Build       string
 	Specialties []string
+	ServiceIDs  []string // active therapist↔service mappings — populated by public branch detail so mobile can filter therapists by selected service
+	PrepMinutes int
 	IsActive    bool
 	JoinedAt    *string // RFC3339 or nil
 	CreatedAt   string
@@ -652,6 +692,7 @@ type UpdateTherapistInput struct {
 	Build          *string
 	JoinedAt       *string
 	UserID         *string
+	PrepMinutes    *int // nil = no change; pointer enables PATCH semantics
 }
 
 // UploadTherapistPhotoInput carries data for the photo-upload operation.
@@ -1020,11 +1061,23 @@ type PublicBookingView struct {
 }
 
 // Slot represents a single available time slot for a service on a given date.
+//
+// AvailableRoomIDs is always populated — it lists the UUIDs of rooms at the
+// branch that are NOT booked for this specific slot window.
+//
+// TherapistAvailable is only non-nil when the caller supplied a TherapistID
+// in AvailableSlotsInput. When non-nil, true means the specific therapist is
+// free at this slot (no overlapping booking AND their weekly schedule covers
+// this slot's day-of-week and time range). The aggregate
+// TherapistsAvailableCount is unaffected by the therapist filter.
 type Slot struct {
-	Start                   string // RFC3339
-	End                     string // RFC3339
+	Start                    string   // RFC3339
+	End                      string   // RFC3339
 	TherapistsAvailableCount int
 	RoomsAvailableCount      int
+	AvailableRoomIDs         []string // never nil; empty slice when no rooms at branch
+	// TherapistAvailable is nil when no TherapistID was requested.
+	TherapistAvailable *bool
 }
 
 // PublicCreateBookingInput carries data for the customer-facing booking creation.
@@ -1144,10 +1197,14 @@ type GetReportInput struct {
 }
 
 // AvailableSlotsInput carries parameters for the availability query.
+// TherapistID is optional — when non-nil, each returned Slot gains
+// TherapistAvailable=true/false indicating whether that specific therapist
+// is free at the slot window. Aggregate counts are unaffected.
 type AvailableSlotsInput struct {
-	BranchID   string
-	ServiceID  string
-	Date       string // YYYY-MM-DD
+	BranchID    string
+	ServiceID   string
+	Date        string  // YYYY-MM-DD
+	TherapistID *string // optional; nil = no per-therapist check
 }
 
 // PublicBranchFilter carries parameters for the public branch listing.

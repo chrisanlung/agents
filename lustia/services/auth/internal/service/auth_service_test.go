@@ -31,6 +31,9 @@ func (f *fakeUserRepo) FindByEmail(ctx context.Context, email string) (*model.Us
 	}
 	return nil, constants.ErrUserNotFound
 }
+func (f *fakeUserRepo) FindByUsername(_ context.Context, _ string) (*model.User, error) {
+	return nil, constants.ErrUserNotFound
+}
 func (f *fakeUserRepo) FindByID(_ context.Context, _ string) (*model.User, error) {
 	return &model.User{}, nil
 }
@@ -83,6 +86,12 @@ func (f *fakeMembershipRepo) SuspendAllForTenant(_ context.Context, _ string) ([
 }
 func (f *fakeMembershipRepo) FindActiveByTenant(_ context.Context, _ string) ([]*model.Membership, error) {
 	return nil, nil
+}
+func (f *fakeMembershipRepo) GetRolesAndBranches(_ context.Context, _ string) (model.MembershipAssignments, error) {
+	return model.MembershipAssignments{}, nil
+}
+func (f *fakeMembershipRepo) GetRolesAndBranchesForMemberships(_ context.Context, _ []string) (map[string]model.MembershipAssignments, error) {
+	return map[string]model.MembershipAssignments{}, nil
 }
 
 type fakeTenantRepo struct {
@@ -441,4 +450,290 @@ func TestLogin_RateLimited(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, constants.ErrRateLimited))
+}
+
+// ---------------------------------------------------------------------------
+// Username login tests (spec §4).
+// ---------------------------------------------------------------------------
+
+// fakeUserRepoWithUsername extends fakeUserRepo to allow username lookups.
+type fakeUserRepoWithUsername struct {
+	fakeUserRepo
+	findByUsername func(ctx context.Context, username string) (*model.User, error)
+}
+
+func (f *fakeUserRepoWithUsername) FindByUsername(ctx context.Context, username string) (*model.User, error) {
+	if f.findByUsername != nil {
+		return f.findByUsername(ctx, username)
+	}
+	return nil, constants.ErrUserNotFound
+}
+
+// newTestAuthServiceWithUsernameRepo is a variant of newTestAuthService that
+// accepts a *fakeUserRepoWithUsername instead of *fakeUserRepo.
+func newTestAuthServiceWithUsernameRepo(
+	users *fakeUserRepoWithUsername,
+	memberships *fakeMembershipRepo,
+	tokens *fakeRefreshTokenRepo,
+	hasher *fakeHasher,
+	issuer *fakeIssuer,
+	clock *fakeClock,
+	rateLimiter *fakeRateLimiter,
+) *service.AuthService {
+	return service.NewAuthService(
+		users, memberships, &fakeTenantRepo{}, tokens, hasher, issuer, clock,
+		&fakeAuditRepo{}, rateLimiter, &fakeTxManager{},
+	)
+}
+
+func TestLogin_ByUsername_Success(t *testing.T) {
+	t.Parallel()
+
+	userID := "u-alice"
+	tenantID := "t-acme"
+	now := time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
+
+	tokenRepo := &fakeRefreshTokenRepo{}
+	svc := newTestAuthServiceWithUsernameRepo(
+		&fakeUserRepoWithUsername{
+			findByUsername: func(_ context.Context, username string) (*model.User, error) {
+				assert.Equal(t, "alice", username, "username must be lowercased before lookup")
+				return &model.User{
+					ID:           userID,
+					Email:        "alice@example.com",
+					PasswordHash: "hashed",
+					FullName:     "Alice",
+					IsActive:     true,
+				}, nil
+			},
+		},
+		&fakeMembershipRepo{
+			byUser: []*model.Membership{
+				{
+					ID: "m-acme", UserID: userID, TenantID: tenantID,
+					Status: model.MembershipStatusActive,
+					Tenant: model.Tenant{ID: tenantID, Name: "Acme Spa", Slug: "acme-spa", Status: model.TenantStatusActive},
+				},
+			},
+		},
+		tokenRepo,
+		&fakeHasher{verify: func(_ context.Context, _, _ string) (bool, error) { return true, nil }},
+		&fakeIssuer{},
+		&fakeClock{t: now},
+		&fakeRateLimiter{allow: true},
+	)
+
+	out, err := svc.Login(context.Background(), service.LoginInput{
+		Identifier: "alice", // username, no "@"
+		Password:   "Staff2026!",
+		IP:         "127.0.0.1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "tenant", out.Scope)
+	require.NotNil(t, out.ActiveMembershipID)
+	assert.Equal(t, "m-acme", *out.ActiveMembershipID)
+}
+
+func TestLogin_ByEmail_ViaIdentifier(t *testing.T) {
+	t.Parallel()
+	// Verifies that an "@"-containing identifier routes to FindByEmail, not FindByUsername.
+
+	userID := "u-bob"
+	tenantID := "t-bob"
+	now := time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
+
+	emailCalled := false
+	usernameCalled := false
+
+	tokenRepo := &fakeRefreshTokenRepo{}
+	svc := newTestAuthServiceWithUsernameRepo(
+		&fakeUserRepoWithUsername{
+			fakeUserRepo: fakeUserRepo{
+				findByEmail: func(_ context.Context, _ string) (*model.User, error) {
+					emailCalled = true
+					return &model.User{
+						ID: userID, Email: "bob@example.com", PasswordHash: "h",
+						FullName: "Bob", IsActive: true,
+					}, nil
+				},
+			},
+			findByUsername: func(_ context.Context, _ string) (*model.User, error) {
+				usernameCalled = true
+				return nil, constants.ErrUserNotFound
+			},
+		},
+		&fakeMembershipRepo{
+			byUser: []*model.Membership{
+				{ID: "m-bob", UserID: userID, TenantID: tenantID,
+					Status: model.MembershipStatusActive,
+					Tenant: model.Tenant{ID: tenantID, Name: "Bob Co", Slug: "bob", Status: model.TenantStatusActive}},
+			},
+		},
+		tokenRepo,
+		&fakeHasher{verify: func(_ context.Context, _, _ string) (bool, error) { return true, nil }},
+		&fakeIssuer{},
+		&fakeClock{t: now},
+		&fakeRateLimiter{allow: true},
+	)
+
+	out, err := svc.Login(context.Background(), service.LoginInput{
+		Identifier: "bob@example.com",
+		Password:   "pass",
+		IP:         "127.0.0.1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "tenant", out.Scope)
+	assert.True(t, emailCalled, "FindByEmail must be called for @-containing identifier")
+	assert.False(t, usernameCalled, "FindByUsername must NOT be called for email identifier")
+}
+
+func TestLogin_ByUsername_WrongPassword_AntiEnum(t *testing.T) {
+	t.Parallel()
+	// Wrong password → ErrInvalidCredentials (same as not-found; no leaking which field is wrong).
+
+	now := time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
+	svc := newTestAuthServiceWithUsernameRepo(
+		&fakeUserRepoWithUsername{
+			findByUsername: func(_ context.Context, _ string) (*model.User, error) {
+				return &model.User{
+					ID: "u1", Email: "u@x.com", PasswordHash: "h",
+					FullName: "U", IsActive: true,
+				}, nil
+			},
+		},
+		&fakeMembershipRepo{},
+		&fakeRefreshTokenRepo{},
+		&fakeHasher{verify: func(_ context.Context, _, _ string) (bool, error) { return false, nil }},
+		&fakeIssuer{},
+		&fakeClock{t: now},
+		&fakeRateLimiter{allow: true},
+	)
+
+	_, err := svc.Login(context.Background(), service.LoginInput{
+		Identifier: "someuser",
+		Password:   "wrongpassword",
+		IP:         "127.0.0.1",
+	})
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, constants.ErrInvalidCredentials))
+}
+
+func TestLogin_ByUsername_NotFound_AntiEnum(t *testing.T) {
+	t.Parallel()
+	// Username not found → ErrInvalidCredentials (same error as wrong password — anti-enumeration).
+
+	now := time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
+	svc := newTestAuthServiceWithUsernameRepo(
+		&fakeUserRepoWithUsername{
+			findByUsername: func(_ context.Context, _ string) (*model.User, error) {
+				return nil, constants.ErrUserNotFound
+			},
+		},
+		&fakeMembershipRepo{},
+		&fakeRefreshTokenRepo{},
+		&fakeHasher{},
+		&fakeIssuer{},
+		&fakeClock{t: now},
+		&fakeRateLimiter{allow: true},
+	)
+
+	_, err := svc.Login(context.Background(), service.LoginInput{
+		Identifier: "ghost",
+		Password:   "anything",
+		IP:         "127.0.0.1",
+	})
+
+	require.Error(t, err)
+	// CRITICAL: must return INVALID_CREDENTIALS, not ErrUserNotFound, to prevent
+	// username enumeration.
+	assert.True(t, errors.Is(err, constants.ErrInvalidCredentials),
+		"must return ErrInvalidCredentials for unknown username (anti-enumeration)")
+}
+
+func TestLogin_BackwardCompat_EmailField(t *testing.T) {
+	t.Parallel()
+	// Old clients that still send "email" (not "identifier") must still work.
+
+	userID := "u-legacy"
+	tenantID := "t-leg"
+	now := time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
+
+	tokenRepo := &fakeRefreshTokenRepo{}
+	svc := newTestAuthServiceWithUsernameRepo(
+		&fakeUserRepoWithUsername{
+			fakeUserRepo: fakeUserRepo{
+				findByEmail: func(_ context.Context, _ string) (*model.User, error) {
+					return &model.User{
+						ID: userID, Email: "legacy@example.com", PasswordHash: "h",
+						FullName: "Legacy", IsActive: true,
+					}, nil
+				},
+			},
+		},
+		&fakeMembershipRepo{
+			byUser: []*model.Membership{
+				{ID: "m-leg", UserID: userID, TenantID: tenantID,
+					Status: model.MembershipStatusActive,
+					Tenant: model.Tenant{ID: tenantID, Name: "Old Co", Slug: "old", Status: model.TenantStatusActive}},
+			},
+		},
+		tokenRepo,
+		&fakeHasher{verify: func(_ context.Context, _, _ string) (bool, error) { return true, nil }},
+		&fakeIssuer{},
+		&fakeClock{t: now},
+		&fakeRateLimiter{allow: true},
+	)
+
+	// Caller sends Email (old field), not Identifier.
+	out, err := svc.Login(context.Background(), service.LoginInput{
+		Email:    "legacy@example.com",
+		Password: "pass",
+		IP:       "127.0.0.1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "tenant", out.Scope)
+}
+
+func TestLogin_CaseInsensitiveUsername(t *testing.T) {
+	t.Parallel()
+	// Username lookup must lower-case the input before querying.
+
+	now := time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
+	capturedUsername := ""
+
+	svc := newTestAuthServiceWithUsernameRepo(
+		&fakeUserRepoWithUsername{
+			findByUsername: func(_ context.Context, username string) (*model.User, error) {
+				capturedUsername = username
+				return &model.User{
+					ID: "u1", Email: "u@x.com", PasswordHash: "h",
+					FullName: "U", IsActive: true,
+				}, nil
+			},
+		},
+		&fakeMembershipRepo{byUser: []*model.Membership{
+			{ID: "m1", UserID: "u1", TenantID: "t1",
+				Status: model.MembershipStatusActive,
+				Tenant: model.Tenant{ID: "t1", Name: "T", Slug: "t", Status: model.TenantStatusActive}},
+		}},
+		&fakeRefreshTokenRepo{},
+		&fakeHasher{verify: func(_ context.Context, _, _ string) (bool, error) { return true, nil }},
+		&fakeIssuer{},
+		&fakeClock{t: now},
+		&fakeRateLimiter{allow: true},
+	)
+
+	_, err := svc.Login(context.Background(), service.LoginInput{
+		Identifier: "ALICE", // uppercase input
+		Password:   "pass",
+		IP:         "127.0.0.1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "alice", capturedUsername,
+		"service must lowercase the username before calling FindByUsername")
 }

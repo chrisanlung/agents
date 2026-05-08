@@ -12,6 +12,21 @@ import (
 	"github.com/google/uuid"
 )
 
+// jakartaLocation is loaded once at package init time and reused for all
+// Jakarta-timezone date arithmetic in the settlement summary path.
+var jakartaLocation *time.Location
+
+func init() {
+	var err error
+	jakartaLocation, err = time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		// Asia/Jakarta is always present in the Go embedded tzdata (go:embed
+		// tzdata in go 1.15+). Panic is appropriate — this is an unrecoverable
+		// programmer/runtime misconfiguration, not a user-input error.
+		panic("settlement_service: cannot load Asia/Jakarta timezone: " + err.Error())
+	}
+}
+
 // SettlementServiceIface is the consumer-owned interface for settlement operations.
 type SettlementServiceIface interface {
 	// Reconcile fetches the provider daily settlement report for `date`,
@@ -27,6 +42,29 @@ type SettlementServiceIface interface {
 	// GetBatchDetail returns a settlement batch with related transactions +
 	// mismatch warnings.
 	GetBatchDetail(ctx context.Context, batchID string) (SettlementBatchDetail, error)
+
+	// Summary returns aggregate KPIs for the platform-admin "Volume Disetel
+	// Minggu Ini" dashboard card. It aggregates payment_transaction rows whose
+	// settled_at falls within the Jakarta-localised [from, to] window.
+	Summary(ctx context.Context, in SettlementSummaryInput) (SettlementSummaryOutput, error)
+}
+
+// SettlementSummaryInput carries the raw (YYYY-MM-DD, Asia/Jakarta) date
+// strings from the controller. Validation and timezone conversion happen inside
+// the service so the controller stays thin.
+type SettlementSummaryInput struct {
+	From string // YYYY-MM-DD, Asia/Jakarta calendar date (inclusive start)
+	To   string // YYYY-MM-DD, Asia/Jakarta calendar date (inclusive end)
+}
+
+// SettlementSummaryOutput is returned by SettlementService.Summary.
+type SettlementSummaryOutput struct {
+	From                string `json:"from"`
+	To                  string `json:"to"`
+	BatchCount          int64  `json:"batch_count"`
+	TotalVolumeIDR      int64  `json:"total_volume_idr"`
+	TotalPlatformFeeIDR int64  `json:"total_platform_fee_idr"`
+	TotalPayoutIDR      int64  `json:"total_payout_idr"`
 }
 
 // SettlementBatchFilter is declared in interfaces.go (service package).
@@ -262,6 +300,59 @@ func (s *settlementServiceImpl) GetBatchDetail(ctx context.Context, batchID stri
 		SettlementBatchSummary: summary,
 		Transactions:           summaries,
 		Mismatches:             nil, // persisted mismatches are a Phase 7 feature
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Summary — dashboard KPI aggregate
+// ---------------------------------------------------------------------------
+
+// Summary aggregates payment_transaction rows whose settled_at falls within
+// the Jakarta-localised [from, to] window and returns the platform-admin KPI
+// fields for the "Volume Disetel Minggu Ini" card.
+//
+// Date math:
+//   - fromUTC = midnight Jakarta on `in.From` converted to UTC.
+//   - toUTC   = midnight Jakarta on the day after `in.To` minus 1 nanosecond
+//     (i.e. 23:59:59.999999999 Jakarta) converted to UTC.
+//
+// Validation: to >= from; (to - from) <= 90 days; both dates parseable.
+func (s *settlementServiceImpl) Summary(ctx context.Context, in SettlementSummaryInput) (SettlementSummaryOutput, error) {
+	fromDate, err := time.ParseInLocation("2006-01-02", in.From, jakartaLocation)
+	if err != nil {
+		return SettlementSummaryOutput{}, fmt.Errorf("%w: from must be YYYY-MM-DD", constants.ErrInvalidInput)
+	}
+	toDate, err := time.ParseInLocation("2006-01-02", in.To, jakartaLocation)
+	if err != nil {
+		return SettlementSummaryOutput{}, fmt.Errorf("%w: to must be YYYY-MM-DD", constants.ErrInvalidInput)
+	}
+
+	if toDate.Before(fromDate) {
+		return SettlementSummaryOutput{}, fmt.Errorf("%w: to must not be before from", constants.ErrInvalidInput)
+	}
+	if toDate.Sub(fromDate) > 90*24*time.Hour {
+		return SettlementSummaryOutput{}, fmt.Errorf("%w: date range must not exceed 90 days", constants.ErrInvalidInput)
+	}
+
+	// fromUTC: 00:00:00.000000000 Asia/Jakarta on `from`, converted to UTC.
+	fromUTC := fromDate.UTC()
+
+	// toUTC: 23:59:59.999999999 Asia/Jakarta on `to`, converted to UTC.
+	// Computed as: midnight Jakarta on (to+1 day) minus 1 nanosecond.
+	toUTC := toDate.AddDate(0, 0, 1).Add(-time.Nanosecond).UTC()
+
+	count, volume, platformFee, payout, err := s.batches.Summary(ctx, fromUTC, toUTC)
+	if err != nil {
+		return SettlementSummaryOutput{}, fmt.Errorf("settlement summary: %w", err)
+	}
+
+	return SettlementSummaryOutput{
+		From:                in.From,
+		To:                  in.To,
+		BatchCount:          count,
+		TotalVolumeIDR:      volume,
+		TotalPlatformFeeIDR: platformFee,
+		TotalPayoutIDR:      payout,
 	}, nil
 }
 

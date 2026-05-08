@@ -29,6 +29,12 @@ func (r *stubAvailabilityRepo) ReplaceAllForTherapist(_ context.Context, _ strin
 	r.rows = rows
 	return nil
 }
+func (r *stubAvailabilityRepo) TherapistCoversSlot(_ context.Context, _ string, _ int, _, _ string) (bool, error) {
+	return true, nil
+}
+func (r *stubAvailabilityRepo) FindByTherapistsAndDOW(_ context.Context, _ []string, _ int) ([]*model.TherapistAvailability, error) {
+	return []*model.TherapistAvailability{}, nil
+}
 
 func newTestAvailabilitySvc(therapistRepo *stubTherapistRepo, availRepo *stubAvailabilityRepo) *service.AvailabilitySvc {
 	return service.NewAvailabilitySvc(availRepo, therapistRepo, &fakeAuditRepo{}, &stubClockForBranch{})

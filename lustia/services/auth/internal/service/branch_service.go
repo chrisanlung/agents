@@ -102,6 +102,12 @@ func (s *BranchService) Create(ctx context.Context, in CreateBranchInput) (Branc
 }
 
 // ListByTenant returns a paginated list of branches for the caller's tenant.
+// Default: returns ALL active branches in the tenant — tenant-admin and other
+// admin surfaces depend on this behaviour. When the caller explicitly opts in
+// via ScopeToCallerBranches (mapped from `?scope=mine` on the controller),
+// non-admin results are narrowed to the branch IDs in CallerBranches; this is
+// used by ops-portal flows like the concierge booking form. Admins always see
+// the full list regardless of the flag.
 func (s *BranchService) ListByTenant(ctx context.Context, in ListBranchesInput) (ListBranchesOutput, error) {
 	limit := in.Limit
 	if limit <= 0 || limit > 200 {
@@ -112,11 +118,24 @@ func (s *BranchService) ListByTenant(ctx context.Context, in ListBranchesInput) 
 		page = 1
 	}
 
-	rows, total, err := s.branches.FindByTenant(ctx, in.CallerTenantID, BranchFilter{
+	// Defensive short-circuit: non-admin caller asked for their own scope but
+	// has zero branch assignments — return an empty page rather than letting
+	// the IN() clause become "no IDs".
+	if in.ScopeToCallerBranches && !in.IsAdmin && len(in.CallerBranches) == 0 {
+		return ListBranchesOutput{Branches: []BranchDetail{}, Page: page, TotalCount: 0, TotalPages: 0}, nil
+	}
+
+	filter := BranchFilter{
 		Status: in.Status,
 		Page:   page,
 		Limit:  limit,
-	})
+	}
+	// Apply scoping only when the caller explicitly opted in AND is non-admin.
+	if in.ScopeToCallerBranches && !in.IsAdmin {
+		filter.IDs = in.CallerBranches
+	}
+
+	rows, total, err := s.branches.FindByTenant(ctx, in.CallerTenantID, filter)
 	if err != nil {
 		return ListBranchesOutput{}, fmt.Errorf("list branches: %w", err)
 	}
@@ -187,6 +206,9 @@ func (s *BranchService) UpdateBranch(ctx context.Context, in UpdateBranchInput) 
 	if in.ContactEmail != nil {
 		b.ContactEmail = in.ContactEmail
 	}
+	if in.OperationalHours != nil {
+		b.OperationalHours = in.OperationalHours
+	}
 	b.UpdatedBy = &in.CallerUserID
 
 	if err := s.branches.Update(ctx, b); err != nil {
@@ -199,6 +221,7 @@ func (s *BranchService) UpdateBranch(ctx context.Context, in UpdateBranchInput) 
 		Action:       "branch.updated",
 		ResourceType: "branch",
 		ResourceID:   b.ID,
+		Meta:         map[string]interface{}{"branch_id": b.ID},
 	})
 
 	return toBranchDetail(b), nil
@@ -317,10 +340,11 @@ func toBranchDetail(b *model.Branch) BranchDetail {
 		PostalCode:   b.PostalCode,
 		Country:      b.Country,
 		Timezone:     b.Timezone,
-		ContactPhone: b.ContactPhone,
-		ContactEmail: b.ContactEmail,
-		CreatedAt:    b.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:    b.UpdatedAt.Format(time.RFC3339),
+		ContactPhone:     b.ContactPhone,
+		ContactEmail:     b.ContactEmail,
+		OperationalHours: b.OperationalHours,
+		CreatedAt:        b.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:        b.UpdatedAt.Format(time.RFC3339),
 	}
 	if b.ActivatedAt != nil {
 		s := b.ActivatedAt.Format(time.RFC3339)

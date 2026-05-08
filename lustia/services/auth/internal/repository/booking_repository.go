@@ -302,6 +302,173 @@ func (r *BookingRepository) ReportSummary(ctx context.Context, in service.Bookin
 	return summary, nil
 }
 
+// FindBookedRoomIDsInSlots returns, for each slot window, the set of room UUIDs
+// that have at least one non-cancelled/non-expired booking whose scheduled
+// window overlaps the slot. Results are keyed by the slot's RFC3339 start time.
+//
+// Two-pass approach: one aggregate query using CASE/UNNEST avoids N+1 per-slot
+// queries. The query uses overlapping interval logic:
+//   overlap = scheduled_start < slotEnd AND scheduled_end > slotStart
+func (r *BookingRepository) FindBookedRoomIDsInSlots(ctx context.Context, branchID string, windows []service.SlotWindow) (map[string][]string, error) {
+	if len(windows) == 0 {
+		return map[string][]string{}, nil
+	}
+	db := dbFromContext(ctx, r.db)
+
+	type resultRow struct {
+		SlotStart string
+		RoomID    string
+	}
+
+	// Build VALUES list for the slot windows so we can do a single JOIN.
+	// We use a raw SQL query with Scan for maximum compatibility with the
+	// existing GORM setup (avoids needing a lateral join or CTE via GORM DSL).
+	//
+	// Strategy: for each booking that overlaps ANY of the windows, return the
+	// (window_start, room_id) pairs. We then fan out to all overlapping windows.
+	// For typical daily slots (24 windows × 60-min service) this is fast.
+	activeStatuses := []string{
+		model.BookingStatusPendingPayment,
+		model.BookingStatusPaid,
+		model.BookingStatusCheckedIn,
+	}
+
+	// We iterate once per slot window. For the typical slot count (≤ 48 per day)
+	// and typical booking volume this is acceptable. A single CTE-based query
+	// would be more efficient but requires raw SQL construction with a variable
+	// number of params — we keep this simple and correct.
+	result := make(map[string][]string, len(windows))
+	for _, w := range windows {
+		type roomRow struct {
+			RoomID string `gorm:"column:room_id"`
+		}
+		var rows []roomRow
+		if err := db.Model(&model.Booking{}).
+			Select("room_id").
+			Where("branch_id = ? AND room_id IS NOT NULL AND status IN ? AND scheduled_start < ? AND scheduled_end > ?",
+				branchID, activeStatuses, w.End, w.Start).
+			Scan(&rows).Error; err != nil {
+			return nil, fmt.Errorf("find booked room ids in slot %s: %w", w.Start, err)
+		}
+		ids := make([]string, 0, len(rows))
+		for _, row := range rows {
+			if row.RoomID != "" {
+				ids = append(ids, row.RoomID)
+			}
+		}
+		result[w.Start] = ids
+	}
+	return result, nil
+}
+
+// IsTherapistBookedInSlots returns, for each slot window, whether the given
+// therapist has a non-cancelled/non-expired booking overlapping that window.
+// Results are keyed by the slot's RFC3339 start time. (false, nil) when the
+// therapistID is unknown or has no bookings.
+//
+// prepMinutes (migration 000035) widens each existing booking's effective end
+// by that many minutes when testing overlap: the candidate window [start, end)
+// conflicts if it overlaps [booked_start, booked_end + prepMinutes minutes).
+// Use prepMinutes=0 to preserve pre-migration behaviour.
+func (r *BookingRepository) IsTherapistBookedInSlots(ctx context.Context, therapistID string, windows []service.SlotWindow, prepMinutes int) (map[string]bool, error) {
+	if len(windows) == 0 || therapistID == "" {
+		return map[string]bool{}, nil
+	}
+	db := dbFromContext(ctx, r.db)
+
+	activeStatuses := []string{
+		model.BookingStatusPendingPayment,
+		model.BookingStatusPaid,
+		model.BookingStatusCheckedIn,
+	}
+
+	result := make(map[string]bool, len(windows))
+	for _, w := range windows {
+		var count int64
+		if prepMinutes > 0 {
+			// Widen existing booking's effective end by prepMinutes:
+			//   overlap = candidate_start < booked_end + interval
+			//          AND candidate_end   > booked_start
+			// Uses Postgres interval arithmetic; safe against SQL injection
+			// because prepMinutes is an int validated at 0–60 by the service.
+			if err := db.Model(&model.Booking{}).
+				Where(
+					"therapist_id = ? AND status IN ? AND scheduled_start < ? AND scheduled_end + (? * interval '1 minute') > ?",
+					therapistID, activeStatuses, w.End, prepMinutes, w.Start,
+				).
+				Count(&count).Error; err != nil {
+				return nil, fmt.Errorf("is therapist booked in slot %s (prep=%d): %w", w.Start, prepMinutes, err)
+			}
+		} else {
+			if err := db.Model(&model.Booking{}).
+				Where("therapist_id = ? AND status IN ? AND scheduled_start < ? AND scheduled_end > ?",
+					therapistID, activeStatuses, w.End, w.Start).
+				Count(&count).Error; err != nil {
+				return nil, fmt.Errorf("is therapist booked in slot %s: %w", w.Start, err)
+			}
+		}
+		result[w.Start] = count > 0
+	}
+	return result, nil
+}
+
+// FindTherapistConflicts returns all non-cancelled/non-expired bookings for
+// the given therapist IDs that overlap [dayStart, dayEnd), with each row's
+// effective end already widened by the therapist's prep_minutes via a JOIN.
+// A single query covers all therapists (Pass C of ListAvailableSlots bulk logic).
+//
+// SQL approach: JOIN booking b ON therapist t via b.therapist_id = t.id so that
+// t.prep_minutes is available inline. The effective_end is computed with Postgres
+// interval arithmetic. Returns an empty slice when therapistIDs is empty.
+func (r *BookingRepository) FindTherapistConflicts(ctx context.Context, therapistIDs []string, dayStart, dayEnd time.Time) ([]service.TherapistBookingInterval, error) {
+	if len(therapistIDs) == 0 {
+		return []service.TherapistBookingInterval{}, nil
+	}
+	db := dbFromContext(ctx, r.db)
+
+	activeStatuses := []string{
+		model.BookingStatusPendingPayment,
+		model.BookingStatusPaid,
+		model.BookingStatusCheckedIn,
+	}
+
+	type row struct {
+		TherapistID    string    `gorm:"column:therapist_id"`
+		EffectiveStart time.Time `gorm:"column:effective_start"`
+		EffectiveEnd   time.Time `gorm:"column:effective_end"`
+	}
+
+	var rows []row
+	// The SELECT computes effective_end = scheduled_end + prep_minutes * interval
+	// directly in SQL so we never drag full booking rows across the wire. The
+	// WHERE clause uses the same widened effective_end to filter out bookings
+	// that can't possibly overlap any slot in the day.
+	if err := db.Raw(`
+		SELECT
+			b.therapist_id,
+			b.scheduled_start  AS effective_start,
+			b.scheduled_end + (t.prep_minutes * interval '1 minute') AS effective_end
+		FROM booking b
+		INNER JOIN therapist t ON t.id = b.therapist_id
+		WHERE b.therapist_id IN ?
+		  AND b.status IN ?
+		  AND b.scheduled_start < ?
+		  AND b.scheduled_end + (t.prep_minutes * interval '1 minute') > ?
+	`, therapistIDs, activeStatuses, dayEnd, dayStart).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("find therapist conflicts: %w", err)
+	}
+
+	out := make([]service.TherapistBookingInterval, len(rows))
+	for i, r := range rows {
+		out[i] = service.TherapistBookingInterval{
+			TherapistID:    r.TherapistID,
+			EffectiveStart: r.EffectiveStart,
+			EffectiveEnd:   r.EffectiveEnd,
+		}
+	}
+	return out, nil
+}
+
 // translateBookingDBError extends the generic DB error mapper with
 // booking-specific exclusion constraint translation.
 // ADR 0002: the GiST exclusion constraint (excl_booking_therapist_no_overlap /

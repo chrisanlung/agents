@@ -8,7 +8,16 @@ import { setSessionCookies } from "@/lib/session";
 import { decodeJWTPayload, type JWTClaims } from "@/lib/jwt";
 
 const loginSchema = z.object({
-  email: z.string().email("Masukkan email yang valid"),
+  identifier: z
+    .string()
+    .min(3, "Masukkan email atau username yang valid")
+    .max(320, "Masukkan email atau username yang valid")
+    .refine(
+      (v) =>
+        /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ||
+        /^[a-zA-Z0-9._]{3,50}$/.test(v),
+      "Masukkan email atau username yang valid"
+    ),
   password: z.string().min(1, "Kata sandi wajib diisi"),
 });
 
@@ -49,7 +58,7 @@ export async function loginAction(
   formData: FormData
 ): Promise<LoginFormState> {
   const raw = {
-    email: formData.get("email"),
+    identifier: formData.get("identifier"),
     password: formData.get("password"),
   };
 
@@ -69,7 +78,7 @@ export async function loginAction(
     loginResponse = await apiFetch<LoginResponse>("/auth/login", {
       method: "POST",
       body: JSON.stringify({
-        email: parsed.data.email,
+        identifier: parsed.data.identifier,
         password: parsed.data.password,
       }),
     });

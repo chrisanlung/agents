@@ -174,6 +174,9 @@ final class TherapistItem {
     this.heightCm,
     this.weightKg,
     this.build,
+    this.gender,
+    this.bio,
+    this.serviceIds = const [],
   });
 
   final String id;
@@ -183,15 +186,37 @@ final class TherapistItem {
   final int? weightKg;
   final String? build;
 
+  /// "male" | "female" — null when not provided by backend.
+  final String? gender;
+
+  /// Short bio / specialty description — null when not provided.
+  final String? bio;
+
+  /// Active therapist↔service mappings. Used to filter the therapist picker
+  /// to those who actually perform the customer's selected service.
+  final List<String> serviceIds;
+
+  /// Up to 2 uppercase initials derived from full_name.
+  /// "Sari Dewi" → "SD", "Budi" → "B".
   String get initials {
-    final parts = fullName.trim().split(' ');
+    final parts = fullName.trim().split(RegExp(r'\s+'));
     if (parts.length >= 2) {
-      return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
+      return '${parts.first[0]}${parts[1][0]}'.toUpperCase();
     }
     return fullName.isNotEmpty ? fullName[0].toUpperCase() : '?';
   }
 
+  /// Display label for gender chip.
+  String? get genderLabel {
+    if (gender == null) return null;
+    return gender == 'female' ? 'Wanita' : 'Pria';
+  }
+
   factory TherapistItem.fromJson(Map<String, dynamic> json) {
+    final rawServiceIds = json['service_ids'];
+    final serviceIds = rawServiceIds is List
+        ? rawServiceIds.whereType<String>().toList()
+        : const <String>[];
     return TherapistItem(
       id: json['id'] as String,
       fullName: (json['full_name'] as String?) ?? '',
@@ -199,6 +224,9 @@ final class TherapistItem {
       heightCm: (json['height_cm'] as num?)?.toInt(),
       weightKg: (json['weight_kg'] as num?)?.toInt(),
       build: json['build'] as String?,
+      gender: json['gender'] as String?,
+      bio: json['bio'] as String?,
+      serviceIds: serviceIds,
     );
   }
 }
@@ -211,6 +239,7 @@ final class RoomItem {
     required this.capacity,
     this.roomType,
     this.photoUrl,
+    this.amenities = const [],
   });
 
   final String id;
@@ -219,6 +248,27 @@ final class RoomItem {
   final String? roomType;
   final String? photoUrl;
 
+  /// List of amenity strings (e.g. "AC", "Aromaterapi", "Dim Light").
+  /// Empty when not provided by backend.
+  final List<String> amenities;
+
+  /// Human-readable room type label.
+  String get roomTypeLabel {
+    switch (roomType?.toLowerCase()) {
+      case 'single':
+        return 'Single';
+      case 'couple':
+        return 'Couple';
+      case 'vip':
+        return 'VIP';
+      default:
+        if (roomType != null && roomType!.isNotEmpty) {
+          return roomType![0].toUpperCase() + roomType!.substring(1);
+        }
+        return 'Reguler';
+    }
+  }
+
   factory RoomItem.fromJson(Map<String, dynamic> json) {
     return RoomItem(
       id: json['id'] as String,
@@ -226,6 +276,11 @@ final class RoomItem {
       capacity: (json['capacity'] as num?)?.toInt() ?? 1,
       roomType: json['room_type'] as String?,
       photoUrl: json['photo_url'] as String?,
+      amenities:
+          (json['amenities'] as List<dynamic>?)
+              ?.map((e) => e as String)
+              .toList() ??
+          [],
     );
   }
 }

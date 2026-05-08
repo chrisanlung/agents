@@ -20,22 +20,49 @@ type ProviderConfig struct {
 	AppEnv string
 
 	// iPaymu credentials — only required when Provider="ipaymu".
-	IPaymuVA            string
-	IPaymuAPIKey        string
-	IPaymuSecret        string
-	IPaymuWebhookSecret string
+	//
+	// IPaymuVA is the Virtual Account number from the iPaymu dashboard.
+	// It is used both as the `va` header on outbound requests and as the HMAC
+	// key for inbound webhook signature verification.
+	//
+	// IPaymuAPIKey is the API key from the iPaymu dashboard.
+	// It is the HMAC signing key for outbound request signatures.
+	//
+	// IPaymuBaseURL is the iPaymu API base URL.
+	// Defaults to https://sandbox.ipaymu.com if empty.
+	// Set to https://my.ipaymu.com for production (when prod credentials arrive).
+	//
+	// IPaymuNotifyURL is the publicly reachable webhook URL that iPaymu will
+	// POST payment notifications to. In sandbox: your ngrok HTTPS URL.
+	// No default — the factory returns an error if this is empty when
+	// Provider="ipaymu", so misconfiguration fails fast at startup.
+	IPaymuVA        string
+	IPaymuAPIKey    string
+	IPaymuBaseURL   string
+	IPaymuNotifyURL string
+
+	// IPaymuSkipSignatureVerify, when true, accepts inbound webhooks without
+	// verifying the X-Signature header. Use ONLY for sandbox dev: empirical
+	// evidence shows the iPaymu sandbox callback simulator emits a static
+	// X-Signature placeholder that does not depend on body content
+	// (identical signature across submits with different timestamps and
+	// external IDs). The signature header is still parsed and logged for
+	// audit. NEVER set this in production — production traffic carries a
+	// real HMAC.
+	IPaymuSkipSignatureVerify bool
 }
 
 // NewProviderFromEnv constructs a ProviderConfig from standard environment
 // variables. Callers may override individual fields after this call.
 func NewProviderFromEnv() ProviderConfig {
 	return ProviderConfig{
-		Provider:            envOrDefault("PAYMENT_PROVIDER", "dummy"),
-		AppEnv:              envOrDefault("APP_ENV", "dev"),
-		IPaymuVA:            os.Getenv("IPAYMU_VA"),
-		IPaymuAPIKey:        os.Getenv("IPAYMU_API_KEY"),
-		IPaymuSecret:        os.Getenv("IPAYMU_SECRET"),
-		IPaymuWebhookSecret: os.Getenv("IPAYMU_WEBHOOK_SECRET"),
+		Provider:                  envOrDefault("PAYMENT_PROVIDER", "dummy"),
+		AppEnv:                    envOrDefault("APP_ENV", "dev"),
+		IPaymuVA:                  os.Getenv("IPAYMU_VA"),
+		IPaymuAPIKey:              os.Getenv("IPAYMU_API_KEY"),
+		IPaymuBaseURL:             os.Getenv("IPAYMU_BASE_URL"),
+		IPaymuNotifyURL:           os.Getenv("IPAYMU_NOTIFY_URL"),
+		IPaymuSkipSignatureVerify: os.Getenv("IPAYMU_SKIP_SIGNATURE_VERIFY") == "true",
 	}
 }
 
@@ -45,6 +72,9 @@ func NewProviderFromEnv() ProviderConfig {
 // this function returns an error that the caller (main.go) must treat as
 // log.Fatal. There is no fallback — an accidental dummy adapter in staging or
 // production is a critical security hole.
+//
+// For Provider="ipaymu": fails fast if IPAYMU_VA, IPAYMU_API_KEY, or
+// IPAYMU_NOTIFY_URL are empty. IPAYMU_BASE_URL defaults to sandbox.
 //
 // The caller in main.go MUST do:
 //
@@ -61,8 +91,9 @@ func NewProvider(cfg ProviderConfig) (ProviderIface, error) {
 		return NewIPaymu(
 			cfg.IPaymuVA,
 			cfg.IPaymuAPIKey,
-			cfg.IPaymuSecret,
-			cfg.IPaymuWebhookSecret,
+			cfg.IPaymuBaseURL,
+			cfg.IPaymuNotifyURL,
+			cfg.IPaymuSkipSignatureVerify,
 		)
 
 	default:

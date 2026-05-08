@@ -12,6 +12,14 @@ import (
 	"gorm.io/gorm"
 )
 
+// settlementSummaryRow is the scan target for the Summary aggregate query.
+type settlementSummaryRow struct {
+	BatchCount      int64
+	VolumeIDR       int64
+	PlatformFeeIDR  int64
+	PayoutIDR       int64
+}
+
 // SettlementBatchRepository implements service.SettlementBatchRepository using
 // GORM. settlement_batch is a platform-only table; callers must SET LOCAL
 // app.current_tenant = '__platform__' before calling Save (flag #3).
@@ -83,4 +91,33 @@ func (r *SettlementBatchRepository) List(ctx context.Context, filter service.Set
 		return nil, 0, fmt.Errorf("list settlement_batches: %w", err)
 	}
 	return rows, total, nil
+}
+
+// Summary returns aggregate KPIs by scanning payment_transaction rows whose
+// settled_at falls within [from, to] (UTC) and whose status is 'settled' or
+// 'disbursed'. The batch_count is the number of distinct settlement_batch_id
+// values in that set (not a row count on settlement_batch itself).
+//
+// Uses dbFromContext so it participates in any active transaction, consistent
+// with the rest of the repository pattern — even though no transaction is
+// expected on this read path.
+func (r *SettlementBatchRepository) Summary(ctx context.Context, from, to time.Time) (count int64, volume, platformFee, payout int64, err error) {
+	db := dbFromContext(ctx, r.db)
+
+	var row settlementSummaryRow
+	if err = db.Table("payment_transaction").
+		Select(
+			"COUNT(DISTINCT settlement_batch_id) AS batch_count, "+
+				"COALESCE(SUM(received_amount_idr), 0) AS volume_idr, "+
+				"COALESCE(SUM(platform_fee_idr), 0) AS platform_fee_idr, "+
+				"COALESCE(SUM(tenant_net_idr), 0) AS payout_idr",
+		).
+		Where(
+			"status IN (?, ?) AND settled_at >= ? AND settled_at <= ?",
+			"settled", "disbursed", from, to,
+		).
+		Scan(&row).Error; err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("settlement summary query: %w", err)
+	}
+	return row.BatchCount, row.VolumeIDR, row.PlatformFeeIDR, row.PayoutIDR, nil
 }

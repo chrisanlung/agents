@@ -13,39 +13,37 @@ part 'location_service.g.dart';
 
 class LocationService {
   /// Mendapatkan posisi saat ini.
-  /// Mengembalikan null jika permission ditolak atau service mati.
+  /// Mengembalikan null jika permission ditolak / service mati / platform
+  /// tidak mendukung (mis. Flutter web di Incognito tanpa permission browser).
   Future<Position?> getCurrentPosition() async {
-    // 1. Periksa service aktif
-    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) {
-      // Tidak buka dialog service — biarkan user aktifkan sendiri.
-      return null;
-    }
+    try {
+      // 1. Periksa service aktif
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) return null;
 
-    // 2. Periksa dan minta permission
-    var permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
+      // 2. Periksa dan minta permission
+      var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) return null;
+      }
+      if (permission == LocationPermission.deniedForever) {
+        // openAppSettings tidak diimplementasi di web — jangan panggil kalau
+        // bisa throw. Cukup return null, biarkan backend kasih hasil tanpa
+        // sort-by-distance.
         return null;
       }
-    }
 
-    if (permission == LocationPermission.deniedForever) {
-      // Arahkan ke app settings agar user bisa mengaktifkan manual
-      await Geolocator.openAppSettings();
-      return null;
-    }
-
-    // 3. Dapatkan posisi
-    try {
+      // 3. Dapatkan posisi
       return await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.medium, // cukup untuk sort by distance
+          accuracy: LocationAccuracy.medium,
           timeLimit: Duration(seconds: 8),
         ),
       );
     } catch (_) {
+      // Graceful fallback: any geolocation error (web platform, denied,
+      // timeout, missing implementation) → no location, branches still load.
       return null;
     }
   }

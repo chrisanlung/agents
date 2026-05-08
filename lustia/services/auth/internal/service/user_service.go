@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/chrisanlung/lustia-auth/internal/constants"
@@ -64,6 +65,13 @@ func (s *UserService) CreateUser(ctx context.Context, in CreateUserInput) (Creat
 			return CreateUserOutput{}, fmt.Errorf("validate roles: %w", err)
 		}
 	}
+
+	// Normalize and validate username before any DB work.
+	normalizedUsername, err := normalizeAndValidateUsername(in.Username)
+	if err != nil {
+		return CreateUserOutput{}, err
+	}
+	in.Username = normalizedUsername
 
 	now := s.clock.Now()
 
@@ -163,6 +171,7 @@ func (s *UserService) createNewUserWithMembership(ctx context.Context, in Create
 	newUser := &model.User{
 		ID:                 uuid.New().String(),
 		Email:              in.Email,
+		Username:           in.Username, // nil when not supplied; already normalized
 		PasswordHash:       hash,
 		FullName:           in.FullName,
 		IsActive:           true,
@@ -259,7 +268,8 @@ func (s *UserService) emitAuditCreateUser(userID string, in CreateUserInput, cre
 	}()
 }
 
-// ListUsers returns a paginated list of users within the caller's tenant.
+// ListUsers returns a paginated list of users within the caller's tenant,
+// with role and branch assignments populated for each user.
 func (s *UserService) ListUsers(ctx context.Context, in ListUsersInput) (ListUsersOutput, error) {
 	limit := in.Limit
 	if limit <= 0 || limit > 200 {
@@ -283,9 +293,34 @@ func (s *UserService) ListUsers(ctx context.Context, in ListUsersInput) (ListUse
 		return ListUsersOutput{}, fmt.Errorf("list users: %w", err)
 	}
 
+	// Batch-fetch each user's active membership in this tenant, then do a
+	// single bulk query for role/branch assignments (no N+1).
+	membershipIDs := make([]string, 0, len(users))
+	membershipByUser := make(map[string]string, len(users)) // userID → membershipID
+	for _, u := range users {
+		m, mErr := s.memberships.FindByUserAndTenant(ctx, u.ID, in.CallerTenantID)
+		if mErr != nil {
+			// User has no active membership in this tenant; skip enrichment.
+			continue
+		}
+		membershipIDs = append(membershipIDs, m.ID)
+		membershipByUser[u.ID] = m.ID
+	}
+
+	assignmentsByMembership, err := s.memberships.GetRolesAndBranchesForMemberships(ctx, membershipIDs)
+	if err != nil {
+		return ListUsersOutput{}, fmt.Errorf("bulk fetch role/branch assignments: %w", err)
+	}
+
 	profiles := make([]UserProfile, len(users))
 	for i, u := range users {
-		profiles[i] = toUserProfile(u)
+		p := toUserProfile(u)
+		if mID, ok := membershipByUser[u.ID]; ok {
+			if a, ok := assignmentsByMembership[mID]; ok {
+				p = enrichUserProfile(p, a)
+			}
+		}
+		profiles[i] = p
 	}
 
 	totalPages := 0
@@ -295,7 +330,8 @@ func (s *UserService) ListUsers(ctx context.Context, in ListUsersInput) (ListUse
 	return ListUsersOutput{Users: profiles, Page: page, TotalCount: total, TotalPages: totalPages}, nil
 }
 
-// GetUser fetches a single user who has an active membership in the caller's tenant.
+// GetUser fetches a single user who has an active membership in the caller's tenant,
+// enriched with that membership's role and branch assignments.
 func (s *UserService) GetUser(ctx context.Context, in GetUserInput) (UserProfile, error) {
 	user, err := s.users.FindByID(ctx, in.UserID)
 	if err != nil {
@@ -303,12 +339,17 @@ func (s *UserService) GetUser(ctx context.Context, in GetUserInput) (UserProfile
 	}
 
 	// Enforce tenant scope via membership.
-	_, err = s.memberships.FindByUserAndTenant(ctx, in.UserID, in.CallerTenantID)
+	membership, err := s.memberships.FindByUserAndTenant(ctx, in.UserID, in.CallerTenantID)
 	if err != nil {
 		return UserProfile{}, constants.ErrUserNotFound
 	}
 
-	return toUserProfile(user), nil
+	p := toUserProfile(user)
+	a, err := s.memberships.GetRolesAndBranches(ctx, membership.ID)
+	if err != nil {
+		return UserProfile{}, fmt.Errorf("fetch role/branch assignments: %w", err)
+	}
+	return enrichUserProfile(p, a), nil
 }
 
 // UpdateUser handles profile, activation, role, and branch updates for a user
@@ -326,6 +367,15 @@ func (s *UserService) UpdateUser(ctx context.Context, in UpdateUserInput) (UserP
 
 	if in.FullName != nil {
 		user.FullName = *in.FullName
+	}
+	if in.UsernameSet {
+		// Caller explicitly supplied a username field (including explicit null/empty
+		// to clear it). Normalize + validate before applying.
+		normalized, valErr := normalizeAndValidateUsername(in.Username)
+		if valErr != nil {
+			return UserProfile{}, valErr
+		}
+		user.Username = normalized
 	}
 	if in.Phone != nil {
 		user.Phone = in.Phone
@@ -375,7 +425,12 @@ func (s *UserService) UpdateUser(ctx context.Context, in UpdateUserInput) (UserP
 		})
 	}()
 
-	return toUserProfile(updated), nil
+	p := toUserProfile(updated)
+	a, err := s.memberships.GetRolesAndBranches(ctx, membership.ID)
+	if err != nil {
+		return UserProfile{}, fmt.Errorf("fetch role/branch assignments after update: %w", err)
+	}
+	return enrichUserProfile(p, a), nil
 }
 
 // UnlockUser resets failed_login_count and clears locked_until for a user
@@ -416,10 +471,50 @@ func (s *UserService) UnlockUser(ctx context.Context, in UnlockUserInput) error 
 // ---------------------------------------------------------------------------
 
 // toUserProfileFromMembership builds a UserProfile from a user + its active
-// membership. This is used in CreateUser responses where a specific membership
-// context is known. Roles and branches are not exposed on UserProfile in ADR
-// 0007 (they belong to MembershipSummary); the profile here is the base
-// identity projection.
+// membership. The role/branch arrays are left as nil slices here; callers that
+// need them must call GetRolesAndBranches and then enrichUserProfile.
 func toUserProfileFromMembership(u *model.User, _ *model.Membership) UserProfile {
 	return toUserProfile(u)
+}
+
+// enrichUserProfile copies role and branch IDs/names from a MembershipAssignments
+// value onto an existing UserProfile. It always produces non-nil slices so that
+// omitempty in the JSON response behaves consistently (nil → field absent,
+// empty slice → field present as []).
+func enrichUserProfile(p UserProfile, a model.MembershipAssignments) UserProfile {
+	if a.RoleIDs == nil {
+		a.RoleIDs = []string{}
+	}
+	if a.RoleNames == nil {
+		a.RoleNames = []string{}
+	}
+	if a.BranchIDs == nil {
+		a.BranchIDs = []string{}
+	}
+	if a.BranchNames == nil {
+		a.BranchNames = []string{}
+	}
+	p.RoleIDs = a.RoleIDs
+	p.RoleNames = a.RoleNames
+	p.BranchIDs = a.BranchIDs
+	p.BranchNames = a.BranchNames
+	return p
+}
+
+// normalizeAndValidateUsername lowercases the value and checks format rules.
+// Returns (normalizedValue, error). If the input pointer is nil the function
+// returns (nil, nil) — no-op.
+func normalizeAndValidateUsername(raw *string) (*string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	normalized := strings.ToLower(strings.TrimSpace(*raw))
+	if normalized == "" {
+		// Caller explicitly set username to empty string — treat as clear (nil).
+		return nil, nil
+	}
+	if !helper.ValidateUsername(normalized) {
+		return nil, constants.ErrUsernameInvalid
+	}
+	return &normalized, nil
 }

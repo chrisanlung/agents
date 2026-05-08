@@ -140,7 +140,8 @@ class _FindBookingScreenState extends ConsumerState<FindBookingScreen> {
       final appEx = e.requestOptions.extra['appException'];
       if (appEx is NotFoundException || appEx is ValidationException) {
         setState(() {
-          _fieldError = 'Kode booking tidak ditemukan. Periksa lagi atau hubungi cabang.';
+          _fieldError =
+              'Kode booking tidak ditemukan. Periksa lagi atau hubungi cabang.';
         });
       } else {
         final msg = appEx is AppException
@@ -148,10 +149,7 @@ class _FindBookingScreenState extends ConsumerState<FindBookingScreen> {
             : 'Terjadi kesalahan. Coba lagi.';
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(msg),
-              behavior: SnackBarBehavior.floating,
-            ),
+            SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
           );
         }
       }
@@ -173,9 +171,7 @@ class _FindBookingScreenState extends ConsumerState<FindBookingScreen> {
     final cs = theme.colorScheme;
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Cari Booking'),
-      ),
+      appBar: AppBar(title: const Text('Cari Booking')),
       body: GestureDetector(
         onTap: () => FocusScope.of(context).unfocus(),
         child: SingleChildScrollView(
@@ -224,7 +220,9 @@ class _FindBookingScreenState extends ConsumerState<FindBookingScreen> {
                     border: const OutlineInputBorder(),
                     counterText: '',
                   ),
-                  onFieldSubmitted: _valid && !_loading ? (_) => _search() : null,
+                  onFieldSubmitted: _valid && !_loading
+                      ? (_) => _search()
+                      : null,
                 ),
                 const SizedBox(height: 24),
 
@@ -324,8 +322,8 @@ class _FindBookingResultScreenState
     }
   }
 
-  bool get _isInactive => ['cancelled', 'no_show', 'expired']
-      .contains(widget.booking.status);
+  bool get _isInactive =>
+      ['cancelled', 'no_show', 'expired'].contains(widget.booking.status);
 
   Future<void> _saveToMyBookings() async {
     setState(() => _saving = true);

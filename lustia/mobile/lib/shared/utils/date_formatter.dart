@@ -33,6 +33,11 @@ final class DateFormatter {
   /// Format ISO-8601 string menjadi "Kamis, 1 Mei 2026"
   static String formatDate(String isoString) {
     final dt = DateTime.parse(isoString).toLocal();
+    return formatFullDate(dt);
+  }
+
+  /// Format [DateTime] menjadi "Kamis, 1 Mei 2026" (Indonesian long format).
+  static String formatFullDate(DateTime dt) {
     final dayName = _days[dt.weekday - 1];
     final monthName = _months[dt.month];
     return '$dayName, ${dt.day} $monthName ${dt.year}';

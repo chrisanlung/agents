@@ -6,7 +6,7 @@ part of 'availability_provider.dart';
 // RiverpodGenerator
 // **************************************************************************
 
-String _$availabilityHash() => r'1164dd4ffae6751b62d12d84dfc510408b817259';
+String _$availabilityHash() => r'c92911d749c23f1e8cd19e02b5d9b41fb0eca089';
 
 /// Copied from Dart SDK
 class _SystemHash {
@@ -43,11 +43,13 @@ class AvailabilityFamily extends Family<AsyncValue<List<AvailabilitySlot>>> {
     required String branchId,
     required String serviceId,
     required String date,
+    String? therapistId,
   }) {
     return AvailabilityProvider(
       branchId: branchId,
       serviceId: serviceId,
       date: date,
+      therapistId: therapistId,
     );
   }
 
@@ -59,6 +61,7 @@ class AvailabilityFamily extends Family<AsyncValue<List<AvailabilitySlot>>> {
       branchId: provider.branchId,
       serviceId: provider.serviceId,
       date: provider.date,
+      therapistId: provider.therapistId,
     );
   }
 
@@ -85,12 +88,14 @@ class AvailabilityProvider
     required String branchId,
     required String serviceId,
     required String date,
+    String? therapistId,
   }) : this._internal(
          (ref) => availability(
            ref as AvailabilityRef,
            branchId: branchId,
            serviceId: serviceId,
            date: date,
+           therapistId: therapistId,
          ),
          from: availabilityProvider,
          name: r'availabilityProvider',
@@ -103,6 +108,7 @@ class AvailabilityProvider
          branchId: branchId,
          serviceId: serviceId,
          date: date,
+         therapistId: therapistId,
        );
 
   AvailabilityProvider._internal(
@@ -115,11 +121,13 @@ class AvailabilityProvider
     required this.branchId,
     required this.serviceId,
     required this.date,
+    required this.therapistId,
   }) : super.internal();
 
   final String branchId;
   final String serviceId;
   final String date;
+  final String? therapistId;
 
   @override
   Override overrideWith(
@@ -137,6 +145,7 @@ class AvailabilityProvider
         branchId: branchId,
         serviceId: serviceId,
         date: date,
+        therapistId: therapistId,
       ),
     );
   }
@@ -151,7 +160,8 @@ class AvailabilityProvider
     return other is AvailabilityProvider &&
         other.branchId == branchId &&
         other.serviceId == serviceId &&
-        other.date == date;
+        other.date == date &&
+        other.therapistId == therapistId;
   }
 
   @override
@@ -160,6 +170,7 @@ class AvailabilityProvider
     hash = _SystemHash.combine(hash, branchId.hashCode);
     hash = _SystemHash.combine(hash, serviceId.hashCode);
     hash = _SystemHash.combine(hash, date.hashCode);
+    hash = _SystemHash.combine(hash, therapistId.hashCode);
 
     return _SystemHash.finish(hash);
   }
@@ -176,6 +187,9 @@ mixin AvailabilityRef on AutoDisposeFutureProviderRef<List<AvailabilitySlot>> {
 
   /// The parameter `date` of this provider.
   String get date;
+
+  /// The parameter `therapistId` of this provider.
+  String? get therapistId;
 }
 
 class _AvailabilityProviderElement
@@ -189,6 +203,8 @@ class _AvailabilityProviderElement
   String get serviceId => (origin as AvailabilityProvider).serviceId;
   @override
   String get date => (origin as AvailabilityProvider).date;
+  @override
+  String? get therapistId => (origin as AvailabilityProvider).therapistId;
 }
 
 // ignore_for_file: type=lint

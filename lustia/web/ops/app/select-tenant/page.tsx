@@ -145,7 +145,9 @@ export default async function SelectTenantPage() {
 
 function MembershipCard({ membership }: { membership: MembershipSummary }) {
   const rolesLabel =
-    membership.roles.length > 0 ? membership.roles.join(", ") : "—";
+    membership.roles && membership.roles.length > 0
+      ? membership.roles.join(", ")
+      : "—";
 
   return (
     <Card className="border-border shadow-sm transition-shadow hover:shadow-md">

@@ -191,6 +191,7 @@ func (h *TherapistController) handleUpdate(c *gin.Context) {
 		Build:          req.Build,
 		JoinedAt:       req.JoinedAt,
 		UserID:         req.UserID,
+		PrepMinutes:    req.PrepMinutes,
 	})
 	if err != nil {
 		helper.RespondDomainError(c, err)
@@ -429,6 +430,7 @@ func (h *TherapistController) toTherapistResponse(ctx context.Context, d service
 		WeightKg:    d.WeightKg,
 		Build:       d.Build,
 		Specialties: specialties,
+		PrepMinutes: d.PrepMinutes,
 		IsActive:    d.IsActive,
 		JoinedAt:    d.JoinedAt,
 		CreatedAt:   d.CreatedAt,

@@ -650,6 +650,7 @@ _Updated 2026-04-21: ADR 0007 — `tenant_id` column removed; `is_super_admin` c
 | `height_cm` | `SMALLINT` | NOT NULL, CHECK 100–250 | Customer-visible (migration 000020) |
 | `weight_kg` | `SMALLINT` | NOT NULL, CHECK 30–250 | Customer-visible (migration 000020) |
 | `build` | `TEXT` | NOT NULL, CHECK IN (`langsing`,`sedang`,`atletis`,`tegap`) | Customer-visible (migration 000020) |
+| `prep_minutes` | `INT` | NOT NULL, DEFAULT 10, CHECK 0–60 | Post-booking cleanup buffer; virtual only — `scheduled_end` unchanged (migration 000035) |
 | `phone` | `TEXT` | NULL | Contact phone (migration 000015) |
 | `email` | `TEXT` | NULL | Contact email, distinct from linked user.email (migration 000015) |
 | `metadata` | `JSONB` | NOT NULL, DEFAULT `{}` | |
@@ -662,6 +663,8 @@ _Updated 2026-04-21: ADR 0007 — `tenant_id` column removed; `is_super_admin` c
 **`photo_key` semantics:** stores the opaque storage key produced by `Storage.Upload()` (e.g. `therapists/{id}/{16-hex}.ext`). The `Storage` interface resolves this to a public URL at read time (`Storage.URL(ctx, key)`) — see ADR 0011 §2.1. The column never holds a scheme or hostname. `NULL` means no photo has been uploaded.
 
 **`height_cm`, `weight_kg`, `build`:** customer-facing fields displayed in the Phase 5 booking picker so customers can select a preferred therapist. Existing rows were back-filled with placeholder values (`160`, `60`, `sedang`) during migration 000020; the admin UI renders a curation banner on rows that still carry placeholder values.
+
+**`prep_minutes`:** post-booking cleanup/reset buffer. The booking engine expands a therapist's effective blocked window by this value when checking whether a candidate slot is free — but the `booking.scheduled_end` column is never modified. Range 0–60, default 10. Per-therapist only; no per-window or per-tenant override (YAGNI, migration 000035).
 
 ---
 

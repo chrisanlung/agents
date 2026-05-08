@@ -3,10 +3,21 @@
 // they never call repositories directly.
 package controller
 
+import "encoding/json"
+
 // LoginRequest is the JSON body for POST /auth/login.
 // tenant_slug is removed in ADR 0007: login is email+password only.
+//
+// Identifier accepts either an email address or a username. It is the
+// preferred field and takes precedence over Email. For backward compatibility
+// with Phase 1–6 clients that still send only "email", the Email field is
+// preserved but deprecated.
 type LoginRequest struct {
-	Email    string `json:"email"    binding:"required,email,max=320"`
+	// Identifier accepts either an email address ("alice@example.com") or a
+	// username ("alice"). Required unless Email is provided.
+	Identifier string `json:"identifier" binding:"omitempty,min=3,max=320"`
+	// Email is deprecated — use Identifier instead. Preserved for backward compat.
+	Email    string `json:"email"    binding:"omitempty,email,max=320"`
 	Password string `json:"password" binding:"required,min=8,max=128"`
 }
 
@@ -53,6 +64,7 @@ type ChangePasswordRequest struct {
 // CreateUserRequest is the JSON body for POST /admin/users.
 type CreateUserRequest struct {
 	Email     string   `json:"email"      binding:"required,email,max=320"`
+	Username  *string  `json:"username"   binding:"omitempty,username"`
 	FullName  string   `json:"full_name"  binding:"required,min=1,max=200"`
 	Phone     string   `json:"phone"      binding:"omitempty,max=30"`
 	RoleIDs   []string `json:"role_ids"   binding:"omitempty,dive,uuid"`
@@ -69,8 +81,16 @@ type ListUsersQuery struct {
 }
 
 // UpdateUserRequest is the JSON body for PATCH /admin/users/:id.
+// Username uses a three-valued semantic:
+//   - field absent from JSON body → UsernameSet=false, no change
+//   - "username": null or ""      → UsernameSet=true, Username=nil → clears it
+//   - "username": "alice"         → UsernameSet=true, Username=&"alice" → sets it
+//
+// The binding tag uses omitempty so that absent/empty values pass validation;
+// format checking is handled by the service layer via ValidateUsername.
 type UpdateUserRequest struct {
 	FullName  *string  `json:"full_name"  binding:"omitempty,min=1,max=200"`
+	Username  *string  `json:"username"   binding:"omitempty,username"`
 	Phone     *string  `json:"phone"      binding:"omitempty,max=30"`
 	AvatarURL *string  `json:"avatar_url" binding:"omitempty,url,max=2048"`
 	IsActive  *bool    `json:"is_active"`
@@ -167,6 +187,9 @@ type UpdateBranchRequest struct {
 	Timezone     *string `json:"timezone"      binding:"omitempty,max=100"`
 	ContactPhone *string `json:"contact_phone" binding:"omitempty,min=5,max=30"`
 	ContactEmail *string `json:"contact_email" binding:"omitempty,email,max=320"`
+	// OperationalHours: raw JSON object e.g. {"mon":"09:00-17:00","sun":null}.
+	// Stored verbatim as JSONB; nil = no change.
+	OperationalHours json.RawMessage `json:"operational_hours" binding:"omitempty"`
 }
 
 // ChangeBranchStatusRequest is the JSON body for PATCH /tenant/branches/:id/status.
@@ -206,16 +229,17 @@ type CreateTherapistRequest struct {
 // All fields are optional — only provided fields are updated.
 // photo_key is intentionally absent — use POST …/therapists/:id/photo.
 type UpdateTherapistRequest struct {
-	FullName  *string `json:"full_name"  binding:"omitempty,min=1,max=200"`
-	Gender    *string `json:"gender"     binding:"omitempty,oneof=male female other"`
-	Phone     *string `json:"phone"      binding:"omitempty,max=30"`
-	Email     *string `json:"email"      binding:"omitempty,email,max=320"`
-	Bio       *string `json:"bio"        binding:"omitempty,max=500"`
-	HeightCm  *int16  `json:"height_cm"  binding:"omitempty,min=100,max=250"`
-	WeightKg  *int16  `json:"weight_kg"  binding:"omitempty,min=30,max=250"`
-	Build     *string `json:"build"      binding:"omitempty,oneof=langsing sedang atletis tegap"`
-	JoinedAt  *string `json:"joined_at"  binding:"omitempty"`
-	UserID    *string `json:"user_id"    binding:"omitempty,uuid"`
+	FullName    *string `json:"full_name"    binding:"omitempty,min=1,max=200"`
+	Gender      *string `json:"gender"       binding:"omitempty,oneof=male female other"`
+	Phone       *string `json:"phone"        binding:"omitempty,max=30"`
+	Email       *string `json:"email"        binding:"omitempty,email,max=320"`
+	Bio         *string `json:"bio"          binding:"omitempty,max=500"`
+	HeightCm    *int16  `json:"height_cm"    binding:"omitempty,min=100,max=250"`
+	WeightKg    *int16  `json:"weight_kg"    binding:"omitempty,min=30,max=250"`
+	Build       *string `json:"build"        binding:"omitempty,oneof=langsing sedang atletis tegap"`
+	JoinedAt    *string `json:"joined_at"    binding:"omitempty"`
+	UserID      *string `json:"user_id"      binding:"omitempty,uuid"`
+	PrepMinutes *int    `json:"prep_minutes" binding:"omitempty,min=0,max=60"`
 }
 
 // ChangeTherapistStatusRequest is the JSON body for PATCH /tenant/therapists/:id/status.
@@ -454,9 +478,15 @@ type ReportBookingQuery struct {
 }
 
 // AvailabilityQuery are query parameters for GET /api/v1/public/branches/:id/availability.
+// TherapistID is optional — when present, every slot gains a boolean
+// `therapist_available` that indicates whether THAT therapist is free at the
+// slot (no overlapping booking + works that day-of-week per their schedule).
+// Aggregate counts (therapists_available_count, rooms_available_count) are
+// unaffected by this filter and always reflect branch-wide totals.
 type AvailabilityQuery struct {
-	ServiceID string `form:"service_id" binding:"required,uuid"`
-	Date      string `form:"date"       binding:"required"`
+	ServiceID   string  `form:"service_id"   binding:"required,uuid"`
+	Date        string  `form:"date"         binding:"required"`
+	TherapistID *string `form:"therapist_id" binding:"omitempty,uuid"`
 }
 
 // PublicBranchListQuery are query parameters for GET /api/v1/public/branches.

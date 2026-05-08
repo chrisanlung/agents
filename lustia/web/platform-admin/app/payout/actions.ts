@@ -6,7 +6,25 @@ import type {
   ReconcileResponse,
   AdminDisbursementDetail,
   CreateDisbursementInput,
+  SettlementBatchDetail,
 } from "@/lib/types";
+
+// ─── Settlement batch lazy-fetch (from BatchDetailDialog) ────────────────────
+
+export async function fetchSettlementBatchDetail(
+  id: string
+): Promise<{ ok: true; data: SettlementBatchDetail } | { ok: false }> {
+  try {
+    const data = await apiFetch<SettlementBatchDetail>(
+      `/admin/settlement-batches/${id}`,
+      {},
+      { auth: true }
+    );
+    return { ok: true, data };
+  } catch {
+    return { ok: false };
+  }
+}
 
 // ─── Reconciliation ───────────────────────────────────────────────────────────
 

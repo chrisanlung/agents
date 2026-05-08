@@ -658,3 +658,106 @@ Secondary items (not blocking dev-local, but flagged elsewhere):
   password can't be left weak indefinitely. SECURITY review log, Critical.
 - Migration role separation in staging/prod — migrator should stop using
   the Postgres superuser once `lustia_migrator` exists (§ 6).
+
+---
+
+## 12. Payments — iPaymu sandbox
+
+_Phase 6 (ADR 0015). Covers sandbox-only setup using ngrok as a public webhook
+relay. Production credentials do not exist yet._
+
+### 12.1 How the adapters work
+
+| `PAYMENT_PROVIDER` | When to use | Binary tag required |
+| --- | --- | --- |
+| `dummy` (default) | Normal local development — no internet, no credentials | `-tags dev` or `-tags local` |
+| `ipaymu` | End-to-end sandbox testing with the real iPaymu API + real QRIS QR | any tag (no build gate) |
+
+The dummy adapter is the default in `run-local.sh` and will not change unless
+you explicitly uncomment the iPaymu block.
+
+### 12.2 One-time ngrok setup
+
+iPaymu's sandbox must be able to reach your local service to deliver webhook
+notifications. ngrok creates a public HTTPS tunnel to your localhost.
+
+1. Install ngrok (one-time):
+   ```
+   winget install ngrok
+   ```
+   Or download from https://ngrok.com/download and add to PATH.
+
+2. Authenticate (one-time — uses a free ngrok account):
+   ```
+   ngrok config add-authtoken <YOUR_NGROK_TOKEN>
+   ```
+   Get the token at https://dashboard.ngrok.com/get-started/your-authtoken.
+
+3. Start the tunnel (every test session — keep this terminal open):
+   ```
+   ngrok http 8080
+   ```
+   Grab the `https://xxxx.ngrok-free.app` URL shown in the "Forwarding" line.
+   The subdomain changes every run on free accounts unless you have a reserved
+   domain.
+
+### 12.3 Configuring the auth service for iPaymu sandbox
+
+Open `lustia/services/auth/run-local.sh`. Near the top you will find:
+
+```bash
+export PAYMENT_PROVIDER=dummy
+
+# --- iPaymu sandbox (Phase 6) ---
+# export PAYMENT_PROVIDER=ipaymu
+# export IPAYMU_BASE_URL=https://sandbox.ipaymu.com
+# export IPAYMU_VA=0000005714983489
+# export IPAYMU_API_KEY=SANDBOX429CAC48-22DE-43FE-9153-26DD0BB5671D
+# export IPAYMU_NOTIFY_URL=https://YOUR-NGROK-SUBDOMAIN.ngrok-free.app/api/v1/public/payments/webhook
+```
+
+To activate:
+1. Comment out `export PAYMENT_PROVIDER=dummy`.
+2. Uncomment the five iPaymu lines.
+3. Replace `YOUR-NGROK-SUBDOMAIN` with the live subdomain from ngrok output.
+4. Source and run:
+   ```
+   source run-local.sh && go run -tags dev ./cmd/auth
+   ```
+   The startup log will print: `payment provider: ipaymu (APP_ENV=dev)`.
+
+### 12.4 End-to-end test flow
+
+1. Create a booking via `POST /api/v1/public/bookings` — the response
+   contains `qr_string` and `qr_expires_at`.
+2. The auth service calls iPaymu's sandbox API; iPaymu returns a real QRIS
+   payload string. Render it in the Flutter app or any QR library.
+3. To simulate payment without a real phone, use the iPaymu sandbox notifier:
+   - Open https://sandbox.ipaymu.com/send-notify in your browser.
+   - Fill in the `trx_id` from the CreateQR response log (check stdout — the
+     adapter logs the iPaymu `TransactionId` at INFO level).
+   - Set `notifyUrl` to your ngrok URL:
+     `https://xxxx.ngrok-free.app/api/v1/public/payments/webhook`
+   - Submit. iPaymu sends a POST to your ngrok relay → auth service.
+4. Poll `GET /api/v1/public/bookings/:code/payment-status` to confirm the
+   booking transitioned to `paid`.
+
+### 12.5 Differences between adapters
+
+| Behaviour | `dummy` | `ipaymu` (sandbox) |
+| --- | --- | --- |
+| QR string | Synthetic QRIS-format string | Real QRIS payload from iPaymu |
+| QR image URL | Google Charts API URL | iPaymu-hosted PNG (may be empty) |
+| Payment confirmation | Dev-only `POST /dummy-trigger` endpoint | iPaymu sandbox notifier or real scan |
+| Signature verification | Skipped (no HMAC check) | HMAC-SHA256 (VA-keyed) enforced |
+| `GetStatus` | Returns `paid` always | Returns `errIPaymuNotImplemented` (TODO Phase 7) |
+| `ListSettlements` | Returns one synthetic item | Returns `errIPaymuNotImplemented` (TODO Phase 7) |
+
+### 12.6 Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Startup error: `IPAYMU_NOTIFY_URL is required` | `PAYMENT_PROVIDER=ipaymu` set but notify URL line still commented out | Uncomment `IPAYMU_NOTIFY_URL` in run-local.sh |
+| `ipaymu: API error (http=401 status=401)` | Wrong VA or API key | Double-check sandbox credentials in iPaymu dashboard |
+| Webhook arrives but signature mismatch | ngrok relays the body correctly; mismatch means the VA used to verify differs from the VA iPaymu signed with | Confirm `IPAYMU_VA` matches the account VA exactly |
+| Booking stays `pending_payment` after notifier fires | Wrong `reference_id` in the notifier — it must match `provider_reference` in the CreateQR response | Check auth service logs for the `referenceId` value sent to iPaymu |

@@ -72,6 +72,14 @@ var (
 	// email unique index.
 	ErrDuplicateEmail = errors.New("duplicate email")
 
+	// ErrUsernameInvalid is returned when a supplied username fails the format
+	// rule: 3–50 chars, lowercase alphanumeric + dot/underscore only.
+	ErrUsernameInvalid = errors.New("username must be 3–50 characters and contain only lowercase letters, digits, dots, or underscores")
+
+	// ErrUsernameAlreadyTaken is a specialisation of ErrConflict for the
+	// partial unique index user_username_uidx (LOWER(username) WHERE NOT deleted).
+	ErrUsernameAlreadyTaken = errors.New("username already taken")
+
 	// ErrPasswordChangeRequired is returned when the user must change their
 	// password before proceeding.
 	ErrPasswordChangeRequired = errors.New("password change required")
@@ -198,6 +206,13 @@ var (
 	// ErrTherapistNotForService is returned when the requested therapist is not
 	// mapped (via therapist_service) to the requested service.
 	ErrTherapistNotForService = errors.New("terapis tidak tersedia untuk layanan ini")
+
+	// ErrBookingTherapistConflict is returned by the service-layer pre-flight
+	// check when the candidate slot [start, end) falls within an existing
+	// booking's effective window [booked_start, booked_end + prep_minutes).
+	// This covers the prep buffer that the DB-level GiST constraint does not
+	// enforce (migration 000035).
+	ErrBookingTherapistConflict = errors.New("terapis tidak tersedia pada slot ini karena masih dalam waktu persiapan")
 
 	// ErrBookingCancellationForbidden is returned when a customer-facing cancel
 	// is attempted (not allowed in Phase 5 — ops-only cancel).

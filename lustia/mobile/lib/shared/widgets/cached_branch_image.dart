@@ -7,7 +7,7 @@ import 'package:flutter/material.dart';
 import '../../core/theme/lustia_colors.dart';
 
 /// Menampilkan gambar cabang dari URL dengan fade-in + placeholder shimmer.
-/// [imageUrl] boleh null — ditampilkan placeholder ikon spa.
+/// [imageUrl] boleh null — ditampilkan logo Lustia dari assets sebagai fallback.
 class CachedBranchImage extends StatelessWidget {
   const CachedBranchImage({
     super.key,
@@ -33,10 +33,7 @@ class CachedBranchImage extends StatelessWidget {
         child: SizedBox(
           width: width,
           height: height,
-          child: const ColoredBox(
-            color: LustiaColors.surfaceVariant,
-            child: Center(child: Icon(Icons.spa, color: LustiaColors.primary)),
-          ),
+          child: const _LustiaLogoFallback(),
         ),
       );
     }
@@ -59,15 +56,27 @@ class CachedBranchImage extends StatelessWidget {
         errorWidget: (context, _, __) => SizedBox(
           width: width,
           height: height,
-          child: const ColoredBox(
-            color: LustiaColors.surfaceVariant,
-            child: Center(
-              child: Icon(
-                Icons.broken_image_outlined,
-                color: LustiaColors.textMuted,
-              ),
-            ),
-          ),
+          child: const _LustiaLogoFallback(),
+        ),
+      ),
+    );
+  }
+}
+
+/// Branding fallback ketika foto cabang belum di-upload atau gagal di-load.
+/// Memakai aset `lustia-logo.png` (bukan ikon spa Material) supaya konsisten
+/// dengan brand pada layar lain.
+class _LustiaLogoFallback extends StatelessWidget {
+  const _LustiaLogoFallback();
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: LustiaColors.surfaceVariant,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Image.asset('assets/images/lustia-logo.png'),
         ),
       ),
     );

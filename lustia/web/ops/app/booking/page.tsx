@@ -26,6 +26,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { FilterBar } from "@/components/filter-bar";
+import { FilterDate } from "@/components/filter-date";
 import { FilterSelect } from "@/components/filter-select";
 import { Pagination } from "@/components/pagination";
 import { BookingStatusBadge } from "@/components/booking-status-badge";
@@ -172,17 +173,7 @@ export default async function BookingPage({ searchParams }: PageProps) {
 
       {/* Filter bar */}
       <FilterBar isActive={filterActive} resetHref="/booking">
-        <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
-          <span>Tanggal</span>
-          <input
-            type="date"
-            name="date"
-            defaultValue={selectedDate}
-            className="rounded-md border-0 bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-            onChange={undefined}
-            aria-label="Tanggal"
-          />
-        </label>
+        <FilterDate label="Tanggal" name="date" current={selectedDate} />
         <FilterSelect
           label="Status"
           name="status"

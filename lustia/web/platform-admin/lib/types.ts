@@ -104,6 +104,20 @@ export type PaymentTransactionStatus =
   | "expired"
   | "voided";
 
+/**
+ * GET /api/v1/admin/settlement-batches/summary response.
+ * API_CONTRACT.md §15.4 — total_volume_idr is the KPI value for
+ * "Volume Disetel Minggu Ini" on the platform-admin dashboard.
+ */
+export interface SettlementBatchSummary {
+  from: string;
+  to: string;
+  batch_count: number;
+  total_volume_idr: number;
+  total_platform_fee_idr: number;
+  total_payout_idr: number;
+}
+
 /** GET /api/v1/admin/settlement-batches list item. */
 export interface SettlementBatch {
   id: string;

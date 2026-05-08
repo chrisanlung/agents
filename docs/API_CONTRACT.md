@@ -83,15 +83,16 @@ func JWTVerify(jwksURL string) func(http.Handler) http.Handler { ... }
 
 ## 3. Multi-Tenant Login Resolution
 
-The `POST /auth/login` endpoint resolves tenant context via the `tenant_slug` field:
+The `POST /auth/login` endpoint accepts either an **email address** or a **username** in the `identifier` field. The service auto-detects which lookup to perform:
 
-| `tenant_slug` value | Scope resolved |
+| `identifier` value | Lookup |
 |---|---|
-| Absent / empty | **Rejected** — tenant_slug is required in Phase 2 |
-| `"__platform__"` | Super-admin login — user must have `tenant_id IS NULL` |
-| Any other slug | Tenant staff — resolves `tenant_id` via `tenant.slug` |
+| Contains `@` | Treated as email → `FindByEmail` |
+| No `@` | Treated as username → `FindByUsername` (case-insensitive) |
 
-Host-header resolution (`tenant-slug.lustia.example`) is documented but **not implemented in Phase 2**. A future ADR will cover it.
+**Backward compatibility:** Old clients that send `"email"` instead of `"identifier"` continue to work. When `identifier` is absent, the server falls back to the `email` field. Both fields should not be sent together; if both are present `identifier` wins.
+
+**Anti-enumeration:** Whether a lookup fails because the identifier does not exist or because the password is wrong, the server always returns `401 INVALID_CREDENTIALS`. The response never distinguishes between "email not found" and "username not found".
 
 ---
 
@@ -131,17 +132,34 @@ Authenticates a user and returns a short-lived access token + long-lived refresh
 
 ```json
 {
+  "identifier": "alice",
+  "password": "s3cur3P@ssw0rd"
+}
+```
+
+or (email form):
+
+```json
+{
+  "identifier": "alice@example.com",
+  "password": "s3cur3P@ssw0rd"
+}
+```
+
+or (deprecated backward-compat form — old clients only):
+
+```json
+{
   "email": "alice@example.com",
-  "password": "s3cur3P@ssw0rd",
-  "tenant_slug": "acme-spa"
+  "password": "s3cur3P@ssw0rd"
 }
 ```
 
 | Field | Type | Validation |
 |---|---|---|
-| `email` | string | required, valid email, max 320 |
+| `identifier` | string | required (unless `email` present); min 3, max 320. Email or username. |
+| `email` | string | **Deprecated** — use `identifier`. Accepted for backward compat; omitempty, valid email, max 320. |
 | `password` | string | required, min 8, max 128 |
-| `tenant_slug` | string | required, max 100. Use `"__platform__"` for super_admin. |
 
 **Response `200 OK`**
 
@@ -153,15 +171,18 @@ Authenticates a user and returns a short-lived access token + long-lived refresh
   "expires_at": "2026-04-18T12:15:00Z",
   "user": {
     "id": "uuid",
-    "tenant_id": "uuid",
     "email": "alice@example.com",
+    "username": "alice",
     "full_name": "Alice Smith",
     "phone": "+62812...",
     "avatar_url": "https://...",
     "is_active": true,
-    "roles": ["tenant_admin"],
-    "branches": ["branch-uuid-1"]
-  }
+    "is_super_admin": false,
+    "must_change_password": false
+  },
+  "scope": "tenant",
+  "memberships": [{ "membership_id": "...", "tenant_id": "...", "tenant_name": "Acme Spa", "tenant_slug": "acme-spa", "roles": ["tenant_admin"], "branches": ["branch-uuid-1"], "status": "active" }],
+  "active_membership_id": "..."
 }
 ```
 
@@ -169,12 +190,10 @@ Authenticates a user and returns a short-lived access token + long-lived refresh
 
 | Status | Code | When |
 |---|---|---|
-| 400 | `VALIDATION` | Malformed request body |
-| 401 | `INVALID_CREDENTIALS` | Wrong email or password (intentionally vague) |
+| 400 | `VALIDATION` | Malformed request body or both `identifier` and `email` absent |
+| 401 | `INVALID_CREDENTIALS` | Email/username not found **or** wrong password (intentionally vague — anti-enumeration) |
 | 401 | `ACCOUNT_LOCKED` | Too many failed attempts |
-| 401 | `ACCOUNT_INACTIVE` | User deactivated |
-| 401 | `TENANT_NOT_FOUND` | Slug resolves to nothing (mapped to 401 to prevent enumeration) |
-| 401 | `TENANT_INACTIVE` | Tenant status is not `active` |
+| 401 | `ACCOUNT_INACTIVE` | User deactivated or no active memberships |
 | 429 | `RATE_LIMITED` | Too many login attempts from this IP |
 
 ---
@@ -403,6 +422,7 @@ Creates a new user within the authenticated admin's tenant. The initial password
 ```json
 {
   "email": "bob@example.com",
+  "username": "bob.jones",
   "full_name": "Bob Jones",
   "phone": "+62...",
   "role_ids": ["role-uuid-1"],
@@ -413,6 +433,7 @@ Creates a new user within the authenticated admin's tenant. The initial password
 | Field | Validation |
 |---|---|
 | `email` | required, valid email, max 320 |
+| `username` | optional; 3–50 chars, lowercase `[a-z0-9._]` only; auto-lowercased |
 | `full_name` | required, min 1, max 200 |
 | `phone` | optional, max 30 |
 | `role_ids` | optional, array of valid UUIDs |
@@ -422,8 +443,10 @@ Creates a new user within the authenticated admin's tenant. The initial password
 
 ```json
 {
-  "user": { ... },
-  "initial_password": "generated-once-password"
+  "user": { "id": "...", "email": "...", "username": "bob.jones", ... },
+  "initial_password": "generated-once-password",
+  "created_user": true,
+  "created_membership": true
 }
 ```
 
@@ -431,7 +454,9 @@ Creates a new user within the authenticated admin's tenant. The initial password
 
 | Status | Code | When |
 |---|---|---|
-| 409 | `DUPLICATE_EMAIL` | Email already exists in this tenant |
+| 409 | `DUPLICATE_EMAIL` | Email already exists |
+| 409 | `USERNAME_ALREADY_TAKEN` | Username already taken by another user |
+| 400 | `USERNAME_INVALID` | Username fails format rules |
 | 404 | `NOT_FOUND` | A provided role_id or branch_id does not exist |
 | 403 | `INSUFFICIENT_PERMISSION` | Missing `user.create` |
 
@@ -494,6 +519,7 @@ Updates a user's profile, active status, roles, and/or branch assignments. All c
 ```json
 {
   "full_name": "Updated Name",
+  "username": "alice.new",
   "phone": "+62...",
   "avatar_url": "https://...",
   "is_active": false,
@@ -502,7 +528,19 @@ Updates a user's profile, active status, roles, and/or branch assignments. All c
 }
 ```
 
-**Response `200 OK`** — updated `UserProfileResponse`
+`username` uses three-valued semantics:
+- **Key absent from JSON** — no change to existing username.
+- **`"username": null`** — clears the username (sets to NULL).
+- **`"username": "alice.new"`** — replaces the username (auto-lowercased, validated).
+
+**Response `200 OK`** — updated `UserProfileResponse` (includes `username` field)
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 409 | `USERNAME_ALREADY_TAKEN` | New username already in use |
+| 400 | `USERNAME_INVALID` | New username fails format rules |
 
 ---
 
@@ -562,7 +600,9 @@ Returns all platform roles with their permission codes. Read-only in Phase 2.
 | `TENANT_NOT_FOUND` | 401 | Tenant slug does not resolve (401 to prevent enumeration) |
 | `NOT_FOUND` | 404 | Resource does not exist or is not visible to caller |
 | `CONFLICT` | 409 | Generic unique-constraint or exclusion-constraint violation |
-| `DUPLICATE_EMAIL` | 409 | `(tenant_id, email)` unique index violated |
+| `DUPLICATE_EMAIL` | 409 | Global `email` unique index violated |
+| `USERNAME_ALREADY_TAKEN` | 409 | Global `LOWER(username)` unique partial index violated |
+| `USERNAME_INVALID` | 400 | Username fails format rules (3–50 chars, `[a-z0-9._]` only) |
 | `RATE_LIMITED` | 429 | Request throttled |
 | `INTERNAL` | 500 | Unexpected server error |
 | `DUPLICATE_PENDING_REGISTRATION` | 409 | Same email or slug already has a pending registration |
@@ -2280,8 +2320,9 @@ Only returns branches with `branch.status = 'active'` AND `tenant.status = 'acti
 |---|---|---|---|
 | `service_id` | UUID | yes | Service to book |
 | `date` | string | yes | Date in `YYYY-MM-DD` |
+| `therapist_id` | UUID | no | When supplied, each slot gains a boolean `therapist_available` indicating whether that specific therapist is free at the slot (no overlapping booking AND their weekly schedule covers the slot's day-of-week and time range). Aggregate counts are unaffected. |
 
-**Response `200 OK`:**
+**Response `200 OK` — without `therapist_id`:**
 ```json
 {
   "branch_id": "uuid",
@@ -2292,15 +2333,56 @@ Only returns branches with `branch.status = 'active'` AND `tenant.status = 'acti
       "start": "2026-04-26T09:00:00Z",
       "end": "2026-04-26T10:00:00Z",
       "therapists_available_count": 3,
-      "rooms_available_count": 2
+      "rooms_available_count": 2,
+      "available_room_ids": ["uuid-room-1", "uuid-room-2"]
     }
   ]
 }
 ```
 
-Calls the lazy expiry sweep before computing slots. Slots with `therapists_available_count = 0` are omitted.
+**Response `200 OK` — with `?therapist_id=<UUID>`:**
+```json
+{
+  "branch_id": "uuid",
+  "service_id": "uuid",
+  "date": "2026-04-26",
+  "slots": [
+    {
+      "start": "2026-04-26T09:00:00Z",
+      "end": "2026-04-26T10:00:00Z",
+      "therapists_available_count": 3,
+      "rooms_available_count": 1,
+      "available_room_ids": ["uuid-room-2"],
+      "therapist_available": true
+    },
+    {
+      "start": "2026-04-26T09:30:00Z",
+      "end": "2026-04-26T10:30:00Z",
+      "therapists_available_count": 3,
+      "rooms_available_count": 2,
+      "available_room_ids": ["uuid-room-1", "uuid-room-2"],
+      "therapist_available": false
+    }
+  ]
+}
+```
 
-**Errors:** `400 VALIDATION`, `404 NOT_FOUND` (branch or service not found).
+**Field semantics:**
+
+| Field | Always present | Description |
+|---|---|---|
+| `therapists_available_count` | yes | Count of ALL therapists at the branch who can perform the service and are not booked at this slot. Unaffected by `therapist_id` filter. |
+| `rooms_available_count` | yes | Count of rooms at the branch NOT booked at this slot. Equal to `len(available_room_ids)`. |
+| `available_room_ids` | yes | UUIDs of rooms not booked at this slot. Empty array when no rooms are configured. Use this to grey-out fully-booked rooms after the customer picks a slot. |
+| `therapist_available` | only when `?therapist_id` given | `true` = therapist is free (no conflicting booking AND their weekly schedule covers the slot). `false` = therapist is booked OR their schedule does not cover this slot's day/time. **Field is absent** when `therapist_id` was not supplied — old clients receive the same JSON as before. |
+
+**UI guidance for Flutter:** When `therapist_available=false` AND `therapists_available_count > 0`, the slot is still bookable with a different therapist. The recommended UX label is *"Terapis sudah dibooking di jam ini"*. When `therapist_available=false` AND `therapists_available_count = 0`, the slot itself is blocked (no therapist available at all) — show it as fully disabled without a therapist-specific reason.
+
+**Unknown `therapist_id`:** A UUID that is syntactically valid but not in the database returns `200` with all slots having `therapist_available=false` rather than a `404`. This avoids hard errors when the customer is rapidly switching between therapist options during the selection flow.
+
+Calls the lazy expiry sweep before computing slots. Slots with `therapists_available_count = 0` are omitted. Slot windows are generated at 30-minute intervals between 09:00 and 21:00 UTC on the requested date (operational hours parsing is a planned enhancement).
+
+**Errors:** `400 VALIDATION` (invalid `service_id`, `date`, or malformed `therapist_id`), `404 NOT_FOUND` (branch or service not found).
 
 ---
 
@@ -2509,13 +2591,42 @@ Transitions `paid` or `checked_in → no_show`. Returns updated `BookingResponse
 { "reason": "Customer tidak bisa hadir" }
 ```
 
-Transitions `paid` or `checked_in → cancelled`. `reason` is required (max 1000 chars). No refund path in Phase 5. Returns updated `BookingResponse`.
+Transitions `paid`, `checked_in`, **or `pending_payment`** → `cancelled`. `reason` is required (max 1000 chars). No refund path in Phase 5.
+
+When cancelled from `pending_payment`, the associated awaiting `payment_transaction` row is atomically marked `voided` so the customer's QR code becomes inert. Audit action is `booking.cancelled_pending` (vs. `booking.cancelled` for paid/checked_in). Both variants record `previous_status` in audit `Meta`.
+
+Returns updated `BookingResponse`.
 
 **Errors:** `400 VALIDATION`, `404 BOOKING_NOT_FOUND`, `409 BOOKING_INVALID_STATUS_TRANSITION`.
 
 ---
 
-#### 14.2.9 Report summary
+#### 14.2.10 Sync payment status (manual provider poll)
+
+`POST /api/v1/tenant/bookings/:id/sync-payment`  **Permission:** `booking.read`
+
+No request body required.
+
+Polls the payment provider (iPaymu / dummy) for the current transaction state and applies any outstanding transition:
+
+| Provider status | Action |
+|---|---|
+| `pending` | No-op — returns current booking unchanged |
+| `paid` | `payment_transaction → paid`, `booking → paid` (H-5 idempotent) |
+| `expired` | `payment_transaction → expired`, `booking → expired` |
+| `failed` | `payment_transaction → failed`, `booking → expired` |
+
+Idempotent — safe to call repeatedly. Emits audit log entry `payment.synced_manually` with `provider_status` and `action_taken` in Meta.
+
+If the booking is not `pending_payment`, returns the current `BookingResponse` as-is (no-op, no provider call made).
+
+**Response `200 OK`:** full `BookingResponse` shape (same as `GET /tenant/bookings/:id`).
+
+**Errors:** `403 CROSS_BRANCH_FORBIDDEN`, `404 BOOKING_NOT_FOUND`.
+
+---
+
+#### 14.2.11 Report summary  <!-- was 14.2.9 before sync-payment was added -->
 
 `GET /api/v1/tenant/reports/bookings/summary`  **Permission:** `booking.read`
 
@@ -2541,11 +2652,12 @@ Transitions `paid` or `checked_in → cancelled`. `reason` is required (max 1000
 ### 14.3 Booking status lifecycle
 
 ```
-pending_payment ──pay (webhook)──▶ paid ──checkin──▶ checked_in ──complete──▶ completed
-       │                            │
-       └──expire (15 min sweep)──▶ expired
+pending_payment ──pay (webhook / sync)──▶ paid ──checkin──▶ checked_in ──complete──▶ completed
+       │                                    │                    │
+       ├──expire (15 min sweep / sync)──▶ expired                └──ops cancel──▶ cancelled
+       │
+       └──ops cancel (booking.cancel)──▶ cancelled   [payment_transaction → voided]
                                     │
-                                    ├──ops cancel──▶ cancelled
                                     └──slot ends, ops flags──▶ no_show
 ```
 
@@ -2764,6 +2876,60 @@ Triggers iPaymu daily settlement report fetch and bulk-marks transactions settle
 ```
 
 **Errors:** `400 INVALID_DATE`
+
+---
+
+#### GET `/api/v1/admin/settlement-batches/summary`
+
+Returns aggregate KPIs for the platform-admin "Volume Disetel Minggu Ini" dashboard card.
+Cross-reference: platform-admin dashboard design (`docs/DESIGN_FLOWS/platform-admin-dashboard.md` §5.2).
+
+**Auth:** `finance.read_all` permission, platform scope only (same as `ListSettlementBatches`).
+
+**Query parameters:**
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `from` | `YYYY-MM-DD` | Yes | Earliest `settled_at` date to include (inclusive). Interpreted as midnight Asia/Jakarta → UTC. |
+| `to` | `YYYY-MM-DD` | Yes | Latest `settled_at` date to include (inclusive). Interpreted as end-of-day Asia/Jakarta (23:59:59.999999999) → UTC. |
+
+**Constraints:**
+- `to` must not be before `from` (400).
+- Date range must not exceed 90 days (400 — dashboard summary, not an export).
+
+**Response `200 OK`:**
+
+```json
+{
+  "from": "2026-04-26",
+  "to": "2026-05-02",
+  "batch_count": 12,
+  "total_volume_idr": 18450000,
+  "total_platform_fee_idr": 922500,
+  "total_payout_idr": 17527500
+}
+```
+
+| Field | Description |
+|---|---|
+| `batch_count` | Number of distinct `settlement_batch_id` values on `payment_transaction` rows whose `settled_at` falls within `[from, to]` and `status IN ('settled', 'disbursed')`. |
+| `total_volume_idr` | `SUM(received_amount_idr)` — gross customer volume. |
+| `total_platform_fee_idr` | `SUM(platform_fee_idr)` — total Lustia platform fee (5% flat, ADR 0015 §2.4). |
+| `total_payout_idr` | `SUM(tenant_net_idr)` — total amount destined for tenant payout. |
+
+When no transactions match the window all sums are `0` and `batch_count` is `0` — never `null`.
+
+**Errors:**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION` | `from` or `to` is absent |
+| 400 | `INVALID_DATE` | Either date is not valid `YYYY-MM-DD` |
+| 400 | `VALIDATION` | `to` is before `from`, or range exceeds 90 days |
+| 401 | `UNAUTHORIZED` | Missing or invalid JWT |
+| 403 | `INSUFFICIENT_PERMISSION` | Caller lacks `finance.read_all` |
+
+> **Route ordering note:** this route is registered before `GET /admin/settlement-batches/:id` so Gin does not match the literal string `summary` as an `:id` path parameter.
 
 ---
 

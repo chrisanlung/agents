@@ -4899,3 +4899,467 @@ No new shadcn primitives.
 
 5. **Period selector default.** The tenant-payout page defaults `period_start` / `period_end` to the current week's Monday–Sunday. Computing the current Senin boundary client-side in Indonesian week convention (ISO week: Monday = day 1) requires a short helper. Flag to `nextjs-expert`: use `date-fns` `startOfISOWeek` / `endOfISOWeek` if already in the dependency tree; otherwise a manual Sunday-calculation suffices.
 
+---
+
+## Phase 5 — Booking Selection Screen (Flutter mobile)
+
+_Owned by `ui-ux-expert`. Consumed by `flutter-expert`. Full design flow at `docs/DESIGN_FLOWS/booking-selection.md`._
+
+_This section registers the design tokens, component tokens, and animation tokens introduced by the new single-page booking selection screen (replacing wizard steps 3–5). All tokens are derived from `Theme.of(context).colorScheme` — no new palette values are introduced._
+
+---
+
+### BS-T1. Spacing tokens used on this screen
+
+| Token name (design) | Flutter value | Usage |
+|---|---|---|
+| `space-4` | `4.0` | Internal chip label padding (vertical) |
+| `space-6` | `6.0` | Spacing between body badge chips |
+| `space-8` | `8.0` | Gap between list cards; cross-axis grid spacing |
+| `space-12` | `12.0` | Gap between photo tile and text column in cards; section top padding |
+| `space-16` | `16.0` | Screen edge insets (horizontal + vertical); card internal padding |
+| `space-24` | `24.0` | Between section headers |
+| `space-32` | `32.0` | Empty state vertical centering padding |
+| `space-48` | `48.0` | Empty state icon size |
+| `space-56` | `56.0` | CTA bar button height; date row height |
+
+All values in logical pixels (dp). No fractional spacing permitted on this screen.
+
+---
+
+### BS-T2. Radius tokens
+
+| Token name (design) | Flutter value | Usage |
+|---|---|---|
+| `radius-8` | `BorderRadius.circular(8)` | Slot chips; photo tile corners; room/therapist photo tiles; error strip |
+| `radius-12` | `BorderRadius.circular(12)` | Date row container; CTA button; locked-section placeholder |
+| `radius-20` | `BorderRadius.circular(20)` | Body badge pills; chip pills (gender, build, amenity) |
+| `radius-999` | `BorderRadius.circular(999)` | Circular loading indicator wrapper if ever needed |
+
+---
+
+### BS-T3. Elevation / shadow tokens
+
+| State | Flutter `Card.elevation` | Usage |
+|---|---|---|
+| Card — unselected | `1` | Default therapist, room, auto cards |
+| Card — selected | `4` | Selected therapist or room card |
+| CTA bar | Material `elevation: 8` on the `Material` wrapper | Sticky bottom bar |
+| Locked placeholder | `0` | Zero elevation; reinforces "inert" read |
+
+The elevation step from 1→4 on card selection is handled by Flutter's built-in `Card` elevation animation — no custom tween needed.
+
+---
+
+### BS-T4. Color tokens (semantic mapping to Material 3 ColorScheme)
+
+All color values are read from `Theme.of(context).colorScheme`. No hardcoded hex values on this screen.
+
+| Design role | ColorScheme property | Usage |
+|---|---|---|
+| `surface` | `cs.surface` | Card and screen background |
+| `surface-container-high` | `cs.surfaceContainerHighest` | Photo placeholder background; shimmer skeleton base |
+| `primary` | `cs.primary` | Selected border (2dp); selected chip fill; CTA button; "Ubah" text |
+| `on-primary` | `cs.onPrimary` | Text/icons on filled primary surfaces |
+| `primary-container` | `cs.primaryContainer` | Selected card background; auto-card tile background |
+| `on-primary-container` | `cs.onPrimaryContainer` | Text on primaryContainer |
+| `secondary-container` | `cs.secondaryContainer` | Body badge pill background (gender, build, amenity chips) |
+| `on-secondary-container` | `cs.onSecondaryContainer` | Text on secondaryContainer pills |
+| `outline-variant` | `cs.outlineVariant` | Default card border (1dp); unselected slot chip border |
+| `on-surface-variant` | `cs.onSurfaceVariant` | Secondary text (bio, subtitle, caption); placeholder icons; section lock captions |
+| `error` | `cs.error` | Inline disabled reason text ("Sudah terisi di jam ini"); error strip icon |
+| `error-container` | `cs.errorContainer` | Error strip background |
+| `on-error-container` | `cs.onErrorContainer` | Text inside error strip |
+
+**The selected card border is always exactly 2dp `cs.primary`.** Unselected cards use 1dp `cs.outlineVariant`. This 2dp vs 1dp contrast is the primary visual signal for selection — do not change the width without updating this spec.
+
+---
+
+### BS-T5. Typography tokens (Flutter TextTheme)
+
+| Design tier | Flutter token | Weight | Usage on this screen |
+|---|---|---|---|
+| Section heading | `theme.textTheme.titleMedium` | `w600` | Section ①②③④ headers |
+| Card primary label | `theme.textTheme.titleMedium` | `w600` | Therapist/room name |
+| Slot chip label | `theme.textTheme.labelLarge` | `w600` + tabular | Time string in slot chips |
+| Body / metadata | `theme.textTheme.bodyMedium` | normal | Bio snippet, amenity descriptions |
+| Caption / secondary | `theme.textTheme.bodySmall` | normal | Gender/build/type labels, section lock captions, "Ubah" link text |
+| Price (CTA bar) | `theme.textTheme.titleMedium` | `w700` + tabular | Running total in CTA bar — active state |
+| Price (CTA bar inactive) | `theme.textTheme.bodyMedium` | normal | Running total — before all fields filled |
+| Chip labels (pills) | `theme.textTheme.labelSmall` | `w500` | Gender, build, amenity, room-type pills |
+| Disabled reason | `theme.textTheme.bodySmall` | normal | Inline below disabled card |
+
+Tabular figures: apply `fontFeatures: [FontFeature.tabularFigures()]` to all time strings and all price strings. This is a per-`TextStyle` decoration — no global override needed.
+
+---
+
+### BS-T6. Animation tokens
+
+| Token | Duration | Curve | Trigger |
+|---|---|---|---|
+| `anim-card-select` | `150ms` | `Curves.easeOut` | Card elevation/color on tap |
+| `anim-section-unlock` | `225ms` | `Curves.easeOut` | Section slides in from `Offset(0, 0.06)` + opacity 0→1 when unlocked |
+| `anim-date-crossfade` | `150ms` | default (`AnimatedSwitcher`) | Date row text changes after date picker closes |
+| `anim-cta-enable` | `200ms` | `Curves.easeOut` | CTA button color + price text color transitions on all-fields-filled |
+| `anim-shimmer-cycle` | `1400ms` | `Curves.easeInOut` (repeat) | Opacity oscillation on skeleton placeholders: 0.4→1.0→0.4 |
+
+Under `MediaQuery.of(context).disableAnimations == true`:
+- `anim-section-unlock`: replace slide with instant show (no translate; optional instant fade acceptable)
+- `anim-shimmer-cycle`: replace animated shimmer with static `cs.surfaceContainerHighest` color
+- `anim-card-select` and `anim-cta-enable`: still run at normal duration (these are response animations tied to user input — removing them entirely would feel broken)
+- `anim-date-crossfade`: instant switch acceptable
+
+---
+
+### BS-T7. Interaction tokens
+
+| Interaction | Flutter mechanism | Note |
+|---|---|---|
+| Card tap | `InkWell` wrapping Card child (inside `ClipRRect` or `Card(clipBehavior: Clip.antiAlias)`) | Ripple must be clipped to card bounds |
+| Slot chip tap | `FilterChip` built-in selected state | No custom InkWell needed |
+| Date row tap | `InkWell` on the row container | Triggers `showDatePicker()` |
+| "Ubah" / "Coba Lagi" | `TextButton` | Minimum `minimumSize: Size(44, 44)` |
+| Haptic on selection | `HapticFeedback.lightImpact()` | Cards and slot chips; NOT on "Ubah" or "Coba Lagi" |
+| Scroll-to-unlocked | `Scrollable.ensureVisible(context, duration: Duration(milliseconds: 200), curve: Curves.easeOut, alignment: 0.0)` | Called post-frame after state settles; only when section is fully off-screen |
+
+---
+
+### BS-T8. Component tokens — "Selected Card" pattern
+
+The selected-card visual is used twice (therapist card + room card). Extract to a shared style recipe:
+
+```
+// Selected card decoration
+shape: RoundedRectangleBorder(
+  borderRadius: BorderRadius.circular(12),  // BS-T2 radius-12
+  side: BorderSide(color: cs.primary, width: 2),
+)
+color: cs.primaryContainer,
+elevation: 4,   // BS-T3
+
+// Unselected card decoration
+shape: RoundedRectangleBorder(
+  borderRadius: BorderRadius.circular(12),
+  side: BorderSide(color: cs.outlineVariant, width: 1),
+)
+color: null,    // inherits theme surface
+elevation: 1,
+```
+
+This recipe is used verbatim in `_TherapistCard`, `_RoomCard`, and the "Otomatis" variants for both sections. If a future screen uses a similar selection card, reference this token set.
+
+---
+
+### BS-T9. Locked-section placeholder token
+
+The visual for a not-yet-unlocked section (Sections ②③④ before their predecessor is satisfied):
+
+```
+Container(
+  height: 56,   // BS-T1 space-56
+  decoration: BoxDecoration(
+    color: cs.surfaceContainerHighest.withAlpha(120),
+    borderRadius: BorderRadius.circular(12),   // BS-T2 radius-12
+    border: Border.all(color: cs.outlineVariant, width: 1),
+  ),
+  child: Opacity(
+    opacity: 0.45,
+    child: Row(
+      // [icon 20dp] [section placeholder text] [Icons.lock_outline 16dp trailing]
+    ),
+  ),
+)
+```
+
+Caption below placeholder: `bodySmall`, `cs.onSurfaceVariant`, "Pilih [previous section] terlebih dahulu."
+
+`Semantics(label: 'Pilih ${sectionName}. Tersedia setelah ${prerequisite} dipilih.', excludeSemantics: true)`
+
+---
+
+### BS-T10. Disabled card token
+
+Applied to therapist cards (when slot-locked) and room cards (when occupied at chosen slot):
+
+```
+Opacity(
+  opacity: 0.38,   // WCAG SC 1.4.3 disabled exception
+  child: IgnorePointer(
+    ignoring: true,
+    child: /* card widget */,
+  ),
+)
+// Below the card, outside Opacity:
+Padding(
+  padding: EdgeInsets.only(top: 4, left: 12, bottom: 8),
+  child: Text(
+    disabledReason,   // "Sudah terisi di jam ini" / "Tidak tersedia di jam ini"
+    style: theme.textTheme.bodySmall?.copyWith(color: cs.error),
+  ),
+)
+```
+
+The disabled-reason `Text` is placed outside the `Opacity` widget so it renders at full opacity and is readable. Semantics: the card's `Semantics.label` includes the reason string so screen readers announce it.
+
+---
+
+### BS-T11. Carousel tokens — Therapist Photo-First Carousel
+
+Introduced in the Phase 5 therapist-section revision (carousel replaces vertical list). All spacing values are in logical pixels (dp).
+
+#### Dimension tokens
+
+| Token | Value | Usage |
+|---|---|---|
+| `carousel-card-height` | `380dp` | Fixed height of every therapist carousel card (including "Otomatis") |
+| `carousel-photo-height` | `228dp` | Height of the photo area at the top of the card (60% of `carousel-card-height`) |
+| `carousel-peek-width` | `16dp` | Amount of the next card visible at the right edge (swipe affordance bleed) |
+| `carousel-dot-active-size` | `8dp` | Diameter of the active indicator dot |
+| `carousel-dot-inactive-size` | `6dp` | Diameter of inactive indicator dots |
+| `carousel-dot-spacing` | `6dp` | Gap between adjacent dots |
+| `carousel-bar-height` | `4dp` | Height of the compact bar indicator (used when therapist count > 8) |
+| `carousel-arrow-size` | `40dp` | Size of the `IconButton.filled` left/right arrow buttons |
+| `carousel-badge-h-pad` | `8dp` | Horizontal padding inside the counter badge pill |
+| `carousel-badge-v-pad` | `4dp` | Vertical padding inside the counter badge pill |
+
+#### Radius tokens (extends BS-T2)
+
+| Token | Value | Usage |
+|---|---|---|
+| `radius-12-top-only` | `BorderRadius.only(topLeft: Radius.circular(12), topRight: Radius.circular(12))` | Photo area top corners; bottom corners are square (flush with card edge) |
+
+No new radius values are introduced — 12dp is already in BS-T2. The `top-only` variant is a new application pattern.
+
+#### Color tokens (extends BS-T4, all from ColorScheme)
+
+| Design role | ColorScheme property | New usage |
+|---|---|---|
+| `initials-avatar-bg` | `cs.secondaryContainer` | Background of the initials fallback avatar when `photo_url` is null |
+| `initials-avatar-text` | `cs.onSecondaryContainer` | Initials text color in the fallback avatar |
+| `badge-selected-bg` | `cs.primaryContainer` | Counter badge background when the visible card is the selected therapist |
+| `badge-selected-text` | `cs.onPrimaryContainer` | Counter badge text when visible card is selected |
+| `badge-default-bg` | `cs.primary` | Counter badge background in the default (non-selected-card) state |
+| `badge-default-text` | `cs.onPrimary` | Counter badge text in the default state |
+
+No new palette entries. All roles map to existing `ColorScheme` properties.
+
+#### Animation tokens (extends BS-T6)
+
+| Token | Duration | Curve | Trigger |
+|---|---|---|---|
+| `anim-carousel-page` | `250ms` | `Curves.easeInOut` | Arrow-button triggered page transition (`PageController.animateToPage`) |
+| `anim-carousel-dot` | `150ms` | `Curves.easeOut` | Indicator dot width/color transition on page change |
+| `anim-badge-crossfade` | `100ms` | default (`AnimatedSwitcher`) | Counter badge text update on page change |
+| `anim-card-select-pop` | `200ms` | `Curves.easeOut` | Scale-pop on "Pilih" button tap: 1.0 → 1.03 → 1.0 |
+
+Swipe-driven page changes use `PageView`'s native physics — no custom duration token is needed for those; only arrow-button transitions require a programmatic duration.
+
+#### Viewport fraction formula
+
+```
+// pageController viewportFraction
+final double peekWidth = 16.0;  // BS-T11 carousel-peek-width
+final double screenWidth = MediaQuery.of(context).size.width;
+final double fraction = 1.0 - (peekWidth / screenWidth);
+PageController(viewportFraction: fraction, initialPage: 0)
+```
+
+This ensures exactly `peekWidth` dp of the next card is visible regardless of screen width. On screens narrower than ~320px the formula is clamped to a minimum fraction of 0.92 to prevent the peek from dominating.
+
+#### Platform visibility rule for arrow buttons
+
+```
+// Show arrows when the device supports hover (desktop browser / web)
+// Hide on touch-only devices
+final bool showArrows = kIsWeb
+    ? true                          // always show on web; mouse users can't swipe
+    : false;                        // hide on native mobile
+```
+
+On Flutter web, arrow buttons are always rendered. On native iOS/Android, they are excluded from the widget tree entirely (not just hidden) so they do not consume tab-order slots.
+
+#### "Otomatis" card dimensions
+
+The "Otomatis" card uses the same `carousel-card-height` (380dp) and `carousel-photo-height` (228dp) as a real therapist card. Inside the 228dp photo area: `Icons.auto_awesome` at 64dp centered, with "Biar sistem yang memilih" as `bodyMedium`, `cs.onPrimaryContainer`, centered 12dp below the icon. Background: `cs.primaryContainer` with `radius-12-top-only`. This maintains consistent swipe rhythm — the "Otomatis" card is the same physical size as every other card.
+
+---
+
+## Platform-Admin Dashboard — Component Recipes
+
+_Added by `ui-ux-expert` alongside `docs/DESIGN_FLOWS/platform-admin-dashboard.md`._
+_These are web (Next.js / Tailwind) recipes. They extend the token set from BS-T1..BS-T11 (Flutter)._
+_Token prefix: `PA-T*` to distinguish from the Flutter booking-selection tokens._
+
+---
+
+### PA-T1. KPI Card (platform-admin web)
+
+**Recipe name:** `KpiCard` — a full-bleed `<Link>` wrapping a card that surfaces one operational metric.
+
+**Anatomy:**
+
+```
+<Link href="[target]"
+  class="block rounded-lg border bg-card shadow-sm
+         transition-shadow duration-[150ms] ease-out
+         hover:shadow-md
+         focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+  <div class="flex items-center gap-4 p-5">
+
+    <!-- Icon container -->
+    <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-full [iconBg]">
+      <[LucideIcon] size={20} aria-hidden="true" class="[iconColor]" />
+    </div>
+
+    <!-- Text stack -->
+    <div class="min-w-0">
+      <p class="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        [label]
+      </p>
+      <p class="mt-0.5 text-3xl font-bold tabular-nums text-foreground">
+        [value]
+      </p>
+      <p class="mt-0.5 text-xs text-muted-foreground">
+        [sub-label]
+      </p>
+    </div>
+
+  </div>
+</Link>
+```
+
+**Props contract:**
+
+| Prop | Type | Notes |
+|---|---|---|
+| `href` | `string` | Required. Target subpage. |
+| `icon` | `LucideIcon` (component) | size=20, aria-hidden. |
+| `iconBg` | `string` (Tailwind class) | e.g. `"bg-primary/10"` |
+| `iconColor` | `string` (Tailwind class) | e.g. `"text-primary"` |
+| `label` | `string` | Short uppercase metric name. |
+| `value` | `number \| string` | Raw count or pre-formatted Rupiah string. |
+| `subLabel` | `string` | Secondary descriptor below number. |
+| `loading` | `boolean` | When true, render skeleton (see States below). |
+| `error` | `boolean` | When true, render error stub (see States below). |
+
+**States:**
+
+- **Default:** anatomy above.
+- **Loading:** icon container is a `w-11 h-11 rounded-full animate-pulse bg-muted`; label replaced by `h-3 w-20 rounded animate-pulse bg-muted`; value replaced by `h-8 w-12 rounded animate-pulse bg-muted`; sub-label replaced by `h-3 w-16 rounded animate-pulse bg-muted`.
+- **Error:** icon container renders with `bg-muted/50`; value is `"—"` in `text-muted-foreground`; sub-label becomes `"Gagal memuat"` in `text-destructive text-xs`.
+- **Accent (urgency variant):** used when the count represents a queue that needs action (e.g. pending registrations > 0). Pass `iconBg="bg-amber-100"`, `iconColor="text-amber-600"`, and render the value paragraph with additional class `text-amber-700`.
+
+**Spacing tokens used (web scale, mirrors BS-T1):**
+
+| Token | Tailwind | Usage |
+|---|---|---|
+| `space-4` | `p-1` / `gap-1` | Internal chip micro-spacing |
+| `space-16` | `p-4` / `gap-4` | Card internal padding (`p-5` = 20px, nearest step) |
+| `space-44` | `h-11 w-11` | Icon container (44px = touch target floor) |
+
+**Radius:** `rounded-lg` = 8px on card; `rounded-full` on icon container — from BS-T2 `radius-8` / `radius-999`.
+
+**Motion:** `transition-shadow duration-[150ms] ease-out` — matches BS-T6 `anim-card-select` (150ms, ease-out). Hover lifts card shadow from `shadow-sm` to `shadow-md`.
+
+**Grid placement:** rendered inside `<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">`. The component itself has no grid-column opinion — the parent grid owns layout.
+
+---
+
+### PA-T2. Disbursement Status Pill (platform-admin web)
+
+**Recipe name:** `DisbursementStatusBadge` — an inline `<Badge>`-style pill that communicates disbursement status with color + text, WCAG 1.4.1 compliant.
+
+**Status → visual mapping:**
+
+| Status value | Display label | bg class | text class | border class | font-weight |
+|---|---|---|---|---|---|
+| `pending` | Menunggu | `bg-amber-100` | `text-amber-800` | `border-amber-200` | normal |
+| `processing` | Diproses | `bg-blue-100` | `text-blue-800` | `border-blue-200` | normal |
+| `transferred` | Ditransfer | `bg-emerald-100` | `text-emerald-800` | `border-emerald-200` | normal |
+| `failed` | GAGAL | `bg-red-100` | `text-red-800` | `border-red-300` | `font-bold` |
+| `cancelled` | Dibatalkan | `bg-muted` | `text-muted-foreground` | `border-border` | normal |
+
+**Critical rule for `failed`:** label text is uppercase "GAGAL" AND `font-bold`. Color alone MUST NOT be the only differentiator — this is a non-negotiable WCAG 1.4.1 requirement. The `DisbursementStatusBadge` component at `components/disbursement-status-badge.tsx` must enforce this. If a code review finds the failed badge uses normal weight or mixed case, it must be corrected before shipping.
+
+**Anatomy:**
+```
+<span class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs
+             [bg] [text] [border] [font-weight]">
+  [label]
+</span>
+```
+
+No icon inside the pill — text label is sufficient. If the product ever adds icons inside pills, update this token.
+
+**Contrast verification:**
+- amber-800 on amber-100: ~7.2:1 — passes 4.5:1 AA text.
+- red-800 on red-100: ~6.1:1 — passes.
+- emerald-800 on emerald-100: ~5.9:1 — passes.
+- blue-800 on blue-100: ~6.4:1 — passes.
+- muted-foreground on muted: verify at implementation time (theme-dependent; must be ≥ 4.5:1).
+
+---
+
+### PA-T3. Mini Panel with Compact Table (platform-admin web)
+
+**Recipe name:** `MiniPanel` — a `<Card>` with a sticky header row, a compact `<table>`, an empty state, an error state, and a footer "Lihat semua" link.
+
+**Anatomy:**
+```
+<Card>
+  <CardHeader class="flex flex-row items-center justify-between space-y-0 pb-3">
+    <CardTitle class="text-base">[Panel title]</CardTitle>
+    <Link href="[all-items href]"
+      class="text-xs text-muted-foreground hover:text-foreground
+             flex items-center gap-1 transition-colors duration-[150ms]">
+      Lihat semua
+      <ArrowRight size={12} aria-hidden="true" />
+    </Link>
+  </CardHeader>
+  <CardContent class="p-0">
+    <!-- Happy path -->
+    <table class="w-full text-sm">
+      <thead class="border-b bg-muted/30">
+        <tr>
+          <th scope="col" class="px-4 py-2 text-left text-xs font-medium
+               text-muted-foreground">[Column A]</th>
+          <!-- ...additional <th scope="col"> headers -->
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-border">
+        <!-- rows via RegistrationTableBody or DisbursementTableBody client component -->
+      </tbody>
+    </table>
+
+    <!-- Empty state (when rows = 0) -->
+    <div class="flex flex-col items-center gap-3 py-10 text-center">
+      <[EmptyIcon] size={32} class="text-muted-foreground/30" aria-hidden="true" />
+      <p class="text-sm text-muted-foreground">[Empty copy]</p>
+    </div>
+
+    <!-- Error state (when fetch fails) -->
+    <div role="alert" class="flex items-start gap-2 m-4 rounded-md border
+         border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+      <AlertCircle size={16} class="mt-0.5 shrink-0 text-red-600" aria-hidden="true" />
+      <span>Gagal memuat [section]. <a href="/dashboard" class="underline">Muat ulang</a>.</span>
+    </div>
+  </CardContent>
+</Card>
+```
+
+**Loading state:** inside `<tbody>`, render 3 skeleton rows:
+```
+<tr>
+  <td class="px-4 py-3"><div class="h-4 w-3/4 rounded animate-pulse bg-muted" /></td>
+  <td class="px-4 py-3"><div class="h-4 w-1/2 rounded animate-pulse bg-muted" /></td>
+  <td class="px-4 py-3"><div class="h-4 w-16 rounded-full animate-pulse bg-muted" /></td>
+</tr>
+```
+
+**Accessibility rules:**
+- Every `<th>` has `scope="col"`.
+- Table caption is implicitly provided by `CardTitle` (same card, visually associated). If the table is used standalone, add `<caption class="sr-only">` with the panel title.
+- Row click via `useRouter` in a client sub-component — the `<tr>` gets `role="row"` (implicit), `tabIndex={0}`, `onKeyDown` handler for Enter/Space, and `aria-label="Tinjau [entity name]"`.
+
+**Grid placement:** inside `<div class="grid grid-cols-1 gap-6 md:grid-cols-2">`. Each panel takes one column.
+

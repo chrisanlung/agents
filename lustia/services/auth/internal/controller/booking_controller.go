@@ -36,14 +36,22 @@ type BookingServiceIface interface {
 	GetPublicBranchDetail(ctx context.Context, branchID string) (service.PublicBranchDetail, error)
 }
 
+// PaymentSyncServiceIface is the consumer-owned interface for the sync-payment
+// operation. Declared here (SOLID-I) so BookingController depends only on the
+// narrow slice of PaymentServiceIface it actually uses.
+type PaymentSyncServiceIface interface {
+	SyncStatus(ctx context.Context, in service.SyncPaymentInput) (service.SyncPaymentResult, error)
+}
+
 // BookingController handles all booking-related HTTP endpoints.
 type BookingController struct {
-	svc BookingServiceIface
+	svc        BookingServiceIface
+	paymentSvc PaymentSyncServiceIface
 }
 
 // NewBookingController constructs a BookingController.
-func NewBookingController(svc BookingServiceIface) *BookingController {
-	return &BookingController{svc: svc}
+func NewBookingController(svc BookingServiceIface, paymentSvc PaymentSyncServiceIface) *BookingController {
+	return &BookingController{svc: svc, paymentSvc: paymentSvc}
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +78,7 @@ func (c *BookingController) RegisterOperator(rg *gin.RouterGroup, rbac func(stri
 	rg.POST("/tenant/bookings/:id/complete", rbac(constants.PermBookingComplete), c.Complete)
 	rg.POST("/tenant/bookings/:id/no-show", rbac(constants.PermBookingNoShow), c.MarkNoShow)
 	rg.POST("/tenant/bookings/:id/cancel", rbac(constants.PermBookingCancel), c.Cancel)
+	rg.POST("/tenant/bookings/:id/sync-payment", rbac(constants.PermBookingRead), c.SyncPayment)
 	rg.GET("/tenant/reports/bookings/summary", rbac(constants.PermBookingRead), c.ReportSummary)
 }
 
@@ -233,6 +242,12 @@ func (c *BookingController) GetPublicBranchDetail(ctx *gin.Context) {
 }
 
 // GetAvailability handles GET /api/v1/public/branches/:id/availability.
+//
+// Optional query param: therapist_id=<UUID>
+// When supplied, every slot in the response gains a boolean therapist_available
+// that indicates whether that specific therapist is free at the slot. Old clients
+// calling without ?therapist_id receive the same response shape as before PLUS
+// the new available_room_ids array (unknown fields are silently ignored by Dart).
 func (c *BookingController) GetAvailability(ctx *gin.Context) {
 	branchID := ctx.Param("id")
 	var q AvailabilityQuery
@@ -242,9 +257,10 @@ func (c *BookingController) GetAvailability(ctx *gin.Context) {
 	}
 
 	slots, err := c.svc.ListAvailableSlots(ctx.Request.Context(), service.AvailableSlotsInput{
-		BranchID:  branchID,
-		ServiceID: q.ServiceID,
-		Date:      q.Date,
+		BranchID:    branchID,
+		ServiceID:   q.ServiceID,
+		Date:        q.Date,
+		TherapistID: q.TherapistID,
 	})
 	if err != nil {
 		helper.RespondDomainError(ctx, err)
@@ -253,11 +269,17 @@ func (c *BookingController) GetAvailability(ctx *gin.Context) {
 
 	out := make([]SlotResponse, len(slots))
 	for i, s := range slots {
+		roomIDs := s.AvailableRoomIDs
+		if roomIDs == nil {
+			roomIDs = []string{}
+		}
 		out[i] = SlotResponse{
 			Start:                    s.Start,
 			End:                      s.End,
 			TherapistsAvailableCount: s.TherapistsAvailableCount,
 			RoomsAvailableCount:      s.RoomsAvailableCount,
+			TherapistAvailable:       s.TherapistAvailable,
+			AvailableRoomIDs:         roomIDs,
 		}
 	}
 
@@ -499,6 +521,40 @@ func (c *BookingController) Cancel(ctx *gin.Context) {
 		IsAdmin:        isAdmin(claims.Roles),
 		BookingID:      id,
 		Reason:         req.Reason,
+	})
+	if err != nil {
+		helper.RespondDomainError(ctx, err)
+		return
+	}
+	ctx.JSON(http.StatusOK, toBookingResponse(d))
+}
+
+// SyncPayment handles POST /api/v1/tenant/bookings/:id/sync-payment.
+// Polls the payment provider for the current transaction state and applies any
+// pending transition (pending_payment → paid / expired / failed). Idempotent.
+// Permission: booking.read — any operator with read access may trigger a poll.
+func (c *BookingController) SyncPayment(ctx *gin.Context) {
+	claims, _ := middleware.ClaimsFromContext(ctx)
+	id := ctx.Param("id")
+
+	result, err := c.paymentSvc.SyncStatus(ctx.Request.Context(), service.SyncPaymentInput{
+		BookingID:      id,
+		CallerTenantID: claims.TenantID,
+		CallerUserID:   claims.Subject,
+		CallerBranches: claims.Branches,
+		IsAdmin:        isAdmin(claims.Roles),
+	})
+	if err != nil {
+		helper.RespondDomainError(ctx, err)
+		return
+	}
+
+	// Fetch the refreshed booking detail so the caller gets the full shape.
+	d, err := c.svc.Get(ctx.Request.Context(), service.GetBookingInput{
+		CallerTenantID: claims.TenantID,
+		CallerBranches: claims.Branches,
+		IsAdmin:        isAdmin(claims.Roles),
+		BookingID:      result.BookingID,
 	})
 	if err != nil {
 		helper.RespondDomainError(ctx, err)

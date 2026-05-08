@@ -1,13 +1,14 @@
 // Definisi semua route aplikasi Lustia menggunakan go_router.
 // ShellRoute membungkus tab bottom-nav (Beranda, Favorit, Booking Saya, Pengaturan).
-// Wizard booking + konfirmasi adalah full-screen route di luar shell.
+// Booking adalah full-screen route di luar shell — wizard dihapus, semua
+// langkah kini ada di BookingSelectionScreen.
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../features/booking/presentation/screens/booking_confirmation_screen.dart';
-import '../../features/booking/presentation/screens/booking_wizard_screen.dart';
+import '../../features/booking/presentation/screens/booking_selection_screen.dart';
 import '../../features/booking/presentation/screens/payment_screen.dart';
 import '../../features/branch/presentation/screens/branch_detail_screen.dart';
 import '../../features/branch/presentation/screens/branch_list_screen.dart';
@@ -28,7 +29,14 @@ abstract final class AppRoutes {
   static const String home = '/';
   static const String favorites = '/favorites';
   static const String branchDetail = '/branches/:id';
-  static const String bookingWizard = '/branches/:id/book';
+
+  /// Single-page booking flow (all 8 sections: service, addon, date, therapist,
+  /// time, room, customer info, summary). Previously called bookingWizard.
+  static const String bookingSelect = '/branches/:id/book';
+
+  /// Legacy path — redirects to [bookingSelect] for deep-link backwards compat.
+  static const String bookingSelectLegacy = '/branches/:id/book/select';
+
   static const String payment = '/branches/:id/book/payment';
   static const String confirmation = '/confirmation/:code';
   static const String myBookings = '/my-bookings';
@@ -187,12 +195,23 @@ GoRouter appRouter(AppRouterRef ref) {
         builder: (context, state) =>
             BranchDetailScreen(branchId: state.pathParameters['id']!),
         routes: [
-          // Booking wizard — full-screen
+          // Single-page booking flow — service, addon, date, therapist,
+          // time, room, customer info, summary.
+          // BookingWizardScreen has been deleted; this IS the entry-point.
           GoRoute(
             path: 'book',
-            builder: (context, state) =>
-                BookingWizardScreen(branchId: state.pathParameters['id']!),
+            builder: (context, state) => BookingSelectionScreen(
+              branchId: state.pathParameters['id']!,
+            ),
             routes: [
+              // Legacy deep-link compat: /branches/:id/book/select → /branches/:id/book
+              GoRoute(
+                path: 'select',
+                redirect: (context, state) {
+                  final id = state.pathParameters['id']!;
+                  return '/branches/$id/book';
+                },
+              ),
               // Payment
               GoRoute(
                 path: 'payment',

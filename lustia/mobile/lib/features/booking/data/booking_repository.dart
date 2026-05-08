@@ -10,10 +10,13 @@ import 'booking_model.dart';
 part 'booking_repository.g.dart';
 
 abstract interface class BookingRepository {
+  /// Fetch availability slots. When [therapistId] is supplied the response
+  /// includes [AvailabilitySlot.therapistAvailable] per slot (API §14.1.2).
   Future<AvailabilityResponse> getAvailability({
     required String branchId,
     required String serviceId,
     required String date, // YYYY-MM-DD
+    String? therapistId, // optional — omit to get aggregate availability
   });
 
   Future<CreateBookingResponse> createBooking(CreateBookingRequest request);
@@ -38,10 +41,13 @@ class BookingRepositoryImpl implements BookingRepository {
     required String branchId,
     required String serviceId,
     required String date,
+    String? therapistId,
   }) async {
+    final params = <String, dynamic>{'service_id': serviceId, 'date': date};
+    if (therapistId != null) params['therapist_id'] = therapistId;
     final response = await _dio.get<Map<String, dynamic>>(
       '/api/v1/public/branches/$branchId/availability',
-      queryParameters: {'service_id': serviceId, 'date': date},
+      queryParameters: params,
     );
     return AvailabilityResponse.fromJson(response.data!);
   }

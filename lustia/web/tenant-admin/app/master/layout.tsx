@@ -32,7 +32,6 @@ export default async function MasterLayout({
       <AppHeader
         fullName={me.user.full_name}
         email={me.user.email}
-        activeNav="operasional"
         tenant={me.tenant ? { name: me.tenant.name, slug: me.tenant.slug } : null}
         memberships={me.memberships}
       />

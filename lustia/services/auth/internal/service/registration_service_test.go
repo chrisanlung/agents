@@ -90,6 +90,9 @@ type stubUserRepoForReg struct {
 func (r *stubUserRepoForReg) FindByEmail(_ context.Context, _ string) (*model.User, error) {
 	return nil, constants.ErrUserNotFound
 }
+func (r *stubUserRepoForReg) FindByUsername(_ context.Context, _ string) (*model.User, error) {
+	return nil, constants.ErrUserNotFound
+}
 func (r *stubUserRepoForReg) FindByID(_ context.Context, _ string) (*model.User, error) {
 	return &model.User{}, nil
 }
@@ -142,6 +145,12 @@ func (r *stubMembershipRepoForReg) SuspendAllForTenant(_ context.Context, _ stri
 }
 func (r *stubMembershipRepoForReg) FindActiveByTenant(_ context.Context, _ string) ([]*model.Membership, error) {
 	return nil, nil
+}
+func (r *stubMembershipRepoForReg) GetRolesAndBranches(_ context.Context, _ string) (model.MembershipAssignments, error) {
+	return model.MembershipAssignments{}, nil
+}
+func (r *stubMembershipRepoForReg) GetRolesAndBranchesForMemberships(_ context.Context, _ []string) (map[string]model.MembershipAssignments, error) {
+	return map[string]model.MembershipAssignments{}, nil
 }
 
 type stubRoleRepoForReg struct{}

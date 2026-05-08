@@ -198,3 +198,121 @@ func (r *MembershipRepository) AssignBranches(ctx context.Context, membershipID 
 	}
 	return nil
 }
+
+// roleRow is the scan target for GetRolesAndBranches role queries.
+type roleRow struct {
+	RoleID   string
+	RoleName string
+}
+
+// branchRow is the scan target for GetRolesAndBranches branch queries.
+type branchRow struct {
+	BranchID   string
+	BranchName string
+}
+
+// membershipRoleRow is the scan target for the bulk role query.
+type membershipRoleRow struct {
+	MembershipID string
+	RoleID       string
+	RoleName     string
+}
+
+// membershipBranchRow is the scan target for the bulk branch query.
+type membershipBranchRow struct {
+	MembershipID string
+	BranchID     string
+	BranchName   string
+}
+
+// GetRolesAndBranches returns the role and branch IDs and names for a single
+// membership. Two flat queries are issued (no N+1). Empty slices are returned
+// when the membership has no assignments.
+func (r *MembershipRepository) GetRolesAndBranches(ctx context.Context, membershipID string) (model.MembershipAssignments, error) {
+	db := dbFromContext(ctx, r.db)
+
+	var roles []roleRow
+	if err := db.
+		Table("user_role ur").
+		Select("ur.role_id AS role_id, ro.name AS role_name").
+		Joins("JOIN role ro ON ro.id = ur.role_id").
+		Where("ur.membership_id = ?", membershipID).
+		Scan(&roles).Error; err != nil {
+		return model.MembershipAssignments{}, fmt.Errorf("get roles for membership: %w", err)
+	}
+
+	var branches []branchRow
+	if err := db.
+		Table("user_branch ub").
+		Select("ub.branch_id AS branch_id, b.name AS branch_name").
+		Joins("JOIN branch b ON b.id = ub.branch_id AND b.deleted_at IS NULL").
+		Where("ub.membership_id = ?", membershipID).
+		Scan(&branches).Error; err != nil {
+		return model.MembershipAssignments{}, fmt.Errorf("get branches for membership: %w", err)
+	}
+
+	a := model.MembershipAssignments{
+		RoleIDs:     make([]string, 0, len(roles)),
+		RoleNames:   make([]string, 0, len(roles)),
+		BranchIDs:   make([]string, 0, len(branches)),
+		BranchNames: make([]string, 0, len(branches)),
+	}
+	for _, rr := range roles {
+		a.RoleIDs = append(a.RoleIDs, rr.RoleID)
+		a.RoleNames = append(a.RoleNames, rr.RoleName)
+	}
+	for _, br := range branches {
+		a.BranchIDs = append(a.BranchIDs, br.BranchID)
+		a.BranchNames = append(a.BranchNames, br.BranchName)
+	}
+	return a, nil
+}
+
+// GetRolesAndBranchesForMemberships returns MembershipAssignments keyed by
+// membership_id for a batch of memberships. Two flat IN-queries are issued to
+// avoid N+1. The returned map contains an entry only for memberships that have
+// at least one assignment; callers treat absent keys as empty assignments.
+func (r *MembershipRepository) GetRolesAndBranchesForMemberships(ctx context.Context, membershipIDs []string) (map[string]model.MembershipAssignments, error) {
+	result := make(map[string]model.MembershipAssignments, len(membershipIDs))
+	if len(membershipIDs) == 0 {
+		return result, nil
+	}
+
+	db := dbFromContext(ctx, r.db)
+
+	var roles []membershipRoleRow
+	if err := db.
+		Table("user_role ur").
+		Select("ur.membership_id AS membership_id, ur.role_id AS role_id, ro.name AS role_name").
+		Joins("JOIN role ro ON ro.id = ur.role_id").
+		Where("ur.membership_id IN ?", membershipIDs).
+		Scan(&roles).Error; err != nil {
+		return nil, fmt.Errorf("bulk get roles for memberships: %w", err)
+	}
+
+	var branches []membershipBranchRow
+	if err := db.
+		Table("user_branch ub").
+		Select("ub.membership_id AS membership_id, ub.branch_id AS branch_id, b.name AS branch_name").
+		Joins("JOIN branch b ON b.id = ub.branch_id AND b.deleted_at IS NULL").
+		Where("ub.membership_id IN ?", membershipIDs).
+		Scan(&branches).Error; err != nil {
+		return nil, fmt.Errorf("bulk get branches for memberships: %w", err)
+	}
+
+	// Group roles back per membership.
+	for _, rr := range roles {
+		a := result[rr.MembershipID]
+		a.RoleIDs = append(a.RoleIDs, rr.RoleID)
+		a.RoleNames = append(a.RoleNames, rr.RoleName)
+		result[rr.MembershipID] = a
+	}
+	// Group branches back per membership.
+	for _, br := range branches {
+		a := result[br.MembershipID]
+		a.BranchIDs = append(a.BranchIDs, br.BranchID)
+		a.BranchNames = append(a.BranchNames, br.BranchName)
+		result[br.MembershipID] = a
+	}
+	return result, nil
+}

@@ -231,6 +231,58 @@ func (r *PaymentTransactionRepository) SumByTenantStatus(ctx context.Context, te
 	return sum, nil
 }
 
+// MarkVoided transitions an awaiting payment_transaction to voided.
+// Used when an operator cancels a pending_payment booking before payment arrives.
+// WHERE status='awaiting' ensures idempotency.
+// Returns rowsAffected (0 if already past awaiting — safe to ignore).
+func (r *PaymentTransactionRepository) MarkVoided(ctx context.Context, bookingID string) (int64, error) {
+	db := dbFromContext(ctx, r.db)
+	result := db.Model(&model.PaymentTransaction{}).
+		Where("booking_id = ? AND status = 'awaiting'", bookingID).
+		Updates(map[string]interface{}{
+			"status":     model.PaymentTxnStatusVoided,
+			"updated_at": time.Now(),
+		})
+	if result.Error != nil {
+		return 0, fmt.Errorf("mark payment_transaction voided: %w", result.Error)
+	}
+	return result.RowsAffected, nil
+}
+
+// MarkExpired transitions an awaiting payment_transaction to expired.
+// Used during manual sync when the provider reports expiry.
+// WHERE status='awaiting' ensures idempotency.
+func (r *PaymentTransactionRepository) MarkExpired(ctx context.Context, bookingID string) (int64, error) {
+	db := dbFromContext(ctx, r.db)
+	result := db.Model(&model.PaymentTransaction{}).
+		Where("booking_id = ? AND status = 'awaiting'", bookingID).
+		Updates(map[string]interface{}{
+			"status":     model.PaymentTxnStatusExpired,
+			"updated_at": time.Now(),
+		})
+	if result.Error != nil {
+		return 0, fmt.Errorf("mark payment_transaction expired: %w", result.Error)
+	}
+	return result.RowsAffected, nil
+}
+
+// MarkFailed transitions an awaiting payment_transaction to failed.
+// Used during manual sync when the provider reports a decline/failure.
+// WHERE status='awaiting' ensures idempotency.
+func (r *PaymentTransactionRepository) MarkFailed(ctx context.Context, bookingID string) (int64, error) {
+	db := dbFromContext(ctx, r.db)
+	result := db.Model(&model.PaymentTransaction{}).
+		Where("booking_id = ? AND status = 'awaiting'", bookingID).
+		Updates(map[string]interface{}{
+			"status":     model.PaymentTxnStatusFailed,
+			"updated_at": time.Now(),
+		})
+	if result.Error != nil {
+		return 0, fmt.Errorf("mark payment_transaction failed: %w", result.Error)
+	}
+	return result.RowsAffected, nil
+}
+
 // SweepExpiredTransactions transitions awaiting rows past their qr_expires_at
 // to status=expired. Called alongside booking expiry sweep.
 func (r *PaymentTransactionRepository) SweepExpiredTransactions(ctx context.Context) (int, error) {

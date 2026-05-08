@@ -59,6 +59,12 @@ func (r *BranchRepository) FindByTenant(ctx context.Context, tenantID string, fi
 	if filter.Status != "" && filter.Status != "all" {
 		q = q.Where("status = ?", filter.Status)
 	}
+	// Branch-scope enforcement: when IDs is non-empty, restrict to those rows.
+	// The service layer guarantees this is only set for non-admin callers that
+	// have at least one assigned branch; an empty slice never reaches here.
+	if len(filter.IDs) > 0 {
+		q = q.Where("id IN (?)", filter.IDs)
+	}
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
@@ -93,17 +99,18 @@ func (r *BranchRepository) Save(ctx context.Context, b *model.Branch) error {
 func (r *BranchRepository) Update(ctx context.Context, b *model.Branch) error {
 	db := dbFromContext(ctx, r.db)
 	updates := map[string]interface{}{
-		"name":          b.Name,
-		"address_line1": b.AddressLine1,
-		"address_line2": b.AddressLine2,
-		"city":          b.City,
-		"province":      b.Province,
-		"postal_code":   b.PostalCode,
-		"country_code":  b.Country,
-		"timezone":      b.Timezone,
-		"contact_phone": b.ContactPhone,
-		"contact_email": b.ContactEmail,
-		"updated_by":    b.UpdatedBy,
+		"name":              b.Name,
+		"address_line1":     b.AddressLine1,
+		"address_line2":     b.AddressLine2,
+		"city":              b.City,
+		"province":          b.Province,
+		"postal_code":       b.PostalCode,
+		"country_code":      b.Country,
+		"timezone":          b.Timezone,
+		"contact_phone":     b.ContactPhone,
+		"contact_email":     b.ContactEmail,
+		"operational_hours": b.OperationalHours,
+		"updated_by":        b.UpdatedBy,
 	}
 	if err := db.Model(&model.Branch{}).Where("id = ?", b.ID).Updates(updates).Error; err != nil {
 		return fmt.Errorf("update branch: %w", translateDBError(err))

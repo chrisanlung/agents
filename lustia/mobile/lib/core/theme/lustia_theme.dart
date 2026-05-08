@@ -24,6 +24,7 @@ abstract final class LustiaTheme {
       onErrorContainer: Color(0xFF991B1B), // red-800
       surface: LustiaColors.background,
       onSurface: LustiaColors.onSurface,
+      onSurfaceVariant: LustiaColors.onSurface,
       surfaceContainerHighest: LustiaColors.surfaceVariant,
       outline: LustiaColors.borderSubtle,
       outlineVariant: LustiaColors.borderSubtle,
@@ -87,7 +88,19 @@ abstract final class LustiaTheme {
       chipTheme: ChipThemeData(
         backgroundColor: LustiaColors.primarySurface,
         selectedColor: LustiaColors.primaryContainer,
-        labelStyle: const TextStyle(fontSize: 12),
+        labelStyle: const TextStyle(
+          fontSize: 12,
+          color: LustiaColors.textPrimary,
+        ),
+        secondaryLabelStyle: const TextStyle(
+          fontSize: 12,
+          color: LustiaColors.textPrimary,
+        ),
+        iconTheme: const IconThemeData(
+          color: LustiaColors.textPrimary,
+          size: 16,
+        ),
+        checkmarkColor: LustiaColors.primary,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
       ),
       dividerTheme: const DividerThemeData(

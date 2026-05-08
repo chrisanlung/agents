@@ -282,6 +282,11 @@ func (s *TherapistSvc) Update(ctx context.Context, in UpdateTherapistInput) (The
 	if in.Build != nil && !validBuild(*in.Build) {
 		return TherapistDetail{}, fmt.Errorf("%w: build must be one of langsing, sedang, atletis, tegap", constants.ErrInvalidInput)
 	}
+	// Defense-in-depth range check for prep_minutes (controller binding is one
+	// layer; service is the canonical validation boundary).
+	if in.PrepMinutes != nil && (*in.PrepMinutes < 0 || *in.PrepMinutes > 60) {
+		return TherapistDetail{}, fmt.Errorf("%w: prep_minutes must be 0–60", constants.ErrInvalidInput)
+	}
 
 	if in.FullName != nil {
 		t.FullName = *in.FullName
@@ -317,6 +322,9 @@ func (s *TherapistSvc) Update(ctx context.Context, in UpdateTherapistInput) (The
 		}
 		t.JoinedAt = &parsed
 	}
+	if in.PrepMinutes != nil {
+		t.PrepMinutes = *in.PrepMinutes
+	}
 	t.UpdatedBy = &in.CallerUserID
 
 	if err := s.therapists.Update(ctx, t); err != nil {
@@ -330,6 +338,7 @@ func (s *TherapistSvc) Update(ctx context.Context, in UpdateTherapistInput) (The
 		Action:       "therapist.updated",
 		ResourceType: "therapist",
 		ResourceID:   t.ID,
+		Meta:         map[string]interface{}{"prep_minutes": t.PrepMinutes},
 	})
 
 	return toTherapistDetail(t), nil
@@ -493,22 +502,23 @@ func (s *TherapistSvc) enrichMappings(ctx context.Context, tenantID string, rows
 // toTherapistDetail converts a model.Therapist to TherapistDetail.
 func toTherapistDetail(t *model.Therapist) TherapistDetail {
 	d := TherapistDetail{
-		ID:        t.ID,
-		TenantID:  t.TenantID,
-		BranchID:  t.BranchID,
-		UserID:    t.UserID,
-		FullName:  t.FullName,
-		Gender:    t.Gender,
-		Phone:     t.Phone,
-		Email:     t.Email,
-		Bio:       t.Bio,
-		PhotoKey:  t.PhotoKey,
-		HeightCm:  t.HeightCm,
-		WeightKg:  t.WeightKg,
-		Build:     t.Build,
-		IsActive:  t.IsActive,
-		CreatedAt: t.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt: t.UpdatedAt.UTC().Format(time.RFC3339),
+		ID:          t.ID,
+		TenantID:    t.TenantID,
+		BranchID:    t.BranchID,
+		UserID:      t.UserID,
+		FullName:    t.FullName,
+		Gender:      t.Gender,
+		Phone:       t.Phone,
+		Email:       t.Email,
+		Bio:         t.Bio,
+		PhotoKey:    t.PhotoKey,
+		HeightCm:    t.HeightCm,
+		WeightKg:    t.WeightKg,
+		Build:       t.Build,
+		PrepMinutes: t.PrepMinutes,
+		IsActive:    t.IsActive,
+		CreatedAt:   t.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:   t.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 
 	// Specialties are stored as a JSONB array string. Empty/invalid parse falls

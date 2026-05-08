@@ -6,7 +6,7 @@ part of 'booking_provider.dart';
 // RiverpodGenerator
 // **************************************************************************
 
-String _$paymentStatusHash() => r'1efea3e212ac0f4342352539b1d452e8349c301e';
+String _$paymentStatusHash() => r'3deb7771ec8ffe7cad34f067af6120ed40a213da';
 
 /// Copied from Dart SDK
 class _SystemHash {
@@ -31,9 +31,11 @@ class _SystemHash {
 
 /// Provider polling status pembayaran — ADR 0015 §2.7.
 ///
-/// Emit stream [PaymentStatusResponse] setiap 5 detik.
-/// Stream berhenti secara otomatis saat status terminal
-/// (paid / expired / failed) atau saat provider di-dispose.
+/// Emit pertama kali sekarang juga (tanpa tunggu 5 detik), lalu setiap 5 detik.
+/// Stream emits status terminal (paid / expired / failed) lalu berhenti — UI
+/// listener perlu lihat nilai terminal supaya bisa navigate ke konfirmasi.
+/// (Bug fix: `takeWhile(!isTerminal)` membuang elemen terminal sehingga UI
+/// tidak pernah lihat 'paid'.)
 ///
 /// Copied from [paymentStatus].
 @ProviderFor(paymentStatus)
@@ -41,26 +43,32 @@ const paymentStatusProvider = PaymentStatusFamily();
 
 /// Provider polling status pembayaran — ADR 0015 §2.7.
 ///
-/// Emit stream [PaymentStatusResponse] setiap 5 detik.
-/// Stream berhenti secara otomatis saat status terminal
-/// (paid / expired / failed) atau saat provider di-dispose.
+/// Emit pertama kali sekarang juga (tanpa tunggu 5 detik), lalu setiap 5 detik.
+/// Stream emits status terminal (paid / expired / failed) lalu berhenti — UI
+/// listener perlu lihat nilai terminal supaya bisa navigate ke konfirmasi.
+/// (Bug fix: `takeWhile(!isTerminal)` membuang elemen terminal sehingga UI
+/// tidak pernah lihat 'paid'.)
 ///
 /// Copied from [paymentStatus].
 class PaymentStatusFamily extends Family<AsyncValue<PaymentStatusResponse>> {
   /// Provider polling status pembayaran — ADR 0015 §2.7.
   ///
-  /// Emit stream [PaymentStatusResponse] setiap 5 detik.
-  /// Stream berhenti secara otomatis saat status terminal
-  /// (paid / expired / failed) atau saat provider di-dispose.
+  /// Emit pertama kali sekarang juga (tanpa tunggu 5 detik), lalu setiap 5 detik.
+  /// Stream emits status terminal (paid / expired / failed) lalu berhenti — UI
+  /// listener perlu lihat nilai terminal supaya bisa navigate ke konfirmasi.
+  /// (Bug fix: `takeWhile(!isTerminal)` membuang elemen terminal sehingga UI
+  /// tidak pernah lihat 'paid'.)
   ///
   /// Copied from [paymentStatus].
   const PaymentStatusFamily();
 
   /// Provider polling status pembayaran — ADR 0015 §2.7.
   ///
-  /// Emit stream [PaymentStatusResponse] setiap 5 detik.
-  /// Stream berhenti secara otomatis saat status terminal
-  /// (paid / expired / failed) atau saat provider di-dispose.
+  /// Emit pertama kali sekarang juga (tanpa tunggu 5 detik), lalu setiap 5 detik.
+  /// Stream emits status terminal (paid / expired / failed) lalu berhenti — UI
+  /// listener perlu lihat nilai terminal supaya bisa navigate ke konfirmasi.
+  /// (Bug fix: `takeWhile(!isTerminal)` membuang elemen terminal sehingga UI
+  /// tidak pernah lihat 'paid'.)
   ///
   /// Copied from [paymentStatus].
   PaymentStatusProvider call(String bookingCode) {
@@ -91,18 +99,22 @@ class PaymentStatusFamily extends Family<AsyncValue<PaymentStatusResponse>> {
 
 /// Provider polling status pembayaran — ADR 0015 §2.7.
 ///
-/// Emit stream [PaymentStatusResponse] setiap 5 detik.
-/// Stream berhenti secara otomatis saat status terminal
-/// (paid / expired / failed) atau saat provider di-dispose.
+/// Emit pertama kali sekarang juga (tanpa tunggu 5 detik), lalu setiap 5 detik.
+/// Stream emits status terminal (paid / expired / failed) lalu berhenti — UI
+/// listener perlu lihat nilai terminal supaya bisa navigate ke konfirmasi.
+/// (Bug fix: `takeWhile(!isTerminal)` membuang elemen terminal sehingga UI
+/// tidak pernah lihat 'paid'.)
 ///
 /// Copied from [paymentStatus].
 class PaymentStatusProvider
     extends AutoDisposeStreamProvider<PaymentStatusResponse> {
   /// Provider polling status pembayaran — ADR 0015 §2.7.
   ///
-  /// Emit stream [PaymentStatusResponse] setiap 5 detik.
-  /// Stream berhenti secara otomatis saat status terminal
-  /// (paid / expired / failed) atau saat provider di-dispose.
+  /// Emit pertama kali sekarang juga (tanpa tunggu 5 detik), lalu setiap 5 detik.
+  /// Stream emits status terminal (paid / expired / failed) lalu berhenti — UI
+  /// listener perlu lihat nilai terminal supaya bisa navigate ke konfirmasi.
+  /// (Bug fix: `takeWhile(!isTerminal)` membuang elemen terminal sehingga UI
+  /// tidak pernah lihat 'paid'.)
   ///
   /// Copied from [paymentStatus].
   PaymentStatusProvider(String bookingCode)
@@ -184,7 +196,7 @@ class _PaymentStatusProviderElement
   String get bookingCode => (origin as PaymentStatusProvider).bookingCode;
 }
 
-String _$bookingWizardHash() => r'aacb6ca68b7c77587fb23d091120d52dcc6f8c78';
+String _$bookingWizardHash() => r'7b3e6ad7669ee20dc6d9f2e21187f49dbca8205d';
 
 abstract class _$BookingWizard
     extends BuildlessAutoDisposeNotifier<BookingWizardState> {

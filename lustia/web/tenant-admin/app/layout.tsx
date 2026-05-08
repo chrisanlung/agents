@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import { Inter } from "next/font/google";
+import NextTopLoader from "nextjs-toploader";
 import { Toaster } from "@/components/ui/sonner";
 import { FlashToast } from "@/components/flash-toast";
 import { ActivityTracker } from "@/components/activity-tracker";
@@ -33,6 +34,8 @@ export default function RootLayout({
   return (
     <html lang="id" suppressHydrationWarning>
       <body className={`${inter.variable} font-sans antialiased`}>
+        {/* Thin progress bar shown on every route transition */}
+        <NextTopLoader color="#0d9488" height={3} showSpinner={false} shadow={false} />
         {children}
         <Toaster position="top-right" />
         <Suspense fallback={null}>

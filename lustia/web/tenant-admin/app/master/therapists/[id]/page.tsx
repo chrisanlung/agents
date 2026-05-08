@@ -15,6 +15,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { TherapistForm } from "../therapist-form";
 import { AvailabilityEditor } from "../availability-editor";
+import { PrepMinutesCard } from "../prep-minutes-card";
 import { ServiceMappingCombobox } from "./service-mapping-combobox";
 
 // TEP-7 — detect placeholder / migration-default data.
@@ -194,10 +195,17 @@ export default async function TherapistDetailPage({ params, searchParams }: Prop
         <TabsContent value="jadwal">
           <Card>
             <CardContent className="p-6">
-              <AvailabilityEditor
-                therapistId={id}
-                initialWindows={availability.windows}
-              />
+              {/* PrepMinutesCard is above the weekly grid — per design spec §2 */}
+              <div className="space-y-4">
+                <PrepMinutesCard
+                  therapistId={id}
+                  initialPrepMinutes={therapist.prep_minutes}
+                />
+                <AvailabilityEditor
+                  therapistId={id}
+                  initialWindows={availability.windows}
+                />
+              </div>
             </CardContent>
           </Card>
         </TabsContent>

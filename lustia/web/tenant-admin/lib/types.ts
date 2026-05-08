@@ -66,6 +66,11 @@ export interface Therapist {
   joined_at: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Scheduling buffer (minutes) inserted after each confirmed booking.
+   * Default 10. Range 0–60. Always present on GET /tenant/therapists/:id.
+   */
+  prep_minutes: number;
   /** Present on GET /tenant/therapists/:id — all mappings (active + inactive) */
   services?: TherapistServiceMapping[];
 }
@@ -416,6 +421,73 @@ export interface DisbursementDetail extends TenantDisbursement {
     tenant_net_idr: number;
     paid_at: string | null;
   }>;
+}
+
+// ─── Phase 3 — User Management (admin_controller.go) ─────────────────────────
+
+/**
+ * UserProfileResponse mirrors admin_controller.go UserProfileResponse.
+ * The backend does NOT return role_ids/branch_ids on the user object itself —
+ * those are fetched separately via the membership layer. We include them here
+ * as optional for the GET /admin/users/:id detail response which may include
+ * membership context enriched by the admin service.
+ */
+export interface User {
+  id: string;
+  email: string;
+  /** Optional login alias — lowercase a-z 0-9 . _ , 3-50 chars. Null if not set. */
+  username: string | null;
+  full_name: string;
+  phone?: string | null;
+  avatar_url?: string | null;
+  is_active: boolean;
+  is_super_admin: boolean;
+  must_change_password?: boolean;
+  /** ISO 8601 datetime string or null */
+  locked_until?: string | null;
+  /** ISO 8601 datetime string or null */
+  last_login_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  /** Role names from membership (enriched by admin list) */
+  role_ids?: string[];
+  role_names?: string[];
+  /** Branch ids from membership (enriched by admin list) */
+  branch_ids?: string[];
+  branch_names?: string[];
+}
+
+export interface UserListResponse {
+  data: User[];
+  page: number;
+  limit: number;
+  total_count: number;
+  total_pages: number;
+}
+
+export interface Role {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface CreateUserInput {
+  email: string;
+  username?: string;
+  full_name: string;
+  phone?: string;
+  role_ids?: string[];
+  branch_ids?: string[];
+}
+
+export interface UpdateUserInput {
+  full_name?: string;
+  username?: string | null;
+  phone?: string;
+  avatar_url?: string;
+  is_active?: boolean;
+  role_ids?: string[];
+  branch_ids?: string[];
 }
 
 // ─── Onboarding state (ADR 0008 §2.3.3) ─────────────────────────────────────

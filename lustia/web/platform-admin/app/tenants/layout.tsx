@@ -1,13 +1,25 @@
-import { ShieldCheck } from "lucide-react";
-import { NavLinks } from "@/components/nav-links";
-import { apiFetch } from "@/lib/api";
-import { SignOutButton } from "@/app/dashboard/sign-out-button";
+import { redirect } from "next/navigation";
 
-const appName = process.env.NEXT_PUBLIC_APP_NAME ?? "Lustia Platform Console";
+import { apiFetch, ApiError } from "@/lib/api";
+import { ConsoleHeader } from "@/components/console-header";
 
 interface RegistrationListResponse {
   data: Array<{ id: string }>;
   total_count: number;
+}
+
+interface DisbursementListResponse {
+  data: Array<{ id: string }>;
+  total: number;
+}
+
+interface MeResponse {
+  user: {
+    id: string;
+    email: string;
+    full_name: string;
+    avatar_url?: string;
+  };
 }
 
 export default async function TenantsLayout({
@@ -15,35 +27,44 @@ export default async function TenantsLayout({
 }: {
   children: React.ReactNode;
 }) {
-  // Fetch pending count for the nav badge — best-effort, non-fatal
-  let pendingCount = 0;
-  try {
-    const res = await apiFetch<RegistrationListResponse>(
-      "/admin/tenant-registrations?status=pending&limit=50",
+  // Fetch identity + pending count + failed disbursement count in parallel
+  // /auth/me is required; others are best-effort (default 0 on failure)
+  const [meRes, regRes, failedDisbRes] = await Promise.allSettled([
+    apiFetch<MeResponse>("/auth/me", {}, { auth: true }),
+    apiFetch<RegistrationListResponse>(
+      "/admin/tenant-registrations?status=pending&limit=1",
       {},
       { auth: true }
-    );
-    pendingCount = res.data.length;
-  } catch {
-    // Non-fatal
+    ),
+    apiFetch<DisbursementListResponse>(
+      "/admin/disbursements?status=failed&limit=1&page=1",
+      {},
+      { auth: true }
+    ),
+  ]);
+
+  // Auth guard — redirect on 401, throw on other errors
+  if (meRes.status === "rejected") {
+    const err = meRes.reason;
+    if (err instanceof ApiError && err.status === 401) {
+      redirect("/login");
+    }
+    throw err;
   }
+
+  const user = meRes.value.user;
+
+  // Pending count — from total_count; fallback 0 on failure
+  const pendingCount =
+    regRes.status === "fulfilled" ? regRes.value.total_count : 0;
+
+  // Failed disbursement count — AdminDisbursementListResponse uses "total"; fallback 0 on failure
+  const failedDisbCount =
+    failedDisbRes.status === "fulfilled" ? failedDisbRes.value.total : 0;
 
   return (
     <div className="min-h-screen bg-slate-50">
-      <header className="border-b bg-white px-6 py-4 shadow-sm">
-        <div className="mx-auto flex max-w-6xl items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-              <ShieldCheck size={16} aria-hidden="true" />
-            </div>
-            <span className="font-semibold text-foreground">{appName}</span>
-          </div>
-          <div className="flex items-center gap-4">
-            <NavLinks pendingCount={pendingCount} />
-            <SignOutButton />
-          </div>
-        </div>
-      </header>
+      <ConsoleHeader user={user} pendingRegistrationCount={pendingCount} failedDisbursementCount={failedDisbCount} />
       <main className="mx-auto max-w-6xl px-6 py-8">{children}</main>
     </div>
   );

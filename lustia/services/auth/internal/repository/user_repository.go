@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/chrisanlung/lustia-auth/internal/constants"
@@ -35,6 +36,24 @@ func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*model.
 			return nil, constants.ErrUserNotFound
 		}
 		return nil, fmt.Errorf("find user by email: %w", err)
+	}
+	return &m, nil
+}
+
+// FindByUsername looks up a user by username, case-insensitively.
+// The username parameter is lowercased before the query so "Alice" and "alice"
+// are treated as identical. Returns ErrUserNotFound when no row matches.
+func (r *UserRepository) FindByUsername(ctx context.Context, username string) (*model.User, error) {
+	db := dbFromContext(ctx, r.db)
+	var m model.User
+	lower := strings.ToLower(strings.TrimSpace(username))
+	err := db.Where("LOWER(username) = ? AND username IS NOT NULL AND deleted_at IS NULL", lower).
+		First(&m).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, constants.ErrUserNotFound
+		}
+		return nil, fmt.Errorf("find user by username: %w", err)
 	}
 	return &m, nil
 }
@@ -124,6 +143,8 @@ func (r *UserRepository) Save(ctx context.Context, u *model.User) error {
 }
 
 // Update writes mutable profile columns on an existing user row.
+// Username is included: a nil pointer clears the column; a non-nil pointer
+// sets it (the service layer lowercases the value before calling Update).
 func (r *UserRepository) Update(ctx context.Context, u *model.User) error {
 	db := dbFromContext(ctx, r.db)
 	updates := map[string]interface{}{
@@ -134,6 +155,7 @@ func (r *UserRepository) Update(ctx context.Context, u *model.User) error {
 		"last_login_at":      u.LastLoginAt,
 		"failed_login_count": u.FailedLoginCount,
 		"locked_until":       u.LockedUntil,
+		"username":           u.Username, // nil clears; non-nil sets
 	}
 	if err := db.Model(&model.User{}).Where("id = ?", u.ID).Updates(updates).Error; err != nil {
 		return fmt.Errorf("update user: %w", translateDBError(err))

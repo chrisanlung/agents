@@ -101,17 +101,18 @@ func (r *TherapistRepository) FindByTenant(ctx context.Context, tenantID string,
 func (r *TherapistRepository) Update(ctx context.Context, t *model.Therapist) error {
 	db := dbFromContext(ctx, r.db)
 	updates := map[string]interface{}{
-		"full_name":   t.FullName,
-		"gender":      t.Gender,
-		"phone":       t.Phone,
-		"email":       t.Email,
-		"bio":         t.Bio,
-		"height_cm":   t.HeightCm,
-		"weight_kg":   t.WeightKg,
-		"build":       t.Build,
-		"joined_at":   t.JoinedAt,
-		"user_id":     t.UserID,
-		"updated_by":  t.UpdatedBy,
+		"full_name":    t.FullName,
+		"gender":       t.Gender,
+		"phone":        t.Phone,
+		"email":        t.Email,
+		"bio":          t.Bio,
+		"height_cm":    t.HeightCm,
+		"weight_kg":    t.WeightKg,
+		"build":        t.Build,
+		"joined_at":    t.JoinedAt,
+		"user_id":      t.UserID,
+		"prep_minutes": t.PrepMinutes,
+		"updated_by":   t.UpdatedBy,
 	}
 	if err := db.Model(&model.Therapist{}).Where("id = ? AND deleted_at IS NULL", t.ID).Updates(updates).Error; err != nil {
 		return fmt.Errorf("update therapist: %w", translateDBError(err))

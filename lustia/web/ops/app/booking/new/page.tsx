@@ -31,7 +31,7 @@ export default async function NewBookingPage() {
     const [branchRes, serviceRes, addonRes, therapistRes] =
       await Promise.allSettled([
         apiFetch<BranchListResponse>(
-          "/tenant/branches?limit=200&status=active",
+          "/tenant/branches?limit=200&status=active&scope=mine",
           {},
           { auth: true }
         ),

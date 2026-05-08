@@ -20,6 +20,7 @@ type Therapist struct {
 	WeightKg    int16      `gorm:"column:weight_kg;not null"`
 	Build       string     `gorm:"column:build;not null"`
 	Specialties string     `gorm:"column:specialties;type:jsonb;not null;default:'[]'"`
+	PrepMinutes int        `gorm:"column:prep_minutes;not null;default:10"`
 	IsActive    bool       `gorm:"column:is_active;not null;default:true"`
 	JoinedAt    *time.Time `gorm:"column:joined_at"`
 	DeletedAt   *time.Time `gorm:"column:deleted_at"`

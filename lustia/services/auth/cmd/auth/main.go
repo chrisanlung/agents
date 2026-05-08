@@ -247,12 +247,13 @@ func main() {
 	appEnv := envStr("APP_ENV", "dev")
 	paymentProvider := envStr("PAYMENT_PROVIDER", envStr("PAYMENT_ADAPTER", "dummy"))
 	rawProvider, err := helperPayment.NewProvider(helperPayment.ProviderConfig{
-		Provider:            paymentProvider,
-		AppEnv:              appEnv,
-		IPaymuVA:            os.Getenv("IPAYMU_VA"),
-		IPaymuAPIKey:        os.Getenv("IPAYMU_API_KEY"),
-		IPaymuSecret:        os.Getenv("IPAYMU_SECRET"),
-		IPaymuWebhookSecret: os.Getenv("IPAYMU_WEBHOOK_SECRET"),
+		Provider:                  paymentProvider,
+		AppEnv:                    appEnv,
+		IPaymuVA:                  os.Getenv("IPAYMU_VA"),
+		IPaymuAPIKey:              os.Getenv("IPAYMU_API_KEY"),
+		IPaymuBaseURL:             os.Getenv("IPAYMU_BASE_URL"),
+		IPaymuNotifyURL:           os.Getenv("IPAYMU_NOTIFY_URL"),
+		IPaymuSkipSignatureVerify: os.Getenv("IPAYMU_SKIP_SIGNATURE_VERIFY") == "true",
 	})
 	if err != nil {
 		log.Fatal(ctx, err, "payment provider misconfiguration (C-2)")
@@ -340,7 +341,8 @@ func main() {
 	roomCtrl := controller.NewRoomController(roomSvc, stor, uploadQuota, uploadMaxBytes)
 
 	// ADR 0014 — Phase 5 Booking Engine.
-	bookingCtrl := controller.NewBookingController(bookingSvc)
+	// ADR 0015 — sync-payment endpoint on BookingController needs paymentSvc.
+	bookingCtrl := controller.NewBookingController(bookingSvc, paymentSvc)
 
 	// ADR 0015 — Phase 6 Payment + Settlement + Payout.
 	paymentCtrl := controller.NewPaymentController(paymentSvc)

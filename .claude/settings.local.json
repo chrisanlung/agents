@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(mkdir -p F:/Projects/GO/common-configs)",
-      "Bash(rsync -a --exclude='.git' --exclude='.idea' --exclude='internalportal' --exclude='go.sum' --exclude='CLAUDE.md' --exclude='README.md' ./ F:/Projects/GO/common-configs/)"
+      "Bash(rsync -a --exclude='.git' --exclude='.idea' --exclude='internalportal' --exclude='go.sum' --exclude='CLAUDE.md' --exclude='README.md' ./ F:/Projects/GO/common-configs/)",
+      "Bash(\"/c/Users/dseve/AppData/Local/Microsoft/WinGet/Packages/Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe/ngrok.exe\" config *)",
+      "Bash(\"/c/Users/dseve/AppData/Local/Microsoft/WinGet/Packages/Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe/ngrok.exe\" http *)",
+      "Bash(curl -s http://127.0.0.1:4040/api/tunnels)",
+      "Bash(\"/c/Users/dseve/AppData/Local/Microsoft/WinGet/Packages/Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe/ngrok.exe\" update *)",
+      "Bash(\"/c/Users/dseve/AppData/Local/Microsoft/WinGet/Packages/Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe/ngrok.exe\" version *)"
     ]
   }
 }

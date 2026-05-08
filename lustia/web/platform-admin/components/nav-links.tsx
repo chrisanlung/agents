@@ -10,6 +10,8 @@ import { Badge } from "@/components/ui/badge";
 interface NavLinksProps {
   /** Count of pending registrations — fetched server-side and passed down. */
   pendingCount: number;
+  /** Count of failed disbursements — fetched server-side and passed down. Default 0. */
+  failedDisbursementCount?: number;
 }
 
 const links = [
@@ -19,7 +21,7 @@ const links = [
   { href: "/tenants/registrations", label: "Registrasi", icon: ClipboardList },
 ] as const;
 
-export function NavLinks({ pendingCount }: NavLinksProps) {
+export function NavLinks({ pendingCount, failedDisbursementCount = 0 }: NavLinksProps) {
   const pathname = usePathname();
 
   return (
@@ -51,6 +53,14 @@ export function NavLinks({ pendingCount }: NavLinksProps) {
                 aria-label={`${pendingCount} registrasi menunggu`}
               >
                 {pendingCount > 99 ? "99+" : pendingCount}
+              </Badge>
+            )}
+            {href === "/payout" && failedDisbursementCount > 0 && (
+              <Badge
+                className="ml-0.5 h-4 min-w-[1rem] px-1 text-[10px] leading-none bg-destructive text-destructive-foreground"
+                aria-label={`${failedDisbursementCount} disbursement gagal — perlu tindakan`}
+              >
+                {failedDisbursementCount > 99 ? "99+" : failedDisbursementCount}
               </Badge>
             )}
           </Link>

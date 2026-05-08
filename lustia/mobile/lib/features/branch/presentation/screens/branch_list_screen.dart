@@ -99,10 +99,10 @@ class _BranchListScreenState extends ConsumerState<BranchListScreen> {
         children: [
           // Filter chips
           SizedBox(
-            height: 48,
+            height: 56,
             child: ListView(
               scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               children: [
                 ..._categories.map((cat) {
                   final isAll = cat.isEmpty;
@@ -112,20 +112,22 @@ class _BranchListScreenState extends ConsumerState<BranchListScreen> {
                       : _filter.category == cat;
                   return Padding(
                     padding: const EdgeInsets.only(right: 8),
-                    child: FilterChip(
-                      label: Text(label),
+                    child: _CategoryChip(
+                      label: label,
                       selected: selected,
-                      onSelected: (_) => _applyFilter(
+                      onTap: () => _applyFilter(
                         _filter.copyWith(category: isAll ? '' : cat),
                       ),
                     ),
                   );
                 }),
-                FilterChip(
-                  avatar: const Icon(Icons.access_time, size: 16),
-                  label: const Text('Buka sekarang'),
+                _CategoryChip(
+                  label: 'Buka sekarang',
+                  icon: Icons.access_time,
                   selected: _filter.openNow,
-                  onSelected: (v) => _applyFilter(_filter.copyWith(openNow: v)),
+                  onTap: () => _applyFilter(
+                    _filter.copyWith(openNow: !_filter.openNow),
+                  ),
                 ),
               ],
             ),
@@ -333,6 +335,67 @@ class _SkeletonBox extends StatelessWidget {
       decoration: BoxDecoration(
         color: color,
         borderRadius: BorderRadius.circular(4),
+      ),
+    );
+  }
+}
+
+/// Custom chip menggantikan FilterChip default — kontras lebih kuat:
+/// selected = primary fill + onPrimary text; unselected = surface dengan border
+/// outlineVariant + text onSurface (bukan onSurfaceVariant yang pucat).
+class _CategoryChip extends StatelessWidget {
+  const _CategoryChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.icon,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final bg = selected ? cs.primary : cs.surface;
+    final fg = selected ? cs.onPrimary : cs.onSurface;
+    final borderColor = selected ? cs.primary : cs.outline;
+    return Material(
+      color: bg,
+      borderRadius: BorderRadius.circular(20),
+      elevation: selected ? 1 : 0,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: borderColor, width: 1.2),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (selected) ...[
+                Icon(Icons.check, size: 16, color: fg),
+                const SizedBox(width: 6),
+              ] else if (icon != null) ...[
+                Icon(icon, size: 16, color: fg),
+                const SizedBox(width: 6),
+              ],
+              Text(
+                label,
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: fg,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

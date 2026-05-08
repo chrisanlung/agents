@@ -281,6 +281,45 @@ UUID namespace `c0000000-0000-0000-0030-*` (verify-clean before write).
 
 **Customer-facing Flutter:** no changes beyond §2.7/§2.8. Customer never sees settlement or disbursement.
 
+### 2.10 iPaymu sandbox adapter vs dummy adapter
+
+**When to use dummy (default):**
+Use `PAYMENT_PROVIDER=dummy` (the default in `run-local.sh`) for all normal
+feature development that does not involve the iPaymu API surface itself. The
+dummy adapter is faster, works offline, needs no credentials, and confirms
+payment via the dev-only `POST /api/v1/public/payments/dummy-trigger` endpoint
+without any external I/O.
+
+**When to use the iPaymu sandbox adapter:**
+Use `PAYMENT_PROVIDER=ipaymu` (with sandbox credentials + ngrok) when:
+- Testing the outbound HMAC-SHA256 signature against a real iPaymu endpoint.
+- Verifying the QRIS payload string renders as a scannable QR in the Flutter
+  app (`qr_flutter` renders `PaymentNo` verbatim).
+- Testing the inbound webhook signature verification end-to-end.
+- Validating the `Expired` timestamp parse and fallback logic.
+- Demoing to stakeholders with a real QRIS QR on screen.
+
+**Configuration commitment:**
+The sandbox adapter is activated by uncommenting five lines in `run-local.sh`
+(see `docs/OPERATIONS.md §12`). The default `PAYMENT_PROVIDER=dummy` is never
+changed in the committed file — switching to iPaymu is always a local,
+uncommitted change so the dev workflow of other team members is unaffected.
+
+**Credential scope:**
+The sandbox credentials (`IPAYMU_VA=0000005714983489`,
+`IPAYMU_API_KEY=SANDBOX429CAC48-...`) are for the iPaymu sandbox environment
+only. They are intentionally included in run-local.sh comments (not gitignored)
+because they carry no financial risk and make onboarding trivial. Production
+credentials, once provisioned, must never appear in version-controlled files.
+
+**GetStatus / ListSettlements stubs:**
+Both methods return `errIPaymuNotImplemented` in the iPaymu adapter (Phase 6).
+`GetStatus` is called by `SyncStatus` (operator manual-sync endpoint); the
+operator will receive a clear error message. `ListSettlements` is called by
+the settlement reconciliation button; that button will return an error until
+Phase 7 implements both. Neither stub affects the critical customer path
+(CreateQR + VerifyWebhook).
+
 ### 2.13 Non-goals (deferred)
 
 - Auto-disbursement via banking API (Flip, BRI Open Banking)

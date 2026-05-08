@@ -6,6 +6,28 @@ import { z } from "zod";
 import { apiFetch, ApiError } from "@/lib/api";
 import type { Booking } from "@/lib/types";
 
+// ─── Sync Payment Status ───────────────────────────────────────────────────────
+
+export async function syncPaymentStatus(
+  id: string
+): Promise<BookingActionResult> {
+  try {
+    const data = await apiFetch<Booking>(
+      `/tenant/bookings/${id}/sync-payment`,
+      { method: "POST", body: "{}" },
+      { auth: true }
+    );
+    revalidatePath("/booking");
+    revalidatePath(`/booking/${id}`);
+    return { ok: true, data };
+  } catch (err) {
+    if (err instanceof ApiError) {
+      return { ok: false, errors: {}, error: err.message };
+    }
+    return { ok: false, errors: {}, error: "Terjadi kesalahan. Coba lagi." };
+  }
+}
+
 export type BookingActionResult =
   | { ok: true; data?: Booking }
   | { ok: false; errors: Record<string, string>; error?: string; code?: string };

@@ -89,6 +89,9 @@ export function ConciergeBookingForm({
   } = useForm<FormValues>({
     resolver: zodResolver(schema),
     defaultValues: {
+      // Auto-fill when caller has access to exactly one branch (staff scope).
+      // For multi-branch admins (tenant admin), the dropdown remains.
+      branch_id: branches.length === 1 ? branches[0].id : "",
       addon_ids: [],
       date: new Date().toISOString().slice(0, 10),
     },
@@ -180,38 +183,51 @@ export function ConciergeBookingForm({
             <CardTitle className="text-base">Detail Booking</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            {/* Branch */}
-            <div className="space-y-1.5">
-              <Label htmlFor="branch_id">
-                Cabang <span className="text-destructive">*</span>
-              </Label>
-              <Controller
-                control={control}
-                name="branch_id"
-                render={({ field }) => (
-                  <Select
-                    value={field.value}
-                    onValueChange={field.onChange}
-                  >
-                    <SelectTrigger id="branch_id">
-                      <SelectValue placeholder="Pilih cabang…" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {branches.map((b) => (
-                        <SelectItem key={b.id} value={b.id}>
-                          {b.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+            {/* Branch — when the caller has exactly one branch (staff scope),
+                show it as a read-only label instead of a dropdown. The
+                branch_id is already pre-filled in defaultValues so the form
+                still submits correctly. */}
+            {branches.length === 1 ? (
+              <div className="space-y-1.5">
+                <Label>Cabang</Label>
+                <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm">
+                  {branches[0].name}
+                </div>
+                <input type="hidden" name="branch_id" value={branches[0].id} />
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <Label htmlFor="branch_id">
+                  Cabang <span className="text-destructive">*</span>
+                </Label>
+                <Controller
+                  control={control}
+                  name="branch_id"
+                  render={({ field }) => (
+                    <Select
+                      value={field.value}
+                      onValueChange={field.onChange}
+                    >
+                      <SelectTrigger id="branch_id">
+                        <SelectValue placeholder="Pilih cabang…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {branches.map((b) => (
+                          <SelectItem key={b.id} value={b.id}>
+                            {b.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                />
+                {errors.branch_id && (
+                  <p className="text-xs text-destructive">
+                    {errors.branch_id.message}
+                  </p>
                 )}
-              />
-              {errors.branch_id && (
-                <p className="text-xs text-destructive">
-                  {errors.branch_id.message}
-                </p>
-              )}
-            </div>
+              </div>
+            )}
 
             {/* Service */}
             <div className="space-y-1.5">

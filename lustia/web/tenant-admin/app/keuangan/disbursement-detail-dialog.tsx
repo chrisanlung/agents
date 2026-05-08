@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/table";
 import { DisbursementStatusBadge } from "@/components/disbursement-status-badge";
 import { AlertCircle } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import { fetchDisbursementDetail } from "./actions";
 import { formatRupiah, formatDate } from "@/lib/format";
 import type { DisbursementDetail, TenantDisbursement } from "@/lib/types";
 
@@ -45,19 +45,14 @@ export function DisbursementDetailDialog({
     if (detail) return; // already loaded
     setLoading(true);
     setError(false);
-    try {
-      const data = await apiFetch<DisbursementDetail>(
-        `/tenant/finance/disbursements/${disbursement.id}`,
-        {},
-        { auth: true }
-      );
-      setDetail(data);
-    } catch {
+    const result = await fetchDisbursementDetail(disbursement.id);
+    if (result.ok) {
+      setDetail(result.data);
+    } else {
       setError(true);
       toast.error("Gagal memuat detail pencairan. Coba lagi.");
-    } finally {
-      setLoading(false);
     }
+    setLoading(false);
   }
 
   function handleOpenChange(val: boolean) {

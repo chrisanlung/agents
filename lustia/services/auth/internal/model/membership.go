@@ -38,6 +38,16 @@ type Membership struct {
 
 func (Membership) TableName() string { return "membership" }
 
+// MembershipAssignments carries the role and branch IDs/names for one membership.
+// Declared in model/ so it can be imported by both repository/ and service/
+// without creating an import cycle.
+type MembershipAssignments struct {
+	RoleIDs     []string
+	RoleNames   []string
+	BranchIDs   []string
+	BranchNames []string
+}
+
 // IsActive returns true when the membership status is active.
 func (m Membership) IsActive() bool { return m.Status == MembershipStatusActive }
 

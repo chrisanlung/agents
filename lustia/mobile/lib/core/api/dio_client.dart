@@ -22,6 +22,11 @@ Dio dioClient(DioClientRef ref) {
       headers: const {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
+        // Bypass ngrok-free.dev browser interstitial. ngrok serves an HTML
+        // splash for any browser User-Agent unless this header is present;
+        // without it Flutter web receives HTML instead of JSON. Harmless on
+        // production / direct backend hits — the header is simply ignored.
+        'ngrok-skip-browser-warning': 'true',
       },
     ),
   );

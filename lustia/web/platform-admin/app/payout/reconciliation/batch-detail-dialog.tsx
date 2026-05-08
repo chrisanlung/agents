@@ -19,7 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { apiFetch } from "@/lib/api";
+import { fetchSettlementBatchDetail } from "../actions";
 import { formatRupiah, formatDate } from "@/lib/format";
 import type { SettlementBatch, SettlementBatchDetail } from "@/lib/types";
 
@@ -53,18 +53,13 @@ export function BatchDetailDialog({
     if (detail) return;
     setLoading(true);
     setError(false);
-    try {
-      const data = await apiFetch<SettlementBatchDetail>(
-        `/admin/settlement-batches/${batch.id}`,
-        {},
-        { auth: true }
-      );
-      setDetail(data);
-    } catch {
+    const result = await fetchSettlementBatchDetail(batch.id);
+    if (result.ok) {
+      setDetail(result.data);
+    } else {
       setError(true);
-    } finally {
-      setLoading(false);
     }
+    setLoading(false);
   }
 
   function handleOpenChange(val: boolean) {

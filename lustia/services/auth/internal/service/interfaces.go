@@ -112,6 +112,10 @@ type Storage interface {
 type UserRepository interface {
 	// FindByEmail looks up a user globally by email with no tenant filter.
 	FindByEmail(ctx context.Context, email string) (*model.User, error)
+	// FindByUsername looks up a user globally by username (case-insensitive).
+	// username is lowercased before the query. Returns ErrUserNotFound when no
+	// row matches. Used by the login flow for identifier-based auth.
+	FindByUsername(ctx context.Context, username string) (*model.User, error)
 	FindByID(ctx context.Context, id string) (*model.User, error)
 	FindByTenant(ctx context.Context, tenantID string, filter UserFilter) ([]*model.User, int64, error)
 	// Save inserts a new user row (used by registration approval).
@@ -157,6 +161,17 @@ type MembershipRepository interface {
 	SuspendAllForTenant(ctx context.Context, tenantID string) ([]string, error)
 	// FindActiveByTenant returns all active memberships for a given tenant.
 	FindActiveByTenant(ctx context.Context, tenantID string) ([]*model.Membership, error)
+	// GetRolesAndBranches returns the role and branch IDs and names for a single
+	// membership. Two queries are issued (one for roles, one for branches).
+	// Uses dbFromContext so it participates in any active transaction.
+	// Returns empty slices (never nil) when the membership has no assignments.
+	GetRolesAndBranches(ctx context.Context, membershipID string) (model.MembershipAssignments, error)
+	// GetRolesAndBranchesForMemberships returns model.MembershipAssignments keyed by
+	// membership_id for a batch of memberships. Two queries are issued
+	// (WHERE membership_id IN (?)). The returned map contains an entry for every
+	// ID that has at least one assignment; absent keys mean no assignments.
+	// Uses dbFromContext so it participates in any active transaction.
+	GetRolesAndBranchesForMemberships(ctx context.Context, membershipIDs []string) (map[string]model.MembershipAssignments, error)
 }
 
 // TenantRepository is the interface for tenant lookups and management.
@@ -203,7 +218,8 @@ type BranchRepository interface {
 
 // BranchFilter carries optional filters for the branch list query.
 type BranchFilter struct {
-	Status string // empty = all non-deleted
+	Status string   // empty = all non-deleted
+	IDs    []string // when non-empty, restricts to these branch IDs (branch-scope enforcement)
 	Page   int
 	Limit  int
 }
@@ -420,6 +436,30 @@ type TherapistAvailabilityRepository interface {
 	// therapist and inserts the new set within a single transaction.
 	// Passing an empty slice clears all availability.
 	ReplaceAllForTherapist(ctx context.Context, therapistID string, rows []*model.TherapistAvailability) error
+	// TherapistCoversSlot returns true when the therapist has at least one
+	// availability window that covers dayOfWeek (0=Sunday…6=Saturday) and
+	// whose start_time ≤ slotStart AND end_time ≥ slotEnd (HH:MM:SS strings).
+	// Returns (false, nil) — not an error — when the therapist has no schedule
+	// at all or no matching window (e.g. unknown therapist ID). The service
+	// layer maps that result to TherapistAvailable=false rather than a hard error.
+	TherapistCoversSlot(ctx context.Context, therapistID string, dayOfWeek int, slotStart, slotEnd string) (bool, error)
+	// FindByTherapistsAndDOW returns all availability rows for the given
+	// therapist IDs on the given day-of-week in a single query. Used by
+	// ListAvailableSlots to bulk-fetch schedules (Pass B) so the per-slot count
+	// loop can check coverage without issuing one query per therapist per slot.
+	// Returns an empty slice — not an error — when no matching rows exist.
+	FindByTherapistsAndDOW(ctx context.Context, therapistIDs []string, dayOfWeek int) ([]*model.TherapistAvailability, error)
+}
+
+// TherapistBookingInterval is a single (therapist_id, effective_start,
+// effective_end) row produced by FindTherapistConflicts. effective_end is
+// already widened by prep_minutes so the caller can do a simple overlap check:
+//
+//	conflict = slotStart < effective_end AND slotEnd > effective_start
+type TherapistBookingInterval struct {
+	TherapistID   string
+	EffectiveStart time.Time
+	EffectiveEnd   time.Time
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +619,52 @@ type BookingRepository interface {
 
 	// ReportSummary returns aggregate metrics for a tenant within a date range.
 	ReportSummary(ctx context.Context, in BookingReportFilter) (BookingReportSummary, error)
+
+	// FindBookedRoomIDsInSlots returns, for each slot window (keyed by RFC3339
+	// start time), the set of room UUIDs that have at least one non-cancelled,
+	// non-expired booking overlapping that window. Used by ListAvailableSlots
+	// to compute available_room_ids per slot in a single query rather than N+1
+	// per-slot queries.
+	//
+	// branchID scopes the query. windows is a slice of (start, end) pairs in
+	// RFC3339. The returned map has an entry for every key in windows; a missing
+	// entry means no rooms are booked at that slot.
+	FindBookedRoomIDsInSlots(ctx context.Context, branchID string, windows []SlotWindow) (map[string][]string, error)
+
+	// IsTherapistBookedInSlots returns, for each slot window (keyed by RFC3339
+	// start time), whether the given therapist has a non-cancelled, non-expired
+	// booking overlapping that window.
+	//
+	// prepMinutes is the therapist's prep buffer (migration 000035). Each
+	// existing booking's effective end is widened to scheduled_end + prepMinutes
+	// when testing overlap: a candidate slot [start, end) conflicts if it falls
+	// within [booked_start, booked_end + prepMinutes).
+	//
+	// Returns (false, nil) — not an error — when therapistID is unknown.
+	// Used by ListAvailableSlots to compute therapist_available per slot in a
+	// single query.
+	IsTherapistBookedInSlots(ctx context.Context, therapistID string, windows []SlotWindow, prepMinutes int) (map[string]bool, error)
+
+	// FindTherapistConflicts returns all non-cancelled/non-expired bookings for
+	// the given therapist IDs that overlap [dayStart, dayEnd), with each row's
+	// effective end already widened by the therapist's prep_minutes. Used by
+	// ListAvailableSlots Pass C to bulk-fetch conflict data for all eligible
+	// therapists in a single JOIN query rather than one query per therapist.
+	//
+	// The JOIN is: booking INNER JOIN therapist ON booking.therapist_id = therapist.id
+	// WHERE booking.therapist_id IN (?)
+	//   AND booking.scheduled_start < dayEnd
+	//   AND booking.scheduled_end + (therapist.prep_minutes * interval '1 minute') > dayStart
+	//
+	// Returns an empty slice — not an error — when therapistIDs is empty.
+	FindTherapistConflicts(ctx context.Context, therapistIDs []string, dayStart, dayEnd time.Time) ([]TherapistBookingInterval, error)
+}
+
+// SlotWindow is a single (start, end) pair used in bulk booking-conflict queries.
+// Both Start and End are RFC3339 strings (the same format used in Slot.Start/End).
+type SlotWindow struct {
+	Start string // RFC3339
+	End   string // RFC3339
 }
 
 // BookingFilter carries optional filters for the booking list query.
@@ -735,6 +821,25 @@ type PaymentTransactionRepository interface {
 	// SweepExpiredTransactions transitions awaiting rows past their qr_expires_at
 	// to status=expired. Called alongside booking expiry sweep. Returns count swept.
 	SweepExpiredTransactions(ctx context.Context) (int, error)
+
+	// MarkVoided transitions an awaiting payment_transaction to voided.
+	// Used when an operator cancels a booking that is still in pending_payment
+	// status — the payment was never completed and should not be collected.
+	// WHERE status='awaiting' guard protects idempotency.
+	// Returns rowsAffected (0 if already past awaiting).
+	MarkVoided(ctx context.Context, bookingID string) (int64, error)
+
+	// MarkExpired transitions an awaiting payment_transaction to expired.
+	// Used during manual sync when the provider reports the transaction has lapsed.
+	// WHERE status='awaiting' guard protects idempotency.
+	// Returns rowsAffected (0 if already past awaiting).
+	MarkExpired(ctx context.Context, bookingID string) (int64, error)
+
+	// MarkFailed transitions an awaiting payment_transaction to failed.
+	// Used during manual sync when the provider reports a failure/decline.
+	// WHERE status='awaiting' guard protects idempotency.
+	// Returns rowsAffected (0 if already past awaiting).
+	MarkFailed(ctx context.Context, bookingID string) (int64, error)
 }
 
 // PaymentTxnFilter carries optional filters for the payment transaction list.
@@ -761,6 +866,17 @@ type SettlementBatchRepository interface {
 
 	// List returns a paginated list of settlement batches.
 	List(ctx context.Context, filter SettlementBatchFilter) ([]*model.SettlementBatch, int64, error)
+
+	// Summary returns aggregate KPIs for payment_transactions whose settled_at
+	// falls within [from, to] (UTC). It counts distinct settlement_batch_ids,
+	// and sums received_amount_idr, platform_fee_idr, and tenant_net_idr for
+	// transactions with status IN ('settled', 'disbursed').
+	//
+	// This query runs against payment_transaction (not settlement_batch) because
+	// the per-transaction fee split columns live there. The settlement_batch table
+	// records provider-level totals; payment_transaction holds Lustia's computed
+	// fee breakdown (ADR 0015 §2.4).
+	Summary(ctx context.Context, from, to time.Time) (count int64, volume, platformFee, payout int64, err error)
 }
 
 // SettlementBatchFilter carries optional filters for the settlement batch list.
@@ -816,6 +932,33 @@ type PaymentStatusView struct {
 	Status      string
 	PaidAt      *time.Time
 	QRExpiresAt time.Time
+}
+
+// SyncPaymentInput carries the caller context for the manual sync-payment operation.
+type SyncPaymentInput struct {
+	// BookingID is the primary key of the booking to sync.
+	BookingID string
+	// CallerTenantID is used for cross-tenant guard.
+	CallerTenantID string
+	// CallerUserID is recorded in the audit log.
+	CallerUserID string
+	// CallerBranches is used for branch-scope check when IsAdmin is false.
+	CallerBranches []string
+	// IsAdmin bypasses branch-scope check (tenant_admin / super_admin).
+	IsAdmin bool
+}
+
+// SyncPaymentResult is returned by PaymentService.SyncStatus.
+// The controller fetches a fresh BookingDetail via BookingService.Get after
+// this returns — payment_service does not depend on booking_service's detail
+// builder to avoid circular coupling.
+type SyncPaymentResult struct {
+	// ProviderStatus is the raw normalised status returned by the provider.
+	ProviderStatus ProviderPaymentStatus
+	// ActionTaken describes what the backend did: "paid", "expired", "failed", "no_op".
+	ActionTaken string
+	// BookingID is echoed back so the controller can call BookingService.Get.
+	BookingID string
 }
 
 // BalanceSummary is returned by PaymentService.GetTenantBalance.

@@ -46,10 +46,17 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
     final asked = prefs.getBool(_onboardingKey) ?? false;
 
     if (!asked) {
-      // Check current permission status
-      final permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.unableToDetermine) {
+      // Check current permission status. Wrap in try/catch — Geolocator throws
+      // if AndroidManifest is missing permissions or the platform plugin
+      // can't initialise (Flutter web Incognito, etc.). Treat any error as
+      // "denied" → show onboarding card so the user can grant later.
+      try {
+        final permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied ||
+            permission == LocationPermission.unableToDetermine) {
+          if (mounted) setState(() => _showOnboarding = true);
+        }
+      } catch (_) {
         if (mounted) setState(() => _showOnboarding = true);
       }
     }
@@ -122,37 +129,18 @@ class _SplashContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: LustiaColors.primary,
-      body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Logo placeholder — lingkaran putih dengan ikon spa
-            Container(
-              width: 96,
-              height: 96,
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                Icons.spa,
-                size: 56,
-                color: LustiaColors.primary,
-              ),
-            ),
-            const SizedBox(height: 24),
-            const Text(
-              'Lustia',
-              style: TextStyle(
-                fontSize: 36,
-                fontWeight: FontWeight.w700,
-                color: Colors.white,
-                letterSpacing: 1.0,
-              ),
-            ),
-          ],
+    // Cream background matches the splash image edge color (#F8E5E1, same
+    // as flutter_native_splash config in pubspec.yaml). BoxFit.contain so
+    // the whole image is visible without cropping; letterbox blends with
+    // the background so the seam is invisible at boot.
+    return const Scaffold(
+      backgroundColor: Color(0xFFF8E5E1),
+      body: SafeArea(
+        child: Center(
+          child: Image(
+            image: AssetImage('assets/images/splash.png'),
+            fit: BoxFit.contain,
+          ),
         ),
       ),
     );

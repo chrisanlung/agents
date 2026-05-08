@@ -12,6 +12,7 @@ import "time"
 type User struct {
 	ID               string     `gorm:"column:id;primaryKey;type:uuid"`
 	Email            string     `gorm:"column:email;not null"`
+	Username         *string    `gorm:"column:username"` // optional; lowercase; unique where not NULL
 	PasswordHash     string     `gorm:"column:password_hash;not null" json:"-"`
 	FullName         string     `gorm:"column:full_name;not null"`
 	Phone            *string    `gorm:"column:phone"`

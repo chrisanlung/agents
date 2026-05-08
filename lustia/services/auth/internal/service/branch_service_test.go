@@ -37,8 +37,31 @@ func (r *stubBranchRepo) FindByID(_ context.Context, id string) (*model.Branch, 
 	}
 	return b, nil
 }
-func (r *stubBranchRepo) FindByTenant(_ context.Context, _ string, _ service.BranchFilter) ([]*model.Branch, int64, error) {
-	return nil, 0, nil
+
+// FindByTenant returns branches that match the filter, mirroring the real
+// repository behaviour used to test the branch-scope enforcement logic.
+func (r *stubBranchRepo) FindByTenant(_ context.Context, tenantID string, filter service.BranchFilter) ([]*model.Branch, int64, error) {
+	// Build an allow-set from filter.IDs (nil/empty means no ID restriction).
+	allowIDs := make(map[string]bool, len(filter.IDs))
+	restrictByID := len(filter.IDs) > 0
+	for _, id := range filter.IDs {
+		allowIDs[id] = true
+	}
+
+	var out []*model.Branch
+	for _, b := range r.branches {
+		if tenantID != "" && b.TenantID != tenantID {
+			continue
+		}
+		if filter.Status != "" && filter.Status != "all" && b.Status != filter.Status {
+			continue
+		}
+		if restrictByID && !allowIDs[b.ID] {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out, int64(len(out)), nil
 }
 func (r *stubBranchRepo) Save(_ context.Context, b *model.Branch) error {
 	r.saved = append(r.saved, b)
@@ -91,6 +114,9 @@ func (r *stubTenantRepoForBranch) CountActiveBranches(_ context.Context, _ strin
 type stubUserRepoForBranch struct{}
 
 func (r *stubUserRepoForBranch) FindByEmail(_ context.Context, _ string) (*model.User, error) {
+	return nil, constants.ErrUserNotFound
+}
+func (r *stubUserRepoForBranch) FindByUsername(_ context.Context, _ string) (*model.User, error) {
 	return nil, constants.ErrUserNotFound
 }
 func (r *stubUserRepoForBranch) FindByID(_ context.Context, _ string) (*model.User, error) {
@@ -283,4 +309,121 @@ func TestDeleteBranch_InactiveSucceeds(t *testing.T) {
 	require.NoError(t, err)
 	_, exists := branchRepo.branches["b1"]
 	assert.False(t, exists, "branch should be removed after soft-delete")
+}
+
+// ---------------------------------------------------------------------------
+// Branch-scope filter tests (security fix — see branch_service.go ListByTenant)
+// ---------------------------------------------------------------------------
+
+func TestListByTenant_BranchScopeFilter(t *testing.T) {
+	t.Parallel()
+
+	// Seed three branches belonging to tenant t1.
+	branchA := &model.Branch{ID: "branch-a", TenantID: "t1", Status: model.BranchStatusActive}
+	branchB := &model.Branch{ID: "branch-b", TenantID: "t1", Status: model.BranchStatusActive}
+	branchC := &model.Branch{ID: "branch-c", TenantID: "t1", Status: model.BranchStatusInactive}
+
+	tenantRepo := &stubTenantRepoForBranch{
+		tenant: &model.Tenant{ID: "t1", MaxBranches: 5},
+	}
+
+	tests := []struct {
+		name           string
+		isAdmin        bool
+		callerBranches []string
+		scopeToMine    bool
+		statusFilter   string
+		wantIDs        []string // expected branch IDs in result (any order)
+		wantTotal      int64
+	}{
+		{
+			name:           "admin with empty CallerBranches sees all branches",
+			isAdmin:        true,
+			callerBranches: []string{},
+			wantIDs:        []string{"branch-a", "branch-b", "branch-c"},
+			wantTotal:      3,
+		},
+		{
+			name:           "admin with non-empty CallerBranches still sees all branches (admin override)",
+			isAdmin:        true,
+			callerBranches: []string{"branch-a"},
+			scopeToMine:    true, // even when scope=mine is set, admin always sees all
+			wantIDs:        []string{"branch-a", "branch-b", "branch-c"},
+			wantTotal:      3,
+		},
+		{
+			name:           "non-admin WITHOUT scope=mine sees all branches (default tenant-admin path)",
+			isAdmin:        false,
+			callerBranches: []string{"branch-a"},
+			wantIDs:        []string{"branch-a", "branch-b", "branch-c"},
+			wantTotal:      3,
+		},
+		{
+			name:           "non-admin with scope=mine and two assigned branches sees only those two",
+			isAdmin:        false,
+			callerBranches: []string{"branch-a", "branch-c"},
+			scopeToMine:    true,
+			wantIDs:        []string{"branch-a", "branch-c"},
+			wantTotal:      2,
+		},
+		{
+			name:           "non-admin with scope=mine and empty CallerBranches sees nothing (defensive zero)",
+			isAdmin:        false,
+			callerBranches: []string{},
+			scopeToMine:    true,
+			wantIDs:        []string{},
+			wantTotal:      0,
+		},
+		{
+			name:           "non-admin with scope=mine + status filter: only active assigned branches returned",
+			isAdmin:        false,
+			callerBranches: []string{"branch-a", "branch-c"},
+			scopeToMine:    true,
+			statusFilter:   model.BranchStatusActive,
+			wantIDs:        []string{"branch-a"},
+			wantTotal:      1,
+		},
+		{
+			name:           "non-admin with scope=mine and one assigned branch sees only that branch",
+			isAdmin:        false,
+			callerBranches: []string{"branch-b"},
+			scopeToMine:    true,
+			wantIDs:        []string{"branch-b"},
+			wantTotal:      1,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			branchRepo := newStubBranchRepo()
+			branchRepo.branches["branch-a"] = branchA
+			branchRepo.branches["branch-b"] = branchB
+			branchRepo.branches["branch-c"] = branchC
+
+			svc := newTestBranchService(branchRepo, tenantRepo)
+
+			out, err := svc.ListByTenant(context.Background(), service.ListBranchesInput{
+				CallerTenantID:        "t1",
+				CallerBranches:        tt.callerBranches,
+				IsAdmin:               tt.isAdmin,
+				ScopeToCallerBranches: tt.scopeToMine,
+				Status:                tt.statusFilter,
+				Page:                  1,
+				Limit:                 10,
+			})
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantTotal, out.TotalCount)
+
+			gotIDs := make([]string, len(out.Branches))
+			for i, b := range out.Branches {
+				gotIDs[i] = b.ID
+
+			}
+			assert.ElementsMatch(t, tt.wantIDs, gotIDs)
+		})
+	}
 }

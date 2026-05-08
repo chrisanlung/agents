@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/chrisanlung/lustia-auth/internal/constants"
@@ -54,6 +56,7 @@ func (h *AdminController) handleCreateUser(c *gin.Context) {
 		CallerUserID:   claims.Subject,
 		CallerTenantID: claims.TenantID,
 		Email:          req.Email,
+		Username:       req.Username,
 		FullName:       req.FullName,
 		Phone:          req.Phone,
 		RoleIDs:        req.RoleIDs,
@@ -158,9 +161,26 @@ func (h *AdminController) handleUpdateUser(c *gin.Context) {
 
 	userID := c.Param("id")
 
+	// Read the raw body once so we can both bind the DTO and detect whether the
+	// "username" key was explicitly present in the JSON (three-way null handling).
+	rawBody, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		helper.RespondError(c, http.StatusBadRequest, constants.CodeValidation, "cannot read request body")
+		return
+	}
+
+	// Check if "username" key appears in the JSON object before struct binding
+	// strips it. A present-but-null key sets UsernameSet=true with Username=nil
+	// (clear), which is intentionally different from an absent key (no change).
+	var rawFields map[string]json.RawMessage
+	usernameSet := false
+	if jsonErr := json.Unmarshal(rawBody, &rawFields); jsonErr == nil {
+		_, usernameSet = rawFields["username"]
+	}
+
 	var req UpdateUserRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		helper.RespondBindError(c, err)
+	if bindErr := json.Unmarshal(rawBody, &req); bindErr != nil {
+		helper.RespondBindError(c, bindErr)
 		return
 	}
 
@@ -169,6 +189,8 @@ func (h *AdminController) handleUpdateUser(c *gin.Context) {
 		CallerTenantID: claims.TenantID,
 		TargetUserID:   userID,
 		FullName:       req.FullName,
+		Username:       req.Username,
+		UsernameSet:    usernameSet,
 		Phone:          req.Phone,
 		AvatarURL:      req.AvatarURL,
 		IsActive:       req.IsActive,

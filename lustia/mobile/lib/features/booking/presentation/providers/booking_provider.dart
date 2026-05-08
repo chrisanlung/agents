@@ -38,23 +38,41 @@ class BookingWizard extends _$BookingWizard {
   }
 
   void selectDate(DateTime date) {
-    state = state.copyWith(selectedDate: date, selectedSlot: null);
-  }
-
-  void selectSlot(AvailabilitySlot slot) {
+    // Date change: clear slot + room but keep therapist preference (spec §3.①).
     state = state.copyWith(
-      selectedSlot: slot,
-      clearTherapist: true,
+      selectedDate: date,
+      selectedSlot: null,
       clearRoom: true,
     );
   }
 
+  void selectSlot(AvailabilitySlot slot) {
+    state = state.copyWith(selectedSlot: slot, clearRoom: true);
+  }
+
+  /// Legacy wizard method — kept for backwards compatibility.
   void selectTherapist(String? therapistId) {
     if (therapistId == null) {
       state = state.copyWith(clearTherapist: true);
     } else {
       state = state.copyWith(selectedTherapistId: therapistId);
     }
+  }
+
+  /// Used by BookingSelectionScreen — records an explicit "Pilih" button tap.
+  /// [therapistId] == null means the user tapped "Pilih Otomatis".
+  /// Clears slot and room because a different therapist means different availability.
+  void confirmTherapist(String? therapistId) {
+    state = state.copyWith(
+      selectedTherapistId: therapistId,
+      therapistConfirmed: true,
+      selectedSlot: null,
+      clearRoom: true,
+    );
+    // If therapistId is null we use clearTherapist=false because we want
+    // selectedTherapistId = null AND therapistConfirmed = true simultaneously.
+    // The copyWith already sets selectedTherapistId = therapistId (null),
+    // but clearTherapist=false keeps therapistConfirmed from being reset.
   }
 
   void selectRoom(String? roomId) {
@@ -75,6 +93,18 @@ class BookingWizard extends _$BookingWizard {
       customerPhone: phone,
       customerEmail: email,
     );
+  }
+
+  void setCustomerName(String name) {
+    state = state.copyWith(customerName: name);
+  }
+
+  void setCustomerPhone(String phone) {
+    state = state.copyWith(customerPhone: phone);
+  }
+
+  void setCustomerEmail(String email) {
+    state = state.copyWith(customerEmail: email);
   }
 
   void reset() {
@@ -115,13 +145,21 @@ class BookingSubmit extends _$BookingSubmit {
 
 /// Provider polling status pembayaran — ADR 0015 §2.7.
 ///
-/// Emit stream [PaymentStatusResponse] setiap 5 detik.
-/// Stream berhenti secara otomatis saat status terminal
-/// (paid / expired / failed) atau saat provider di-dispose.
+/// Emit pertama kali sekarang juga (tanpa tunggu 5 detik), lalu setiap 5 detik.
+/// Stream emits status terminal (paid / expired / failed) lalu berhenti — UI
+/// listener perlu lihat nilai terminal supaya bisa navigate ke konfirmasi.
+/// (Bug fix: `takeWhile(!isTerminal)` membuang elemen terminal sehingga UI
+/// tidak pernah lihat 'paid'.)
 @riverpod
-Stream<PaymentStatusResponse> paymentStatus(Ref ref, String bookingCode) {
+Stream<PaymentStatusResponse> paymentStatus(
+  Ref ref,
+  String bookingCode,
+) async* {
   final repo = ref.read(bookingRepositoryProvider);
-  return Stream.periodic(const Duration(seconds: 5))
-      .asyncMap((_) => repo.getPaymentStatus(bookingCode))
-      .takeWhile((status) => !status.isTerminal);
+  while (true) {
+    final status = await repo.getPaymentStatus(bookingCode);
+    yield status;
+    if (status.isTerminal) break;
+    await Future<void>.delayed(const Duration(seconds: 5));
+  }
 }

@@ -60,15 +60,31 @@ type RefreshResponse struct {
 // UserProfileResponse is the public projection of a user identity.
 // Roles and branches are no longer part of the user profile — they belong to
 // the membership. IsSuperAdmin and MustChangePassword are added per ADR 0007.
+// Username is optional (null when not set).
 type UserProfileResponse struct {
-	ID                 string `json:"id"`
-	Email              string `json:"email"`
-	FullName           string `json:"full_name"`
-	Phone              string `json:"phone,omitempty"`
-	AvatarURL          string `json:"avatar_url,omitempty"`
-	IsActive           bool   `json:"is_active"`
-	IsSuperAdmin       bool   `json:"is_super_admin"`
-	MustChangePassword bool   `json:"must_change_password,omitempty"`
+	ID                 string  `json:"id"`
+	Email              string  `json:"email"`
+	Username           *string `json:"username,omitempty"` // null / absent when not set
+	FullName           string  `json:"full_name"`
+	Phone              string  `json:"phone,omitempty"`
+	AvatarURL          string  `json:"avatar_url,omitempty"`
+	IsActive           bool    `json:"is_active"`
+	IsSuperAdmin       bool    `json:"is_super_admin"`
+	MustChangePassword bool    `json:"must_change_password,omitempty"`
+
+	// Role and branch assignments — populated for admin endpoints (GET /admin/users,
+	// GET /admin/users/:id, CreateUser/UpdateUser responses) from the active
+	// membership. Absent (omitempty) on GetMe and other public profile paths
+	// where membership data is exposed via MembershipSummaryResponse instead.
+	RoleIDs     []string `json:"role_ids,omitempty"`
+	RoleNames   []string `json:"role_names,omitempty"`
+	BranchIDs   []string `json:"branch_ids,omitempty"`
+	BranchNames []string `json:"branch_names,omitempty"`
+
+	// Timestamps. ISO 8601 strings; empty when not set.
+	CreatedAt   string `json:"created_at,omitempty"`
+	LastLoginAt string `json:"last_login_at,omitempty"`
+	LockedUntil string `json:"locked_until,omitempty"`
 }
 
 // GetMeResponse wraps the user profile with optional tenant info and memberships.
@@ -243,9 +259,14 @@ type BranchResponse struct {
 	Timezone     string  `json:"timezone"`
 	ContactPhone *string `json:"contact_phone,omitempty"`
 	ContactEmail *string `json:"contact_email,omitempty"`
-	ActivatedAt  *string `json:"activated_at,omitempty"`
-	CreatedAt    string  `json:"created_at"`
-	UpdatedAt    string  `json:"updated_at"`
+	// OperationalHours: raw JSONB shipped as-is so the tenant-admin form can
+	// pre-fill on edit. Customer mobile uses the public branch detail endpoint
+	// which has its own array projection; this field is opaque JSON for the
+	// admin form only.
+	OperationalHours json.RawMessage `json:"operational_hours,omitempty"`
+	ActivatedAt      *string         `json:"activated_at,omitempty"`
+	CreatedAt        string          `json:"created_at"`
+	UpdatedAt        string          `json:"updated_at"`
 }
 
 // ListBranchesResponse carries a page of branches and pagination metadata.
@@ -297,6 +318,7 @@ type TherapistResponse struct {
 	WeightKg    int16    `json:"weight_kg"`
 	Build       string   `json:"build"`
 	Specialties []string `json:"specialties"`
+	PrepMinutes int      `json:"prep_minutes"`
 	IsActive    bool     `json:"is_active"`
 	JoinedAt    *string  `json:"joined_at"`
 	CreatedAt   string   `json:"created_at"`
@@ -445,12 +467,20 @@ func toUserProfileResponse(p service.UserProfile) UserProfileResponse {
 	return UserProfileResponse{
 		ID:                 p.ID,
 		Email:              p.Email,
+		Username:           p.Username,
 		FullName:           p.FullName,
 		Phone:              p.Phone,
 		AvatarURL:          p.AvatarURL,
 		IsActive:           p.IsActive,
 		IsSuperAdmin:       p.IsSuperAdmin,
 		MustChangePassword: p.MustChangePassword,
+		RoleIDs:            p.RoleIDs,
+		RoleNames:          p.RoleNames,
+		BranchIDs:          p.BranchIDs,
+		BranchNames:        p.BranchNames,
+		CreatedAt:          p.CreatedAt,
+		LastLoginAt:        p.LastLoginAt,
+		LockedUntil:        p.LockedUntil,
 	}
 }
 
@@ -570,11 +600,24 @@ type ListBookingsResponse struct {
 }
 
 // SlotResponse is a single available slot in the availability response.
+//
+// available_room_ids is always present (empty slice when no rooms are
+// configured at the branch). Flutter uses it to grey-out fully-booked rooms
+// after the customer picks a slot.
+//
+// therapist_available is only emitted when the caller supplied
+// ?therapist_id=<UUID>. Old clients that do not supply the param receive the
+// same JSON they always did plus the new available_room_ids array (unknown
+// fields are silently ignored by Dart's fromJson).
 type SlotResponse struct {
-	Start                    string `json:"start"`
-	End                      string `json:"end"`
-	TherapistsAvailableCount int    `json:"therapists_available_count"`
-	RoomsAvailableCount      int    `json:"rooms_available_count"`
+	Start                    string   `json:"start"`
+	End                      string   `json:"end"`
+	TherapistsAvailableCount int      `json:"therapists_available_count"`
+	RoomsAvailableCount      int      `json:"rooms_available_count"`
+	// TherapistAvailable is only present when ?therapist_id was supplied.
+	// omitempty on a *bool: nil → field absent; &true → true; &false → false.
+	TherapistAvailable *bool    `json:"therapist_available,omitempty"`
+	AvailableRoomIDs   []string `json:"available_room_ids"`
 }
 
 // AvailableSlotsResponse is the response for GET /public/branches/:id/availability.
@@ -644,14 +687,15 @@ type PublicServiceResponse struct {
 // photo_key tidak pernah dikirim ke wire — hanya photo_url (URL yang sudah
 // di-resolve) yang diekspos.
 type PublicTherapistResponse struct {
-	ID       string  `json:"id"`
-	FullName string  `json:"full_name"`
-	Gender   *string `json:"gender"`
-	PhotoURL *string `json:"photo_url"`
-	HeightCm int16   `json:"height_cm"`
-	WeightKg int16   `json:"weight_kg"`
-	Build    string  `json:"build"`
-	Bio      *string `json:"bio"`
+	ID         string   `json:"id"`
+	FullName   string   `json:"full_name"`
+	Gender     *string  `json:"gender"`
+	PhotoURL   *string  `json:"photo_url"`
+	HeightCm   int16    `json:"height_cm"`
+	WeightKg   int16    `json:"weight_kg"`
+	Build      string   `json:"build"`
+	Bio        *string  `json:"bio"`
+	ServiceIDs []string `json:"service_ids"`
 }
 
 // PublicRoomResponse adalah proyeksi ruangan dalam detail cabang publik.
@@ -807,15 +851,20 @@ func toPublicBranchDetailResponse(d service.PublicBranchDetail) PublicBranchDeta
 	// storage key.
 	therapists := make([]PublicTherapistResponse, len(d.Therapists))
 	for i, t := range d.Therapists {
+		serviceIDs := t.ServiceIDs
+		if serviceIDs == nil {
+			serviceIDs = []string{}
+		}
 		therapists[i] = PublicTherapistResponse{
-			ID:       t.ID,
-			FullName: t.FullName,
-			Gender:   t.Gender,
-			PhotoURL: t.PhotoKey, // PhotoKey berisi resolved URL setelah BookingService memprosesnya
-			HeightCm: t.HeightCm,
-			WeightKg: t.WeightKg,
-			Build:    t.Build,
-			Bio:      t.Bio,
+			ID:         t.ID,
+			FullName:   t.FullName,
+			Gender:     t.Gender,
+			PhotoURL:   t.PhotoKey, // PhotoKey berisi resolved URL setelah BookingService memprosesnya
+			HeightCm:   t.HeightCm,
+			WeightKg:   t.WeightKg,
+			Build:      t.Build,
+			Bio:        t.Bio,
+			ServiceIDs: serviceIDs,
 		}
 	}
 

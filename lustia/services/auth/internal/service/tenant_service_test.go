@@ -84,6 +84,12 @@ func (r *stubMembershipRepoForSvc) SuspendAllForTenant(_ context.Context, _ stri
 func (r *stubMembershipRepoForSvc) FindActiveByTenant(_ context.Context, _ string) ([]*model.Membership, error) {
 	return nil, nil
 }
+func (r *stubMembershipRepoForSvc) GetRolesAndBranches(_ context.Context, _ string) (model.MembershipAssignments, error) {
+	return model.MembershipAssignments{}, nil
+}
+func (r *stubMembershipRepoForSvc) GetRolesAndBranchesForMemberships(_ context.Context, _ []string) (map[string]model.MembershipAssignments, error) {
+	return map[string]model.MembershipAssignments{}, nil
+}
 
 type stubTokenRepoForSvc struct {
 	revokeCalled bool

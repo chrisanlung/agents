@@ -31,7 +31,6 @@ export default async function KeuanganLayout({
       <AppHeader
         fullName={me.user.full_name}
         email={me.user.email}
-        activeNav="keuangan"
         tenant={me.tenant ? { name: me.tenant.name, slug: me.tenant.slug } : null}
         memberships={me.memberships}
       />

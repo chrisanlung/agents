@@ -50,13 +50,8 @@ class _BranchDetailSkeleton extends StatelessWidget {
             expandedHeight: 240,
             pinned: true,
             backgroundColor: cs.surface,
-            flexibleSpace: FlexibleSpaceBar(
-              background: Container(
-                color: cs.primaryContainer,
-                child: Center(
-                  child: Icon(Icons.spa, size: 48, color: cs.primary),
-                ),
-              ),
+            flexibleSpace: const FlexibleSpaceBar(
+              background: _BranchHeroFallback(),
             ),
           ),
           SliverPadding(
@@ -152,46 +147,28 @@ class _BranchDetailContent extends ConsumerWidget {
                 expandedHeight: 240,
                 pinned: true,
                 backgroundColor: cs.surface,
-                foregroundColor: Colors.white,
+                // Back arrow (default leading) ikut foregroundColor — pakai
+                // primary (coral) supaya match logo dan kontras di latar putih.
+                foregroundColor: cs.primary,
                 flexibleSpace: FlexibleSpaceBar(
                   background: branch.photoUrl != null
                       ? CachedNetworkImage(
                           imageUrl: branch.photoUrl!,
                           fit: BoxFit.cover,
                           fadeInDuration: const Duration(milliseconds: 200),
-                          placeholder: (_, __) => Container(
-                            color: cs.primaryContainer,
-                            child: Center(
-                              child: Icon(
-                                Icons.spa,
-                                size: 48,
-                                color: cs.primary,
-                              ),
-                            ),
-                          ),
-                          errorWidget: (_, __, ___) => Container(
-                            color: cs.primaryContainer,
-                            child: Center(
-                              child: Icon(
-                                Icons.spa,
-                                size: 48,
-                                color: cs.primary,
-                              ),
-                            ),
-                          ),
+                          placeholder: (_, __) => const _BranchHeroFallback(),
+                          errorWidget: (_, __, ___) =>
+                              const _BranchHeroFallback(),
                         )
-                      : Container(
-                          color: cs.primaryContainer,
-                          child: Center(
-                            child: Icon(Icons.spa, size: 48, color: cs.primary),
-                          ),
-                        ),
+                      : const _BranchHeroFallback(),
                 ),
                 actions: [
                   IconButton(
                     icon: Icon(
                       isFav ? Icons.favorite : Icons.favorite_outline,
-                      color: Colors.white,
+                      // Icon hati pakai primary (coral) supaya jelas terlihat
+                      // di hero placeholder transparan + AppBar collapsed putih.
+                      color: cs.primary,
                     ),
                     tooltip: isFav ? 'Hapus dari favorit' : 'Simpan ke favorit',
                     onPressed: () =>
@@ -389,6 +366,23 @@ class _ServiceCategorySection extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Background hero AppBar saat foto cabang belum tersedia / gagal load.
+/// Background transparan agar warna scaffold dasar (putih) terlihat — logo
+/// Lustia berdiri sendiri tanpa fill warna container.
+class _BranchHeroFallback extends StatelessWidget {
+  const _BranchHeroFallback();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(48),
+        child: Image.asset('assets/images/lustia-logo.png'),
+      ),
     );
   }
 }

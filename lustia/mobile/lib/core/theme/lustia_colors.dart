@@ -1,26 +1,24 @@
-// Token warna Lustia — ditranslasikan dari DESIGN_SYSTEM.md + globals.css tenant-admin.
-// Sumber: tenant-admin/app/globals.css → --primary: HSL(175, 84%, 32%) = Teal-600.
-//
-// OPEN QUESTION (ADR 0014a §16.2): ui-ux-expert perlu konfirmasi apakah
-// palet ini berlaku untuk customer app, atau ada palet terpisah.
-// Sementara pakai teal-600 (konsisten dengan tenant-admin).
+// Token warna Lustia — palet customer mobile menyatu dengan brand logo coral.
+// Logo: woman silhouette dengan warna coral salmon (~#F87171). Tenant-admin
+// + ops portal masih pakai teal — palet ini khusus customer mobile (per
+// permintaan user 2026-05-08: "ingat itu untuk menjadi warna primary di mobile").
 
 import 'package:flutter/material.dart';
 
 /// Warna brand Lustia — gunakan via LustiaColors, bukan hardcode hex di widget.
 abstract final class LustiaColors {
-  // --- Brand primary: Teal ---
-  /// Teal-600: HSL(175, 84%, 32%) ≈ #0D9488
-  static const Color primary = Color(0xFF0D9488);
+  // --- Brand primary: Coral (matching lustia-logo.png) ---
+  /// Coral utama — match logo. Tailwind red-400 ≈ #F87171
+  static const Color primary = Color(0xFFF87171);
 
-  /// Teal-700 — pressed / hover state
-  static const Color primaryDark = Color(0xFF0F766E);
+  /// Red-500 — pressed / hover state, sedikit lebih dalam dari primary
+  static const Color primaryDark = Color(0xFFEF4444);
 
-  /// Teal-50 — permukaan ringan / chip background
-  static const Color primarySurface = Color(0xFFF0FDFA);
+  /// Red-50 — permukaan ringan / chip background
+  static const Color primarySurface = Color(0xFFFEF2F2);
 
-  /// Teal-100 — secondary container
-  static const Color primaryContainer = Color(0xFFCCFBF1);
+  /// Red-200 — secondary container (badge, soft fill)
+  static const Color primaryContainer = Color(0xFFFECACA);
 
   // --- Neutral / surface ---
   static const Color background = Color(0xFFFFFFFF);
@@ -51,6 +49,6 @@ abstract final class LustiaColors {
   static const Color textPrimaryDark = Color(0xFFF8FAFC);
   static const Color textMutedDark = Color(0xFF94A3B8);
   static const Color primaryDarkMode = Color(
-    0xFF2DD4BF,
-  ); // teal-400 (lebih terang di dark)
+    0xFFFCA5A5,
+  ); // red-300 (coral lebih terang untuk dark mode)
 }

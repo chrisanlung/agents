@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base32"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,6 +26,14 @@ var (
 	mathSqrt = math.Sqrt
 	mathAsin = math.Asin
 )
+
+// jakartaLocation is shared with settlement_service.go (declared there in
+// init()). Therapist availability windows are stored as TIME (clock-on-the-
+// wall) without a timezone, but operators set them in local Jakarta time.
+// The slot generator must parse "HH:MM:SS" + the requested date in Jakarta
+// local so the resulting time.Time has the correct +07:00 offset; otherwise
+// customers in Jakarta see slots shifted by 7 hours (09:00 stored → 16:00
+// perceived).
 
 // crockfordAlphabet is the Crockford Base32 character set minus 0/O/1/I/L for
 // legibility. Uses A-Z and 2-7. ADR 0014 §3.4.
@@ -190,6 +199,21 @@ func (s *BookingService) CreatePublic(ctx context.Context, in PublicCreateBookin
 			return CreateBookingOutput{}, err
 		}
 		therapistID = &id
+	}
+
+	// Pre-flight prep-buffer conflict check (migration 000035).
+	// The GiST exclusion constraint enforces [scheduled_start, scheduled_end)
+	// overlap at DB level; this check additionally enforces the therapist's
+	// prep window so a booking starting inside prep time is rejected early with
+	// a clear error rather than a silent DB constraint bypass.
+	if therapistID != nil {
+		busy, err := s.isTherapistBusyWithPrep(ctx, *therapistID, start, end)
+		if err != nil {
+			return CreateBookingOutput{}, fmt.Errorf("pre-flight conflict check: %w", err)
+		}
+		if busy {
+			return CreateBookingOutput{}, constants.ErrBookingTherapistConflict
+		}
 	}
 
 	// Auto-assign room if not specified.
@@ -435,6 +459,18 @@ func (s *BookingService) CreateConcierge(ctx context.Context, in ConciergeCreate
 		}
 		therapistID = &id
 	}
+
+	// Pre-flight prep-buffer conflict check (migration 000035).
+	if therapistID != nil {
+		busy, err := s.isTherapistBusyWithPrep(ctx, *therapistID, start, end)
+		if err != nil {
+			return CreateBookingOutput{}, fmt.Errorf("pre-flight conflict check: %w", err)
+		}
+		if busy {
+			return CreateBookingOutput{}, constants.ErrBookingTherapistConflict
+		}
+	}
+
 	roomID := in.RoomID
 	if roomID == nil {
 		id, err := s.autoAssignRoom(ctx, in.CallerTenantID, branch.ID, start, end)
@@ -729,7 +765,10 @@ func (s *BookingService) MarkNoShow(ctx context.Context, in NoShowInput) (Bookin
 	return s.buildBookingDetail(ctx, b)
 }
 
-// Cancel transitions a booking from paid → cancelled (ops force-cancel).
+// Cancel transitions a booking to cancelled (ops force-cancel).
+// Allowed from: paid, checked_in, pending_payment.
+// When cancelled from pending_payment the associated awaiting payment_transaction
+// is marked voided so the customer's outstanding QR becomes inert.
 func (s *BookingService) Cancel(ctx context.Context, in CancelInput) (BookingDetail, error) {
 	if in.Reason == "" {
 		return BookingDetail{}, fmt.Errorf("%w: cancel reason is required", constants.ErrInvalidInput)
@@ -745,8 +784,23 @@ func (s *BookingService) Cancel(ctx context.Context, in CancelInput) (BookingDet
 	if !in.IsAdmin && !containsBranch(in.CallerBranches, b.BranchID) {
 		return BookingDetail{}, constants.ErrCrossBranchForbidden
 	}
-	if b.Status != model.BookingStatusPaid && b.Status != model.BookingStatusCheckedIn {
+
+	cancelFromPending := b.Status == model.BookingStatusPendingPayment
+	allowed := cancelFromPending ||
+		b.Status == model.BookingStatusPaid ||
+		b.Status == model.BookingStatusCheckedIn
+	if !allowed {
 		return BookingDetail{}, constants.ErrBookingInvalidStatusTransition
+	}
+
+	// When cancelling a pending_payment booking, void the awaiting
+	// payment_transaction so the customer's QR code becomes inert.
+	// Non-fatal if no transaction exists (paid_at_venue concierge booking).
+	if cancelFromPending {
+		if voidErr := s.paymentSvc.VoidTransactionForBooking(ctx, in.BookingID); voidErr != nil {
+			slog.WarnContext(ctx, "cancel: void payment_transaction (non-fatal)",
+				"booking_id", in.BookingID, "error", voidErr)
+		}
 	}
 
 	now := s.clock.Now().Format(time.RFC3339)
@@ -765,13 +819,21 @@ func (s *BookingService) Cancel(ctx context.Context, in CancelInput) (BookingDet
 		return BookingDetail{}, constants.ErrBookingInvalidStatusTransition
 	}
 
+	// Differentiate audit action so ops can distinguish cancels from each source status.
+	auditAction := "booking.cancelled"
+	if cancelFromPending {
+		auditAction = "booking.cancelled_pending"
+	}
 	_ = s.audit.Append(ctx, AuditEntry{
 		TenantID:     &in.CallerTenantID,
 		ActorUserID:  &in.CallerUserID,
-		Action:       "booking.cancelled",
+		Action:       auditAction,
 		ResourceType: "booking",
 		ResourceID:   in.BookingID,
-		Meta:         map[string]interface{}{"reason": in.Reason},
+		Meta: map[string]interface{}{
+			"reason":          in.Reason,
+			"previous_status": string(b.Status),
+		},
 	})
 
 	b.Status = model.BookingStatusCancelled
@@ -817,6 +879,18 @@ func (s *BookingService) HandlePaymentWebhook(ctx context.Context, rawPayload []
 
 // ListAvailableSlots computes available time slots for a service on a given date.
 // Calls SweepExpired first to ensure stale pending_payment rows don't block slots.
+//
+// Two-pass approach (avoids N+1):
+//   Pass 1 — build candidate slot windows + counts (existing therapist/room count logic).
+//   Pass 2 — single bulk query for booked room IDs per slot window; optional
+//             single bulk query for therapist booking conflicts when TherapistID given.
+//
+// TherapistAvailable semantics (when TherapistID supplied):
+//   true  = therapist has no overlapping booking AND their weekly schedule covers the slot.
+//   false = either they are booked OR their schedule does not cover the slot.
+// The UI should show a "Terapis sudah dibooking di jam ini" reason when
+// TherapistAvailable=false but TherapistsAvailableCount > 0 (i.e. other therapists
+// are still free — the slot itself is not blocked, only this specific therapist).
 func (s *BookingService) ListAvailableSlots(ctx context.Context, in AvailableSlotsInput) ([]Slot, error) {
 	// Pivot RLS to __public__ sentinel — this endpoint is hit by the customer
 	// mobile app without a JWT, so the default __platform__ tenant context
@@ -847,34 +921,365 @@ func (s *BookingService) ListAvailableSlots(ctx context.Context, in AvailableSlo
 		return nil, fmt.Errorf("%w: date must be YYYY-MM-DD", constants.ErrInvalidInput)
 	}
 
-	// Generate candidate slots at 30-minute intervals for the branch's
-	// operational hours. For Phase 5 we use 09:00–21:00 as a default if
-	// operational_hours is not set. A production implementation would parse
-	// the branch.OperationalHours JSONB field.
-	// TODO(phase-6): parse branch.OperationalHours per weekday.
-	dayStart := time.Date(date.Year(), date.Month(), date.Day(), 9, 0, 0, 0, time.UTC)
-	dayEnd := time.Date(date.Year(), date.Month(), date.Day(), 21, 0, 0, 0, time.UTC)
+	// Branch operational hours bound the overall slot grid; therapist windows
+	// are intersected with this range during chain generation. Defaults to
+	// 09:00–22:00 when branch.OperationalHours is empty/unset; otherwise the
+	// per-DOW range from the JSONB blob is used. A null/missing entry on a day
+	// means the branch is closed → return zero slots.
+	//
+	// JSONB shape (set by tenant-admin's OperationalHoursField):
+	//   {"mon":"09:00-22:00","tue":"09:00-22:00",...,"sun":null}
+	dayStart := time.Date(date.Year(), date.Month(), date.Day(), 9, 0, 0, 0, jakartaLocation)
+	dayEnd := time.Date(date.Year(), date.Month(), date.Day(), 22, 0, 0, 0, jakartaLocation)
+	if raw := strings.TrimSpace(string(branch.OperationalHours)); raw != "" && raw != "{}" {
+		dowKeys := []string{"sun", "mon", "tue", "wed", "thu", "fri", "sat"}
+		dowKey := dowKeys[int(date.Weekday())]
+		var hours map[string]*string
+		if jerr := json.Unmarshal(branch.OperationalHours, &hours); jerr == nil && len(hours) > 0 {
+			v, ok := hours[dowKey]
+			if ok && v == nil {
+				return []Slot{}, nil
+			}
+			if ok && v != nil {
+				if dash := strings.Index(*v, "-"); dash > 0 {
+					fromStr := strings.TrimSpace((*v)[:dash])
+					toStr := strings.TrimSpace((*v)[dash+1:])
+					if t, perr := time.ParseInLocation("15:04", fromStr, jakartaLocation); perr == nil {
+						dayStart = time.Date(date.Year(), date.Month(), date.Day(), t.Hour(), t.Minute(), 0, 0, jakartaLocation)
+					}
+					if t, perr := time.ParseInLocation("15:04", toStr, jakartaLocation); perr == nil {
+						dayEnd = time.Date(date.Year(), date.Month(), date.Day(), t.Hour(), t.Minute(), 0, 0, jakartaLocation)
+					}
+				}
+			}
+		}
+	}
 	duration := time.Duration(svc.DurationMinutes) * time.Minute
 
-	var slots []Slot
-	for slotStart := dayStart; slotStart.Add(duration).Before(dayEnd) || slotStart.Add(duration).Equal(dayEnd); slotStart = slotStart.Add(30 * time.Minute) {
-		slotEnd := slotStart.Add(duration)
+	// --- Pass A: list eligible therapists for the service (branch-wide) ---
 
-		// Count available therapists for this slot.
-		therapistsAvail := s.countAvailableTherapists(ctx, branch.TenantID, branch.ID, in.ServiceID, slotStart, slotEnd)
-		// Count available rooms for this slot.
-		roomsAvail := s.countAvailableRooms(ctx, branch.TenantID, branch.ID, slotStart, slotEnd)
+	// Fetch all active rooms at the branch once (used for both count and ID set).
+	allRooms, _, _ := s.rooms.FindByTenant(ctx, branch.TenantID, RoomFilter{
+		BranchID: &branch.ID,
+		IsActive: boolPtr(true),
+		Page:     1,
+		Limit:    200,
+	})
+	allRoomIDs := make([]string, len(allRooms))
+	for i, rm := range allRooms {
+		allRoomIDs[i] = rm.ID
+	}
 
-		if therapistsAvail > 0 {
-			slots = append(slots, Slot{
-				Start:                    slotStart.Format(time.RFC3339),
-				End:                      slotEnd.Format(time.RFC3339),
-				TherapistsAvailableCount: therapistsAvail,
-				RoomsAvailableCount:      roomsAvail,
-			})
+	// Fetch all active therapists at the branch mapped to this service. This
+	// replaces the single countAvailableTherapists call with a list we can
+	// use for per-slot counting in Pass D.
+	allTherapists, _, _ := s.therapists.FindByTenant(ctx, branch.TenantID, TherapistFilter{
+		BranchID: &branch.ID,
+		IsActive: boolPtr(true),
+		Page:     1,
+		Limit:    200,
+	})
+	// Build prep-minutes lookup for chained-slot generation.
+	therapistPrep := make(map[string]int, len(allTherapists))
+	var eligibleTherapistIDs []string
+	for _, th := range allTherapists {
+		ok, _ := s.therapistCanPerformService(ctx, th.ID, in.ServiceID)
+		if ok {
+			eligibleTherapistIDs = append(eligibleTherapistIDs, th.ID)
+			therapistPrep[th.ID] = th.PrepMinutes
 		}
 	}
 
+	// day-of-week for Pass B (all slots on the same date share the same DOW).
+	dow := int(dayStart.Weekday()) // time.Sunday=0 … time.Saturday=6
+
+	// --- Pass B: bulk-fetch availability windows for eligible therapists ---
+	// Single query for therapist_availability WHERE therapist_id IN (?) AND day_of_week = ?
+	availRows, availErr := s.availability.FindByTherapistsAndDOW(ctx, eligibleTherapistIDs, dow)
+	if availErr != nil {
+		slog.WarnContext(ctx, "FindByTherapistsAndDOW error (non-fatal)", "error", availErr)
+		availRows = nil
+	}
+	// Build map[therapistID][]window for O(1) lookup in Pass D.
+	type availWindow struct {
+		startTime string // "HH:MM:SS"
+		endTime   string // "HH:MM:SS"
+	}
+	therapistWindows := make(map[string][]availWindow, len(eligibleTherapistIDs))
+	for _, row := range availRows {
+		therapistWindows[row.TherapistID] = append(therapistWindows[row.TherapistID], availWindow{
+			startTime: row.StartTime,
+			endTime:   row.EndTime,
+		})
+	}
+
+	// --- Chained candidate-slot generation ---
+	//
+	// For each therapist's availability window, generate slots stepping by
+	// (duration + prep_minutes). This ensures the grid shown to customers
+	// reflects the actual bookable sequence rather than a fixed 30-minute
+	// cadence that doesn't align with how therapist capacity is consumed.
+	//
+	// Algorithm per window:
+	//   windowStart = max(branch_dayStart, HH:MM parse of row.StartTime)
+	//   windowEnd   = min(branch_dayEnd,   HH:MM parse of row.EndTime)
+	//   step        = duration + therapistPrep[therapistID]
+	//   for slotStart = windowStart; slotStart + duration <= windowEnd; slotStart += step
+	//       emit candidateSlot{slotStart, slotStart + duration}
+	//
+	// When TherapistID is supplied (specific-therapist mode) only that therapist's
+	// windows drive the chain. In Otomatis mode the union of all eligible
+	// therapists' chains is emitted (deduplicated by start time).
+
+	type candidateSlot struct {
+		start time.Time
+		end   time.Time
+	}
+
+	// parseWindowBound converts "HH:MM:SS" (or "HH:MM") into a full time.Time
+	// on the requested date (UTC). Returns fallback when the string is empty or
+	// cannot be parsed.
+	parseWindowBound := func(hhmmss string, fallback time.Time) time.Time {
+		if hhmmss == "" {
+			return fallback
+		}
+		h, m, sec := 0, 0, 0
+		if len(hhmmss) >= 8 {
+			if _, scanErr := fmt.Sscanf(hhmmss, "%d:%d:%d", &h, &m, &sec); scanErr != nil {
+				return fallback
+			}
+		} else if len(hhmmss) >= 5 {
+			if _, scanErr := fmt.Sscanf(hhmmss, "%d:%d", &h, &m); scanErr != nil {
+				return fallback
+			}
+		} else {
+			return fallback
+		}
+		return time.Date(date.Year(), date.Month(), date.Day(), h, m, sec, 0, jakartaLocation)
+	}
+
+	// generateChain emits all candidate slots for a single availability window,
+	// clipped to [dayStart, dayEnd].
+	generateChain := func(therapistID string, win availWindow) []candidateSlot {
+		wStart := parseWindowBound(win.startTime, dayStart)
+		wEnd := parseWindowBound(win.endTime, dayEnd)
+
+		// Clip window to branch operational hours.
+		if wStart.Before(dayStart) {
+			wStart = dayStart
+		}
+		if wEnd.After(dayEnd) {
+			wEnd = dayEnd
+		}
+
+		prep := time.Duration(therapistPrep[therapistID]) * time.Minute
+		step := duration + prep
+		if step <= 0 {
+			return nil
+		}
+
+		var chain []candidateSlot
+		for slotStart := wStart; ; slotStart = slotStart.Add(step) {
+			slotEnd := slotStart.Add(duration)
+			if slotEnd.After(wEnd) {
+				break
+			}
+			chain = append(chain, candidateSlot{start: slotStart, end: slotEnd})
+		}
+		return chain
+	}
+
+	// Collect candidates: single-therapist or Otomatis union.
+	seen := make(map[string]struct{}) // dedup by RFC3339 start
+	var candidates []candidateSlot
+
+	if in.TherapistID != nil {
+		// Single-therapist mode: only this therapist's windows.
+		for _, win := range therapistWindows[*in.TherapistID] {
+			for _, slot := range generateChain(*in.TherapistID, win) {
+				key := slot.start.Format(time.RFC3339)
+				if _, dup := seen[key]; !dup {
+					seen[key] = struct{}{}
+					candidates = append(candidates, slot)
+				}
+			}
+		}
+	} else {
+		// Otomatis mode: union of all eligible therapists' chains.
+		for _, tid := range eligibleTherapistIDs {
+			for _, win := range therapistWindows[tid] {
+				for _, slot := range generateChain(tid, win) {
+					key := slot.start.Format(time.RFC3339)
+					if _, dup := seen[key]; !dup {
+						seen[key] = struct{}{}
+						candidates = append(candidates, slot)
+					}
+				}
+			}
+		}
+	}
+
+	// Sort candidates by start time so the response is ordered.
+	slices.SortFunc(candidates, func(a, b candidateSlot) int {
+		return a.start.Compare(b.start)
+	})
+
+	if len(candidates) == 0 {
+		return []Slot{}, nil
+	}
+
+	// --- Pass C: bulk-fetch conflicting bookings for eligible therapists ---
+	// Single query: booking JOIN therapist on therapist_id, with effective_end
+	// already widened by prep_minutes. Covers the whole day.
+	conflicts, conflictErr := s.bookings.FindTherapistConflicts(ctx, eligibleTherapistIDs, dayStart, dayEnd)
+	if conflictErr != nil {
+		slog.WarnContext(ctx, "FindTherapistConflicts error (non-fatal)", "error", conflictErr)
+		conflicts = nil
+	}
+	// Build map[therapistID][]TherapistBookingInterval for Pass D.
+	therapistIntervals := make(map[string][]TherapistBookingInterval, len(eligibleTherapistIDs))
+	for _, iv := range conflicts {
+		therapistIntervals[iv.TherapistID] = append(therapistIntervals[iv.TherapistID], iv)
+	}
+
+	// --- Pass 2: bulk-fetch booked room IDs per slot window ---
+	windows := make([]SlotWindow, len(candidates))
+	for i, c := range candidates {
+		windows[i] = SlotWindow{
+			Start: c.start.Format(time.RFC3339),
+			End:   c.end.Format(time.RFC3339),
+		}
+	}
+
+	bookedRoomsBySlot, err := s.bookings.FindBookedRoomIDsInSlots(ctx, branch.ID, windows)
+	if err != nil {
+		// Non-fatal: log and fall back to empty (all rooms available).
+		slog.WarnContext(ctx, "FindBookedRoomIDsInSlots error (non-fatal)", "error", err)
+		bookedRoomsBySlot = map[string][]string{}
+	}
+
+	// --- Pass 3 (optional): bulk-fetch single-therapist booking conflicts ---
+	// When TherapistID is supplied we still use the single-therapist path for
+	// the TherapistAvailable boolean field (pre-existing semantics preserved).
+	// prep_minutes is read from the therapistPrep map built in Pass A; if the
+	// therapist is not in the map (e.g. not eligible), fall back to FindByID.
+	var therapistBookedBySlot map[string]bool
+	if in.TherapistID != nil {
+		prepMinutes := therapistPrep[*in.TherapistID]
+		if prepMinutes == 0 {
+			// Fallback: therapist not in eligible list — fetch directly.
+			if th, thErr := s.therapists.FindByID(ctx, *in.TherapistID); thErr == nil {
+				prepMinutes = th.PrepMinutes
+			} else {
+				slog.WarnContext(ctx, "FindByID therapist for prep_minutes (non-fatal)", "error", thErr)
+			}
+		}
+		therapistBookedBySlot, err = s.bookings.IsTherapistBookedInSlots(ctx, *in.TherapistID, windows, prepMinutes)
+		if err != nil {
+			slog.WarnContext(ctx, "IsTherapistBookedInSlots error (non-fatal)", "error", err)
+			therapistBookedBySlot = map[string]bool{}
+		}
+	}
+
+	// --- Pass D: per-slot count using bulk-fetched data ---
+	// For each candidate slot, count how many eligible therapists:
+	//   (1) have an availability window covering (dow, slotStart, slotEnd), AND
+	//   (2) have no effective booking interval overlapping (slot.start, slot.end).
+	//
+	// therapistCoveredByWindow returns true when at least one window for the
+	// therapist covers [slotStartHHMMSS, slotEndHHMMSS] on the current DOW.
+	therapistCoveredByWindow := func(therapistID, slotStartHHMMSS, slotEndHHMMSS string) bool {
+		for _, w := range therapistWindows[therapistID] {
+			// start_time ≤ slotStart AND end_time ≥ slotEnd
+			if w.startTime <= slotStartHHMMSS && w.endTime >= slotEndHHMMSS {
+				return true
+			}
+		}
+		return false
+	}
+
+	// therapistHasConflict returns true when at least one effective booking
+	// interval for the therapist overlaps the candidate slot [slotStart, slotEnd).
+	therapistHasConflict := func(therapistID string, slotStart, slotEnd time.Time) bool {
+		for _, iv := range therapistIntervals[therapistID] {
+			// Standard half-open interval overlap: start < other_end && end > other_start
+			if slotStart.Before(iv.EffectiveEnd) && slotEnd.After(iv.EffectiveStart) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// --- Assemble slots ---
+	var slots []Slot
+	for _, c := range candidates {
+		startKey := c.start.Format(time.RFC3339)
+		slotStartHHMMSS := c.start.Format("15:04:05")
+		slotEndHHMMSS := c.end.Format("15:04:05")
+
+		// Compute available room IDs for this slot (all rooms minus booked ones).
+		bookedSet := make(map[string]bool, len(bookedRoomsBySlot[startKey]))
+		for _, rid := range bookedRoomsBySlot[startKey] {
+			bookedSet[rid] = true
+		}
+		availRoomIDs := make([]string, 0, len(allRoomIDs))
+		for _, rid := range allRoomIDs {
+			if !bookedSet[rid] {
+				availRoomIDs = append(availRoomIDs, rid)
+			}
+		}
+		roomsAvail := len(availRoomIDs)
+
+		// --- Pass D: per-slot therapist count ---
+		// Count eligible therapists who cover this slot AND have no conflict.
+		therapistCount := 0
+		for _, tid := range eligibleTherapistIDs {
+			if !therapistCoveredByWindow(tid, slotStartHHMMSS, slotEndHHMMSS) {
+				continue
+			}
+			if therapistHasConflict(tid, c.start, c.end) {
+				continue
+			}
+			therapistCount++
+		}
+
+		// Emit every slot, including those with therapistCount==0, so the UI can
+		// render them as disabled with reason "Tidak ada therapist tersedia".
+		// (Previously count==0 caused a continue; the Flutter side already handles
+		// count==0 as a disabled slot — see acceptance criteria.)
+		slot := Slot{
+			Start:                    c.start.Format(time.RFC3339),
+			End:                      c.end.Format(time.RFC3339),
+			TherapistsAvailableCount: therapistCount,
+			RoomsAvailableCount:      roomsAvail,
+			AvailableRoomIDs:         availRoomIDs,
+		}
+
+		// Per-therapist availability check (only when TherapistID supplied).
+		// Preserves pre-existing TherapistAvailable field semantics.
+		if in.TherapistID != nil {
+			isBooked := therapistBookedBySlot[startKey]
+			if isBooked {
+				// Therapist has a conflicting booking — mark unavailable.
+				f := false
+				slot.TherapistAvailable = &f
+			} else {
+				// Check whether the therapist's weekly schedule covers this slot.
+				covers, covErr := s.availability.TherapistCoversSlot(ctx, *in.TherapistID, dow, slotStartHHMMSS, slotEndHHMMSS)
+				if covErr != nil {
+					slog.WarnContext(ctx, "TherapistCoversSlot error (non-fatal)", "error", covErr)
+					covers = false
+				}
+				slot.TherapistAvailable = &covers
+			}
+		}
+
+		slots = append(slots, slot)
+	}
+
+	if slots == nil {
+		slots = []Slot{}
+	}
 	return slots, nil
 }
 
@@ -954,6 +1359,20 @@ func (s *BookingService) GetPublicBranchDetail(ctx context.Context, branchID str
 					"therapist_id", t.ID, "error", uErr)
 				d.PhotoKey = nil
 			}
+		}
+		// Populate active service mappings so the customer mobile can hide
+		// therapists that don't perform the selected service.
+		if mappings, mErr := s.therapistSvc.FindByTherapistID(ctx, t.ID); mErr == nil {
+			ids := make([]string, 0, len(mappings))
+			for _, m := range mappings {
+				if m.IsActive {
+					ids = append(ids, m.ServiceID)
+				}
+			}
+			d.ServiceIDs = ids
+		} else {
+			slog.WarnContext(ctx, "therapist service mapping lookup failed (non-fatal)",
+				"therapist_id", t.ID, "error", mErr)
 		}
 		out.Therapists = append(out.Therapists, d)
 	}
@@ -1071,6 +1490,30 @@ func (s *BookingService) generateUniqueCode(ctx context.Context) (string, error)
 	return "", fmt.Errorf("failed to generate unique booking code after %d attempts", bookingCodeMaxRetries)
 }
 
+// isTherapistBusyWithPrep returns true when the therapist has an active booking
+// whose effective interval [scheduled_start, scheduled_end + prep_minutes)
+// overlaps the candidate window [start, end). This is the service-layer
+// pre-flight check that enforces the prep buffer (migration 000035) before
+// the INSERT reaches the DB-level GiST exclusion constraint.
+//
+// The GiST constraint covers exact scheduled_end; this method covers the extra
+// prep window that the constraint intentionally does NOT enforce at the DB level.
+func (s *BookingService) isTherapistBusyWithPrep(ctx context.Context, therapistID string, start, end time.Time) (bool, error) {
+	th, err := s.therapists.FindByID(ctx, therapistID)
+	if err != nil {
+		return false, err
+	}
+	window := SlotWindow{
+		Start: start.Format(time.RFC3339),
+		End:   end.Format(time.RFC3339),
+	}
+	result, err := s.bookings.IsTherapistBookedInSlots(ctx, therapistID, []SlotWindow{window}, th.PrepMinutes)
+	if err != nil {
+		return false, fmt.Errorf("therapist conflict check: %w", err)
+	}
+	return result[window.Start], nil
+}
+
 // therapistCanPerformService returns true when the therapist has an active
 // mapping to the given service via the therapist_service table.
 func (s *BookingService) therapistCanPerformService(ctx context.Context, therapistID, serviceID string) (bool, error) {
@@ -1119,8 +1562,12 @@ func (s *BookingService) autoAssignTherapist(ctx context.Context, tenantID, bran
 	return candidates[0], nil
 }
 
-// autoAssignRoom picks the first available room for a slot.
-func (s *BookingService) autoAssignRoom(ctx context.Context, tenantID, branchID string, _, _ time.Time) (string, error) {
+// autoAssignRoom picks the first active room not already booked at [start, end).
+// Returns "" (let caller leave room_id NULL) when every active room is booked
+// or the branch has no rooms — operators reassign manually using a backup room
+// outside the system. The booking_room exclusion constraint ignores NULL rows
+// (WHERE room_id IS NOT NULL), so NULL bookings never conflict at the DB.
+func (s *BookingService) autoAssignRoom(ctx context.Context, tenantID, branchID string, start, end time.Time) (string, error) {
 	rows, _, err := s.rooms.FindByTenant(ctx, tenantID, RoomFilter{
 		BranchID: &branchID,
 		IsActive: boolPtr(true),
@@ -1131,10 +1578,28 @@ func (s *BookingService) autoAssignRoom(ctx context.Context, tenantID, branchID 
 		return "", fmt.Errorf("auto assign room: %w", err)
 	}
 	if len(rows) == 0 {
-		// No rooms at this branch — proceed without room assignment.
 		return "", nil
 	}
-	return rows[0].ID, nil
+
+	booked, err := s.bookings.FindBookedRoomIDsInSlots(ctx, branchID, []SlotWindow{{
+		Start: start.Format(time.RFC3339),
+		End:   end.Format(time.RFC3339),
+	}})
+	if err != nil {
+		return "", fmt.Errorf("auto assign room (overlap check): %w", err)
+	}
+	bookedSet := make(map[string]struct{})
+	for _, ids := range booked {
+		for _, id := range ids {
+			bookedSet[id] = struct{}{}
+		}
+	}
+	for _, rm := range rows {
+		if _, taken := bookedSet[rm.ID]; !taken {
+			return rm.ID, nil
+		}
+	}
+	return "", nil
 }
 
 // countAvailableTherapists counts therapists at a branch available for a slot.

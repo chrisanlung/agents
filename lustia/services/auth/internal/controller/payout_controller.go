@@ -35,6 +35,9 @@ func (c *PayoutController) Register(rg *gin.RouterGroup, rbac func(string) gin.H
 	// Settlement reconciliation.
 	rg.POST("/admin/settlement/reconcile", rbac(constants.PermSettlementReconcile), c.Reconcile)
 	rg.GET("/admin/settlement-batches", rbac(constants.PermFinanceReadAll), c.ListSettlementBatches)
+	// /summary MUST be registered before /:id so Gin does not match the literal
+	// string "summary" as a path parameter value.
+	rg.GET("/admin/settlement-batches/summary", rbac(constants.PermFinanceReadAll), c.SettlementSummary)
 	rg.GET("/admin/settlement-batches/:id", rbac(constants.PermFinanceReadAll), c.GetSettlementBatch)
 
 	// Disbursement management.
@@ -87,6 +90,41 @@ func (c *PayoutController) Reconcile(ctx *gin.Context) {
 		"total_amount_idr":  summary.TotalAmountIDR,
 		"mismatch_count":    summary.MismatchCount,
 	})
+}
+
+// SettlementSummary handles GET /api/v1/admin/settlement-batches/summary.
+// Returns aggregate KPIs for the platform-admin "Volume Disetel Minggu Ini"
+// dashboard card.
+func (c *PayoutController) SettlementSummary(ctx *gin.Context) {
+	from := ctx.Query("from")
+	to := ctx.Query("to")
+
+	if from == "" || to == "" {
+		helper.RespondError(ctx, http.StatusBadRequest, "VALIDATION", "from and to query parameters are required")
+		return
+	}
+
+	// Validate format — time.Parse in the service will also check, but a
+	// quick format guard here keeps error messages crisp at the HTTP boundary.
+	if _, err := time.Parse("2006-01-02", from); err != nil {
+		helper.RespondError(ctx, http.StatusBadRequest, "INVALID_DATE", "from must be in YYYY-MM-DD format")
+		return
+	}
+	if _, err := time.Parse("2006-01-02", to); err != nil {
+		helper.RespondError(ctx, http.StatusBadRequest, "INVALID_DATE", "to must be in YYYY-MM-DD format")
+		return
+	}
+
+	out, err := c.settlementSvc.Summary(ctx.Request.Context(), service.SettlementSummaryInput{
+		From: from,
+		To:   to,
+	})
+	if err != nil {
+		helper.RespondDomainError(ctx, err)
+		return
+	}
+
+	ctx.JSON(http.StatusOK, out)
 }
 
 // ListSettlementBatches handles GET /api/v1/admin/settlement-batches.

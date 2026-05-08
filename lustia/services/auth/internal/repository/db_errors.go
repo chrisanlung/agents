@@ -32,6 +32,9 @@ func translateDBError(err error) error {
 			if strings.Contains(pgErr.ConstraintName, "email") {
 				return constants.ErrDuplicateEmail
 			}
+			if strings.Contains(pgErr.ConstraintName, "username") {
+				return constants.ErrUsernameAlreadyTaken
+			}
 			return constants.ErrConflict
 		case pgErrExclusionViolation:
 			return constants.ErrConflict

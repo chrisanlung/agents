@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/chrisanlung/lustia-auth/internal/constants"
@@ -90,11 +91,18 @@ func (h *BranchController) handleList(c *gin.Context) {
 		limit = 10
 	}
 
+	// `?scope=mine` opts in to narrowing the list to the caller's claim
+	// branches. Used by ops-portal flows; tenant-admin surfaces never set it.
+	scopeToMine := c.Query("scope") == "mine"
+
 	out, err := h.svc.ListByTenant(c.Request.Context(), service.ListBranchesInput{
-		CallerTenantID: claims.TenantID,
-		Status:         q.Status,
-		Page:           page,
-		Limit:          limit,
+		CallerTenantID:        claims.TenantID,
+		CallerBranches:        claims.Branches,
+		IsAdmin:               isAdmin(claims.Roles),
+		ScopeToCallerBranches: scopeToMine,
+		Status:                q.Status,
+		Page:                  page,
+		Limit:                 limit,
 	})
 	if err != nil {
 		helper.RespondDomainError(c, err)
@@ -146,19 +154,20 @@ func (h *BranchController) handleUpdate(c *gin.Context) {
 	}
 
 	out, err := h.svc.UpdateBranch(c.Request.Context(), service.UpdateBranchInput{
-		BranchID:       branchID,
-		CallerUserID:   claims.Subject,
-		CallerTenantID: claims.TenantID,
-		Name:           req.Name,
-		AddressLine1:   req.AddressLine1,
-		AddressLine2:   req.AddressLine2,
-		City:           req.City,
-		Province:       req.Province,
-		PostalCode:     req.PostalCode,
-		Country:        req.Country,
-		Timezone:       req.Timezone,
-		ContactPhone:   req.ContactPhone,
-		ContactEmail:   req.ContactEmail,
+		BranchID:         branchID,
+		CallerUserID:     claims.Subject,
+		CallerTenantID:   claims.TenantID,
+		Name:             req.Name,
+		AddressLine1:     req.AddressLine1,
+		AddressLine2:     req.AddressLine2,
+		City:             req.City,
+		Province:         req.Province,
+		PostalCode:       req.PostalCode,
+		Country:          req.Country,
+		Timezone:         req.Timezone,
+		ContactPhone:     req.ContactPhone,
+		ContactEmail:     req.ContactEmail,
+		OperationalHours: req.OperationalHours,
 	})
 	if err != nil {
 		helper.RespondDomainError(c, err)
@@ -235,23 +244,28 @@ func (h *BranchController) handleOnboardingState(c *gin.Context) {
 // ---------------------------------------------------------------------------
 
 func toBranchResponse(b service.BranchDetail) BranchResponse {
+	var opHours json.RawMessage
+	if len(b.OperationalHours) > 0 {
+		opHours = json.RawMessage(b.OperationalHours)
+	}
 	return BranchResponse{
-		ID:           b.ID,
-		TenantID:     b.TenantID,
-		Name:         b.Name,
-		Code:         b.Code,
-		Status:       b.Status,
-		AddressLine1: b.AddressLine1,
-		AddressLine2: b.AddressLine2,
-		City:         b.City,
-		Province:     b.Province,
-		PostalCode:   b.PostalCode,
-		Country:      b.Country,
-		Timezone:     b.Timezone,
-		ContactPhone: b.ContactPhone,
-		ContactEmail: b.ContactEmail,
-		ActivatedAt:  b.ActivatedAt,
-		CreatedAt:    b.CreatedAt,
-		UpdatedAt:    b.UpdatedAt,
+		ID:               b.ID,
+		TenantID:         b.TenantID,
+		Name:             b.Name,
+		Code:             b.Code,
+		Status:           b.Status,
+		AddressLine1:     b.AddressLine1,
+		AddressLine2:     b.AddressLine2,
+		City:             b.City,
+		Province:         b.Province,
+		PostalCode:       b.PostalCode,
+		Country:          b.Country,
+		Timezone:         b.Timezone,
+		ContactPhone:     b.ContactPhone,
+		ContactEmail:     b.ContactEmail,
+		OperationalHours: opHours,
+		ActivatedAt:      b.ActivatedAt,
+		CreatedAt:        b.CreatedAt,
+		UpdatedAt:        b.UpdatedAt,
 	}
 }

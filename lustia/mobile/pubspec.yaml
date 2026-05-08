@@ -75,10 +75,23 @@ flutter_launcher_icons:
 
 # ---------------------------------------------------------------------------
 # flutter_native_splash — run: dart run flutter_native_splash:create
+#
+# Background color matches the soft cream-pink in assets/images/splash.png so
+# the OS-level splash blends seamlessly with the in-app SplashScreen widget
+# (no flicker between native splash → Flutter engine boot → first frame).
+# Android 12+ splash is icon-shaped (max ~240dp), so it falls back to the
+# brand logo only; the watercolor full-bleed splash takes over the moment
+# Flutter engine renders.
 # ---------------------------------------------------------------------------
 flutter_native_splash:
-  color: "#0D9488"   # Teal-600 — brand primary
-  image: assets/icon/lustia_icon_source.png
+  color: "#F8E5E1"
+  image: assets/images/splash.png
   android: true
   ios: true
+  web: false
   fullscreen: false
+
+  android_12:
+    color: "#F8E5E1"
+    image: assets/icon/lustia_icon_source.png
+    icon_background_color: "#F8E5E1"

@@ -342,3 +342,102 @@ func TestTherapistSoftDelete_CrossBranchForbidden(t *testing.T) {
 	assert.True(t, errors.Is(err, constants.ErrCrossBranchForbidden))
 	assert.Empty(t, therapistRepo.deleted)
 }
+
+// ---------------------------------------------------------------------------
+// prep_minutes — migration 000035
+// ---------------------------------------------------------------------------
+
+func TestTherapistUpdate_PrepMinutes_Success(t *testing.T) {
+	t.Parallel()
+
+	therapistRepo := newStubTherapistRepo()
+	therapistRepo.rows["th1"] = &model.Therapist{
+		ID:          "th1",
+		TenantID:    "t1",
+		BranchID:    "b1",
+		IsActive:    true,
+		FullName:    "Siti",
+		HeightCm:    165,
+		WeightKg:    55,
+		Build:       "sedang",
+		PrepMinutes: 0, // default before update
+	}
+
+	svc := newTestTherapistSvc(therapistRepo, &stubTherapistServiceRepo{}, newStubBranchRepoForTherapist("t1", "b1"))
+
+	prep := 20
+	out, err := svc.Update(context.Background(), service.UpdateTherapistInput{
+		TherapistID:    "th1",
+		CallerUserID:   "u1",
+		CallerTenantID: "t1",
+		IsAdmin:        true,
+		PrepMinutes:    &prep,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 20, out.PrepMinutes, "PrepMinutes must be updated to 20")
+	// Verify the model row was mutated.
+	assert.Equal(t, 20, therapistRepo.rows["th1"].PrepMinutes)
+}
+
+func TestTherapistUpdate_PrepMinutes_ValidationError_TooHigh(t *testing.T) {
+	t.Parallel()
+
+	therapistRepo := newStubTherapistRepo()
+	therapistRepo.rows["th1"] = &model.Therapist{
+		ID:       "th1",
+		TenantID: "t1",
+		BranchID: "b1",
+		IsActive: true,
+		FullName: "Siti",
+		HeightCm: 165,
+		WeightKg: 55,
+		Build:    "sedang",
+	}
+
+	svc := newTestTherapistSvc(therapistRepo, &stubTherapistServiceRepo{}, newStubBranchRepoForTherapist("t1", "b1"))
+
+	prep := 70 // out of range: must be 0–60
+	_, err := svc.Update(context.Background(), service.UpdateTherapistInput{
+		TherapistID:    "th1",
+		CallerUserID:   "u1",
+		CallerTenantID: "t1",
+		IsAdmin:        true,
+		PrepMinutes:    &prep,
+	})
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, constants.ErrInvalidInput),
+		"prep_minutes=70 must return ErrInvalidInput (service-layer validation)")
+}
+
+func TestTherapistUpdate_PrepMinutes_Nil_NoChange(t *testing.T) {
+	t.Parallel()
+
+	therapistRepo := newStubTherapistRepo()
+	therapistRepo.rows["th1"] = &model.Therapist{
+		ID:          "th1",
+		TenantID:    "t1",
+		BranchID:    "b1",
+		IsActive:    true,
+		FullName:    "Siti",
+		HeightCm:    165,
+		WeightKg:    55,
+		Build:       "sedang",
+		PrepMinutes: 15, // pre-existing value
+	}
+
+	svc := newTestTherapistSvc(therapistRepo, &stubTherapistServiceRepo{}, newStubBranchRepoForTherapist("t1", "b1"))
+
+	// PrepMinutes not supplied → PATCH semantics, value unchanged.
+	out, err := svc.Update(context.Background(), service.UpdateTherapistInput{
+		TherapistID:    "th1",
+		CallerUserID:   "u1",
+		CallerTenantID: "t1",
+		IsAdmin:        true,
+		PrepMinutes:    nil, // nil = no change
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 15, out.PrepMinutes, "PrepMinutes must remain 15 when nil is supplied")
+}

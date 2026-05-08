@@ -68,11 +68,23 @@ func (h *AuthController) handleLogin(c *gin.Context) {
 		return
 	}
 
+	// Resolve effective identifier. Identifier takes precedence; fall back to
+	// the deprecated Email field for backward compatibility with old clients.
+	effectiveIdentifier := req.Identifier
+	if effectiveIdentifier == "" {
+		effectiveIdentifier = req.Email
+	}
+	if effectiveIdentifier == "" {
+		helper.RespondError(c, http.StatusBadRequest, constants.CodeValidation,
+			"identifier or email is required")
+		return
+	}
+
 	out, err := h.auth.Login(c.Request.Context(), service.LoginInput{
-		Email:     req.Email,
-		Password:  req.Password,
-		UserAgent: c.GetHeader("User-Agent"),
-		IP:        c.ClientIP(),
+		Identifier: effectiveIdentifier,
+		Password:   req.Password,
+		UserAgent:  c.GetHeader("User-Agent"),
+		IP:         c.ClientIP(),
 	})
 	if err != nil {
 		helper.RespondDomainError(c, err)

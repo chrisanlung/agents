@@ -192,6 +192,11 @@ final class CreateBookingRequest {
 }
 
 /// State wizard booking — menyimpan pilihan user di setiap langkah.
+///
+/// [therapistConfirmed] distinguishes "user explicitly tapped Pilih Otomatis/Pilih X"
+/// (true) from "page just loaded, nothing picked yet" (false even when
+/// selectedTherapistId is null). The new BookingSelectionScreen relies on this
+/// to keep Section ③ locked until an explicit therapist selection is made.
 final class BookingWizardState {
   const BookingWizardState({
     required this.branchId,
@@ -200,6 +205,7 @@ final class BookingWizardState {
     this.selectedDate,
     this.selectedSlot,
     this.selectedTherapistId,
+    this.therapistConfirmed = false,
     this.selectedRoomId,
     this.customerName = '',
     this.customerPhone = '',
@@ -211,7 +217,13 @@ final class BookingWizardState {
   final List<String> selectedAddonIds;
   final DateTime? selectedDate;
   final AvailabilitySlot? selectedSlot;
-  final String? selectedTherapistId; // null = auto
+
+  /// null = "Otomatis" (auto-assign) when [therapistConfirmed] is true.
+  /// null with [therapistConfirmed] false = not yet chosen.
+  final String? selectedTherapistId;
+
+  /// true once the user has explicitly tapped "Pilih Otomatis" or "Pilih [Name]".
+  final bool therapistConfirmed;
   final String? selectedRoomId; // null = auto
   final String customerName;
   final String customerPhone;
@@ -224,6 +236,7 @@ final class BookingWizardState {
     AvailabilitySlot? selectedSlot,
     String? selectedTherapistId,
     bool clearTherapist = false,
+    bool? therapistConfirmed,
     String? selectedRoomId,
     bool clearRoom = false,
     String? customerName,
@@ -239,6 +252,9 @@ final class BookingWizardState {
       selectedTherapistId: clearTherapist
           ? null
           : (selectedTherapistId ?? this.selectedTherapistId),
+      therapistConfirmed: clearTherapist
+          ? false
+          : (therapistConfirmed ?? this.therapistConfirmed),
       selectedRoomId: clearRoom
           ? null
           : (selectedRoomId ?? this.selectedRoomId),

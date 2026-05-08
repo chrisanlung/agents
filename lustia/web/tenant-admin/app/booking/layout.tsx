@@ -37,7 +37,6 @@ export default async function BookingLayout({
       <AppHeader
         fullName={me.user.full_name}
         email={me.user.email}
-        activeNav="booking"
         tenant={me.tenant ? { name: me.tenant.name, slug: me.tenant.slug } : null}
         memberships={me.memberships}
       />

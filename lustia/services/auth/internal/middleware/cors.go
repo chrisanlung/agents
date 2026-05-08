@@ -30,7 +30,7 @@ func CORS(allowedOrigins []string) gin.HandlerFunc {
 
 	const (
 		allowedMethods = "GET,POST,PATCH,PUT,DELETE,OPTIONS"
-		allowedHeaders = "Authorization,Content-Type,X-Request-ID"
+		allowedHeaders = "Authorization,Content-Type,X-Request-ID,ngrok-skip-browser-warning"
 		exposedHeaders = "X-Request-ID"
 		maxAgeSeconds  = "300"
 	)

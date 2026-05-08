@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/chrisanlung/lustia-auth/internal/constants"
@@ -92,9 +93,26 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (LoginOutput, er
 		return LoginOutput{}, fmt.Errorf("switch tenant context for login: %w", err)
 	}
 
-	user, err := s.users.FindByEmail(ctx, in.Email)
-	if err != nil {
-		// ErrUserNotFound maps to INVALID_CREDENTIALS (anti-enumeration).
+	// Resolve effective identifier: Identifier takes precedence over Email for
+	// backward compatibility with Phase 1–6 clients that still send "email".
+	identifier := strings.TrimSpace(in.Identifier)
+	if identifier == "" {
+		identifier = strings.TrimSpace(in.Email)
+	}
+
+	// Route to the appropriate lookup based on whether the identifier looks like
+	// an email address. Anti-enumeration: any failure → same INVALID_CREDENTIALS
+	// error regardless of whether the email/username exists.
+	var user *model.User
+	var lookupErr error
+	if strings.Contains(identifier, "@") {
+		user, lookupErr = s.users.FindByEmail(ctx, identifier)
+	} else {
+		user, lookupErr = s.users.FindByUsername(ctx, strings.ToLower(identifier))
+	}
+	if lookupErr != nil {
+		// ErrUserNotFound (and any other error) maps to INVALID_CREDENTIALS.
+		// Never leak which field is wrong — anti-enumeration.
 		return LoginOutput{}, constants.ErrInvalidCredentials
 	}
 
@@ -725,15 +743,31 @@ func (s *AuthService) emitAuditLogin(userID string, tenantID *string, ip string)
 
 // toUserProfile converts a model.User to the service-layer UserProfile DTO.
 func toUserProfile(u *model.User) UserProfile {
+	createdAt := ""
+	if !u.CreatedAt.IsZero() {
+		createdAt = u.CreatedAt.Format(time.RFC3339)
+	}
+	lastLoginAt := ""
+	if u.LastLoginAt != nil {
+		lastLoginAt = u.LastLoginAt.Format(time.RFC3339)
+	}
+	lockedUntil := ""
+	if u.LockedUntil != nil {
+		lockedUntil = u.LockedUntil.Format(time.RFC3339)
+	}
 	return UserProfile{
 		ID:                 u.ID,
 		Email:              u.Email,
+		Username:           u.Username,
 		FullName:           u.FullName,
 		Phone:              helper.DerefString(u.Phone),
 		AvatarURL:          helper.DerefString(u.AvatarURL),
 		IsActive:           u.IsActive,
 		IsSuperAdmin:       u.IsSuperAdmin,
 		MustChangePassword: u.MustChangePassword,
+		CreatedAt:          createdAt,
+		LastLoginAt:        lastLoginAt,
+		LockedUntil:        lockedUntil,
 	}
 }
 

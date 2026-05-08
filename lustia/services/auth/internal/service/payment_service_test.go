@@ -29,6 +29,10 @@ type stubPaymentTxnRepo struct {
 	markPaidErr             error
 	sweepCount              int
 	sumResult               int64
+	// Captured call counts for assertion.
+	markExpiredCalls int
+	markFailedCalls  int
+	markVoidedCalls  int
 }
 
 func (r *stubPaymentTxnRepo) Save(_ context.Context, _ *model.PaymentTransaction) error {
@@ -64,14 +68,29 @@ func (r *stubPaymentTxnRepo) SumByTenantStatus(_ context.Context, _ string, _ st
 func (r *stubPaymentTxnRepo) SweepExpiredTransactions(_ context.Context) (int, error) {
 	return r.sweepCount, nil
 }
+func (r *stubPaymentTxnRepo) MarkVoided(_ context.Context, _ string) (int64, error) {
+	r.markVoidedCalls++
+	return 1, nil
+}
+func (r *stubPaymentTxnRepo) MarkExpired(_ context.Context, _ string) (int64, error) {
+	r.markExpiredCalls++
+	return 1, nil
+}
+func (r *stubPaymentTxnRepo) MarkFailed(_ context.Context, _ string) (int64, error) {
+	r.markFailedCalls++
+	return 1, nil
+}
 
 // stubBookingRepoForPayment is a minimal BookingRepository for payment tests.
 type stubBookingRepoForPayment struct {
 	findByCodePublicResult *model.Booking
 	findByCodePublicErr    error
 	findByIDResult         *model.Booking
+	findByIDErr            error
 	transitionRows         int64
 	transitionErr          error
+	// Captured call inputs.
+	lastTransitionInput TransitionStatusInput
 }
 
 func (r *stubBookingRepoForPayment) Save(_ context.Context, _ *model.Booking) error { return nil }
@@ -79,7 +98,7 @@ func (r *stubBookingRepoForPayment) SaveAddons(_ context.Context, _ []*model.Boo
 	return nil
 }
 func (r *stubBookingRepoForPayment) FindByID(_ context.Context, _ string) (*model.Booking, error) {
-	return r.findByIDResult, nil
+	return r.findByIDResult, r.findByIDErr
 }
 func (r *stubBookingRepoForPayment) FindByCode(_ context.Context, _ string) (*model.Booking, error) {
 	return nil, constants.ErrBookingNotFound
@@ -93,7 +112,8 @@ func (r *stubBookingRepoForPayment) FindAddonsByBooking(_ context.Context, _ str
 func (r *stubBookingRepoForPayment) FindByTenant(_ context.Context, _ string, _ BookingFilter) ([]*model.Booking, int64, error) {
 	return nil, 0, nil
 }
-func (r *stubBookingRepoForPayment) TransitionStatus(_ context.Context, _ TransitionStatusInput) (int64, error) {
+func (r *stubBookingRepoForPayment) TransitionStatus(_ context.Context, in TransitionStatusInput) (int64, error) {
+	r.lastTransitionInput = in
 	return r.transitionRows, r.transitionErr
 }
 func (r *stubBookingRepoForPayment) SweepExpired(_ context.Context) (int, error) { return 0, nil }
@@ -103,13 +123,26 @@ func (r *stubBookingRepoForPayment) FindByPaymentReference(_ context.Context, _ 
 func (r *stubBookingRepoForPayment) ReportSummary(_ context.Context, _ BookingReportFilter) (BookingReportSummary, error) {
 	return BookingReportSummary{}, nil
 }
+func (r *stubBookingRepoForPayment) FindBookedRoomIDsInSlots(_ context.Context, _ string, windows []SlotWindow) (map[string][]string, error) {
+	result := make(map[string][]string, len(windows))
+	return result, nil
+}
+func (r *stubBookingRepoForPayment) IsTherapistBookedInSlots(_ context.Context, _ string, windows []SlotWindow, _ int) (map[string]bool, error) {
+	result := make(map[string]bool, len(windows))
+	return result, nil
+}
+func (r *stubBookingRepoForPayment) FindTherapistConflicts(_ context.Context, _ []string, _, _ time.Time) ([]TherapistBookingInterval, error) {
+	return []TherapistBookingInterval{}, nil
+}
 
 // stubPaymentProvider is a minimal PaymentProvider stub.
 type stubPaymentProvider struct {
-	createQRResp CreateQRResponse
-	createQRErr  error
-	webhookNotif PaymentNotification
-	webhookErr   error
+	createQRResp    CreateQRResponse
+	createQRErr     error
+	webhookNotif    PaymentNotification
+	webhookErr      error
+	getStatusResult ProviderPaymentStatus
+	getStatusErr    error
 }
 
 func (p *stubPaymentProvider) CreateQR(_ context.Context, req CreateQRRequest) (CreateQRResponse, error) {
@@ -129,7 +162,13 @@ func (p *stubPaymentProvider) VerifyWebhook(_ context.Context, _ []byte, _ map[s
 	return p.webhookNotif, p.webhookErr
 }
 func (p *stubPaymentProvider) GetStatus(_ context.Context, _ string) (ProviderPaymentStatus, error) {
-	return ProviderStatusPaid, nil
+	if p.getStatusErr != nil {
+		return "", p.getStatusErr
+	}
+	if p.getStatusResult == "" {
+		return ProviderStatusPaid, nil
+	}
+	return p.getStatusResult, nil
 }
 func (p *stubPaymentProvider) ListSettlements(_ context.Context, _ time.Time) ([]SettlementItem, error) {
 	return nil, nil
@@ -391,4 +430,186 @@ func TestPaymentService_SweepExpiredTransactions(t *testing.T) {
 	n, err := svc.SweepExpiredTransactions(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 3, n)
+}
+
+// ---------------------------------------------------------------------------
+// SyncStatus
+// ---------------------------------------------------------------------------
+
+func newSyncInput(bookingID string) SyncPaymentInput {
+	return SyncPaymentInput{
+		BookingID:      bookingID,
+		CallerTenantID: testTenantID,
+		CallerUserID:   "operator-user-id",
+		CallerBranches: []string{testBranchID},
+		IsAdmin:        false,
+	}
+}
+
+func pendingBooking(id string) *model.Booking {
+	return &model.Booking{
+		ID:       id,
+		TenantID: testTenantID,
+		BranchID: testBranchID,
+		Status:   model.BookingStatusPendingPayment,
+	}
+}
+
+func awaitingTxn(bookingID string) *model.PaymentTransaction {
+	return &model.PaymentTransaction{
+		ID:                "txn-" + bookingID,
+		TenantID:          testTenantID,
+		BookingID:         bookingID,
+		ProviderReference: "ref-" + bookingID,
+		ExpectedAmountIDR: 150000,
+		Status:            model.PaymentTxnStatusAwaiting,
+	}
+}
+
+// TestSyncStatus_Pending_NoOp verifies that a pending provider status causes
+// no state change and returns action "no_op".
+func TestSyncStatus_Pending_NoOp(t *testing.T) {
+	t.Parallel()
+
+	bookingID := "bk-sync-pending"
+	txnRepo := &stubPaymentTxnRepo{findByBookingIDResult: awaitingTxn(bookingID)}
+	bookingRepo := &stubBookingRepoForPayment{
+		findByIDResult: pendingBooking(bookingID),
+		transitionRows: 1,
+	}
+	provider := &stubPaymentProvider{getStatusResult: ProviderStatusPending}
+
+	svc := newTestPaymentSvc(txnRepo, bookingRepo, provider)
+	res, err := svc.SyncStatus(context.Background(), newSyncInput(bookingID))
+
+	require.NoError(t, err)
+	assert.Equal(t, "no_op", res.ActionTaken)
+	assert.Equal(t, ProviderStatusPending, res.ProviderStatus)
+	// No transitions should have been recorded.
+	assert.Empty(t, bookingRepo.lastTransitionInput.BookingID)
+	assert.Equal(t, 0, txnRepo.markExpiredCalls)
+	assert.Equal(t, 0, txnRepo.markFailedCalls)
+}
+
+// TestSyncStatus_Paid_UpdatesTxnAndBooking verifies the happy path: provider
+// reports paid → MarkPaid + booking transition to paid.
+func TestSyncStatus_Paid_UpdatesTxnAndBooking(t *testing.T) {
+	t.Parallel()
+
+	bookingID := "bk-sync-paid"
+	txnRepo := &stubPaymentTxnRepo{
+		findByBookingIDResult: awaitingTxn(bookingID),
+		markPaidRows:          1,
+	}
+	bookingRepo := &stubBookingRepoForPayment{
+		findByIDResult: pendingBooking(bookingID),
+		transitionRows: 1,
+	}
+	provider := &stubPaymentProvider{getStatusResult: ProviderStatusPaid}
+
+	svc := newTestPaymentSvc(txnRepo, bookingRepo, provider)
+	res, err := svc.SyncStatus(context.Background(), newSyncInput(bookingID))
+
+	require.NoError(t, err)
+	assert.Equal(t, "paid", res.ActionTaken)
+	assert.Equal(t, ProviderStatusPaid, res.ProviderStatus)
+	assert.Equal(t, bookingID, res.BookingID)
+	// Booking was transitioned to paid.
+	assert.Equal(t, model.BookingStatusPaid, bookingRepo.lastTransitionInput.NewStatus)
+}
+
+// TestSyncStatus_Failed_MarksFailedAndExpires verifies that a failed provider
+// status marks the transaction failed and transitions the booking to expired.
+func TestSyncStatus_Failed_MarksFailedAndExpires(t *testing.T) {
+	t.Parallel()
+
+	bookingID := "bk-sync-failed"
+	txnRepo := &stubPaymentTxnRepo{findByBookingIDResult: awaitingTxn(bookingID)}
+	bookingRepo := &stubBookingRepoForPayment{
+		findByIDResult: pendingBooking(bookingID),
+		transitionRows: 1,
+	}
+	provider := &stubPaymentProvider{getStatusResult: ProviderStatusFailed}
+
+	svc := newTestPaymentSvc(txnRepo, bookingRepo, provider)
+	res, err := svc.SyncStatus(context.Background(), newSyncInput(bookingID))
+
+	require.NoError(t, err)
+	assert.Equal(t, "failed", res.ActionTaken)
+	assert.Equal(t, 1, txnRepo.markFailedCalls,
+		"MarkFailed must be called once for a failed provider status")
+	assert.Equal(t, 0, txnRepo.markExpiredCalls)
+	assert.Equal(t, model.BookingStatusExpired, bookingRepo.lastTransitionInput.NewStatus)
+}
+
+// TestSyncStatus_Expired_MarksExpiredAndExpires verifies that an expired
+// provider status marks the transaction expired and transitions the booking.
+func TestSyncStatus_Expired_MarksExpiredAndExpires(t *testing.T) {
+	t.Parallel()
+
+	bookingID := "bk-sync-expired"
+	txnRepo := &stubPaymentTxnRepo{findByBookingIDResult: awaitingTxn(bookingID)}
+	bookingRepo := &stubBookingRepoForPayment{
+		findByIDResult: pendingBooking(bookingID),
+		transitionRows: 1,
+	}
+	provider := &stubPaymentProvider{getStatusResult: ProviderStatusExpired}
+
+	svc := newTestPaymentSvc(txnRepo, bookingRepo, provider)
+	res, err := svc.SyncStatus(context.Background(), newSyncInput(bookingID))
+
+	require.NoError(t, err)
+	assert.Equal(t, "expired", res.ActionTaken)
+	assert.Equal(t, 1, txnRepo.markExpiredCalls,
+		"MarkExpired must be called once for an expired provider status")
+	assert.Equal(t, 0, txnRepo.markFailedCalls)
+	assert.Equal(t, model.BookingStatusExpired, bookingRepo.lastTransitionInput.NewStatus)
+}
+
+// TestSyncStatus_CrossTenantGuard verifies that a booking belonging to a
+// different tenant returns ErrBookingNotFound (no information leak).
+func TestSyncStatus_CrossTenantGuard(t *testing.T) {
+	t.Parallel()
+
+	bookingID := "bk-sync-xt"
+	otherTenantBooking := &model.Booking{
+		ID:       bookingID,
+		TenantID: "other-tenant-uuid",
+		BranchID: testBranchID,
+		Status:   model.BookingStatusPendingPayment,
+	}
+	bookingRepo := &stubBookingRepoForPayment{findByIDResult: otherTenantBooking}
+	svc := newTestPaymentSvc(&stubPaymentTxnRepo{}, bookingRepo, &stubPaymentProvider{})
+
+	_, err := svc.SyncStatus(context.Background(), newSyncInput(bookingID))
+	assert.ErrorIs(t, err, constants.ErrBookingNotFound,
+		"cross-tenant access must be rejected as booking-not-found")
+}
+
+// TestSyncStatus_NonPendingBooking_NoOp verifies that a booking which is
+// already paid (or any non-pending_payment status) returns no_op without
+// calling the provider at all.
+func TestSyncStatus_NonPendingBooking_NoOp(t *testing.T) {
+	t.Parallel()
+
+	bookingID := "bk-sync-already-paid"
+	paidBooking := &model.Booking{
+		ID:       bookingID,
+		TenantID: testTenantID,
+		BranchID: testBranchID,
+		Status:   model.BookingStatusPaid, // already resolved
+	}
+	bookingRepo := &stubBookingRepoForPayment{findByIDResult: paidBooking}
+	// Provider returns paid — but must NOT be reached.
+	provider := &stubPaymentProvider{getStatusResult: ProviderStatusPaid}
+	txnRepo := &stubPaymentTxnRepo{}
+
+	svc := newTestPaymentSvc(txnRepo, bookingRepo, provider)
+	res, err := svc.SyncStatus(context.Background(), newSyncInput(bookingID))
+
+	require.NoError(t, err)
+	assert.Equal(t, "no_op", res.ActionTaken,
+		"non-pending_payment booking must return no_op without touching provider or DB")
+	// No transition recorded — early return.
+	assert.Empty(t, bookingRepo.lastTransitionInput.BookingID)
 }

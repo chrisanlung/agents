@@ -125,7 +125,6 @@ export default async function DashboardPage() {
       <AppHeader
         fullName={user.full_name}
         email={user.email}
-        activeNav="dashboard"
         tenant={tenant ? { name: tenant.name, slug: tenant.slug } : null}
         memberships={memberships}
       />

@@ -12,11 +12,8 @@ import 'package:go_router/go_router.dart';
 
 import '../../../../core/config/app_config.dart';
 import '../../../../core/exceptions/app_exception.dart';
-import '../../../../core/storage/recent_bookings_storage.dart';
 import '../../../../shared/utils/currency_formatter.dart';
 import '../../../../shared/widgets/qr_display.dart';
-import '../../../branch/presentation/providers/branch_detail_provider.dart';
-import '../../../my_bookings/data/recent_bookings_notifier.dart';
 import '../../data/booking_model.dart';
 import '../../data/booking_repository.dart';
 import '../providers/booking_provider.dart';
@@ -61,7 +58,7 @@ final class PaymentRouteData {
 
 /// Layar pembayaran.
 /// Menerima [branchId] (untuk wizard state) dan [routeData] (route extra)
-/// yang sudah diisi oleh [BookingWizardScreen] setelah submit booking berhasil.
+/// yang sudah diisi oleh [BookingSelectionScreen] setelah submit booking berhasil.
 class PaymentScreen extends ConsumerStatefulWidget {
   const PaymentScreen({super.key, required this.branchId, this.routeData});
 
@@ -100,6 +97,22 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
   }
 
   @override
+  void didUpdateWidget(covariant PaymentScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // After legacy submit screen calls context.replace with PaymentRouteData,
+    // the same State is reused but routeData becomes non-null. initState
+    // already ran with null, so we (re)start countdown here when expiry
+    // appears or changes.
+    final newExpiry = widget.routeData?.qrExpiresAt;
+    final oldExpiry = oldWidget.routeData?.qrExpiresAt;
+    if (newExpiry != null && newExpiry != oldExpiry) {
+      _countdownTimer?.cancel();
+      _qrExpired = false;
+      _startCountdown(newExpiry);
+    }
+  }
+
+  @override
   void dispose() {
     _countdownTimer?.cancel();
     super.dispose();
@@ -112,9 +125,13 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
   void _startCountdown(String isoExpiry) {
     DateTime expiry;
     try {
-      expiry = DateTime.parse(isoExpiry);
-    } catch (_) {
-      return;
+      expiry = DateTime.parse(isoExpiry).toLocal();
+    } catch (e) {
+      debugPrint(
+        '[payment_screen] failed to parse qr_expires_at="$isoExpiry": $e',
+      );
+      // Fallback: assume QR valid for 15 minutes from now (matches ADR 0015 §2.7).
+      expiry = DateTime.now().add(const Duration(minutes: 15));
     }
 
     void tick() {
@@ -240,10 +257,19 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // If routeData is null, this is in legacy-submit mode (shouldn't happen
-    // post-Phase-6 but guard gracefully).
+    // routeData must always be non-null post-Phase-6: the booking is now
+    // submitted from BookingSelectionScreen before navigating here.
+    assert(
+      _data != null,
+      'PaymentScreen reached with null routeData — '
+      'booking submission must happen in BookingSelectionScreen.',
+    );
     if (_data == null) {
-      return _LegacySubmitPaymentScreen(branchId: widget.branchId);
+      // Unreachable in production; shown in debug as a guard.
+      return Scaffold(
+        appBar: AppBar(title: const Text('Pembayaran')),
+        body: const Center(child: Text('Data pembayaran tidak tersedia.')),
+      );
     }
 
     // Watch polling stream — listen for side-effects (navigate / update state).
@@ -320,6 +346,13 @@ class _QrPaymentBody extends StatelessWidget {
                 color: cs.onSurfaceVariant,
               ),
             ),
+
+            // -- DEV-only payment reference (for sandbox simulator) --
+            if (AppConfig.isDev && data.paymentReference != null) ...[
+              const SizedBox(height: 8),
+              _PaymentReferenceChip(reference: data.paymentReference!),
+            ],
+
             const SizedBox(height: 24),
 
             // -- QR code --
@@ -517,6 +550,63 @@ class _PollingStatusBadge extends StatelessWidget {
   }
 }
 
+class _PaymentReferenceChip extends StatelessWidget {
+  const _PaymentReferenceChip({required this.reference});
+
+  final String reference;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return InkWell(
+      onTap: () {
+        Clipboard.setData(ClipboardData(text: reference));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Payment reference disalin.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      },
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.amber.shade700, width: 1),
+          borderRadius: BorderRadius.circular(8),
+          color: Colors.amber.shade50,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.bolt, size: 14, color: Colors.amber.shade800),
+            const SizedBox(width: 4),
+            Text(
+              'DEV ref: ',
+              style: TextStyle(
+                fontSize: 11,
+                color: Colors.amber.shade900,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+              ),
+            ),
+            SelectableText(
+              reference,
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 11,
+                color: cs.onSurface,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Icon(Icons.copy, size: 12, color: Colors.amber.shade800),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _DevModeDivider extends StatelessWidget {
   const _DevModeDivider();
 
@@ -599,300 +689,6 @@ class _ExpiredScreen extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Legacy submit screen — shown only when routeData is null.
-// Handles booking submission then navigates to QR mode.
-// ---------------------------------------------------------------------------
-
-class _LegacySubmitPaymentScreen extends ConsumerWidget {
-  const _LegacySubmitPaymentScreen({required this.branchId});
-
-  final String branchId;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final branchAsync = ref.watch(branchDetailProvider(branchId));
-    final wizardState = ref.watch(bookingWizardProvider(branchId));
-    final submitState = ref.watch(bookingSubmitProvider);
-
-    return branchAsync.when(
-      loading: () => Scaffold(
-        appBar: AppBar(title: const Text('Pembayaran')),
-        body: const Center(child: CircularProgressIndicator.adaptive()),
-      ),
-      error: (_, __) => Scaffold(
-        appBar: AppBar(title: const Text('Pembayaran')),
-        body: const Center(child: Text('Gagal memuat data.')),
-      ),
-      data: (branch) {
-        final service = branch.services
-            .where((s) => s.id == wizardState.selectedService)
-            .firstOrNull;
-        final selectedAddons = branch.services
-            .expand((s) => s.addons)
-            .where((a) => wizardState.selectedAddonIds.contains(a.id))
-            .toList();
-
-        var total = service?.priceIdr ?? 0;
-        for (final a in selectedAddons) {
-          total += a.priceIdr;
-        }
-
-        final isLoading = submitState is AsyncLoading;
-
-        return PopScope(
-          canPop: !isLoading,
-          child: Scaffold(
-            appBar: AppBar(
-              title: const Text('Pembayaran'),
-              automaticallyImplyLeading: !isLoading,
-            ),
-            body: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _PriceCard(
-                    service: service,
-                    selectedAddons: selectedAddons,
-                    total: total,
-                  ),
-                ],
-              ),
-            ),
-            bottomNavigationBar: _SubmitBar(
-              isLoading: isLoading,
-              total: total,
-              onTap: isLoading
-                  ? null
-                  : () => _submitPayment(
-                      context,
-                      ref,
-                      wizardState,
-                      branch.name,
-                      service?.name ?? '',
-                      total,
-                    ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Future<void> _submitPayment(
-    BuildContext context,
-    WidgetRef ref,
-    dynamic wizard,
-    String branchName,
-    String serviceName,
-    int total,
-  ) async {
-    final response = await ref
-        .read(bookingSubmitProvider.notifier)
-        .submit(wizard);
-
-    if (!context.mounted) return;
-
-    if (response == null) {
-      final errMsg = _friendlyPaymentError(
-        ref.read(bookingSubmitProvider).error,
-      );
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(errMsg),
-          duration: const Duration(seconds: 5),
-          action: SnackBarAction(
-            label: 'Ganti Slot',
-            onPressed: () {
-              if (context.mounted) context.pop();
-            },
-          ),
-        ),
-      );
-      return;
-    }
-
-    // Save to recent bookings
-    final recentBooking = RecentBooking(
-      code: response.code,
-      branchName: branchName,
-      scheduledStart: response.scheduledStart,
-      serviceName: serviceName,
-      totalPriceIdr: response.totalPriceIdr,
-    );
-    await ref.read(recentBookingsProvider.notifier).add(recentBooking);
-
-    // Reset wizard
-    ref.read(bookingWizardProvider(branchId).notifier).reset();
-
-    if (!context.mounted) return;
-
-    // Navigate to payment QR screen with data
-    final routeData = PaymentRouteData(
-      code: response.code,
-      totalPriceIdr: response.totalPriceIdr,
-      scheduledStart: response.scheduledStart,
-      scheduledEnd: response.scheduledEnd,
-      branchName: branchName,
-      serviceName: serviceName,
-      qrString: response.qrString,
-      qrExpiresAt: response.qrExpiresAt,
-      paymentReference: response.paymentReference,
-    );
-
-    // Replace current route so back-button from QR screen goes to wizard.
-    context.replace('/branches/$branchId/book/payment', extra: routeData);
-  }
-
-  String _friendlyPaymentError(Object? raw) {
-    final err = _resolveAppException(raw) ?? raw;
-    if (err is ConflictException) {
-      return 'Slot ini baru saja terisi. Silakan pilih slot lain.';
-    }
-    if (err is NetworkException) {
-      return 'Tidak dapat terhubung ke server. Periksa koneksi internet Anda.';
-    }
-    if (err is RateLimitException) {
-      return 'Terlalu banyak percobaan. Coba lagi sebentar lagi.';
-    }
-    if (err is AppException) {
-      return err.message;
-    }
-    return 'Terjadi kesalahan. Coba lagi.';
-  }
-
-  AppException? _resolveAppException(Object? err) {
-    if (err is AppException) return err;
-    if (err is DioException) {
-      final stashed = err.requestOptions.extra['appException'];
-      if (stashed is AppException) return stashed;
-    }
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Price card sub-widget (used in legacy submit mode)
-// ---------------------------------------------------------------------------
-
-class _PriceCard extends StatelessWidget {
-  const _PriceCard({
-    required this.service,
-    required this.selectedAddons,
-    required this.total,
-  });
-
-  final dynamic service;
-  final List<dynamic> selectedAddons;
-  final int total;
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Rincian Pembayaran',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const Divider(height: 20),
-            if (service != null)
-              _PriceRow('Layanan: ${service.name}', service.priceIdr as int),
-            ...selectedAddons.map(
-              (a) => _PriceRow(a.name as String, a.priceIdr as int),
-            ),
-            const Divider(height: 20),
-            _PriceRow('Total', total, bold: true),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SubmitBar extends StatelessWidget {
-  const _SubmitBar({
-    required this.isLoading,
-    required this.total,
-    required this.onTap,
-  });
-
-  final bool isLoading;
-  final int total;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: EdgeInsets.fromLTRB(
-        16,
-        12,
-        16,
-        12 + MediaQuery.of(context).viewPadding.bottom,
-      ),
-      color: Theme.of(context).colorScheme.surface,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          FilledButton.icon(
-            icon: isLoading
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator.adaptive(strokeWidth: 2),
-                  )
-                : const Icon(Icons.lock_outlined),
-            label: Text(
-              isLoading
-                  ? 'Memproses...'
-                  : 'Bayar — ${CurrencyFormatter.formatRupiah(total)}',
-            ),
-            style: FilledButton.styleFrom(
-              minimumSize: const Size(double.infinity, 52),
-            ),
-            onPressed: onTap,
-          ),
-          if (isLoading)
-            const Padding(
-              padding: EdgeInsets.only(top: 4),
-              child: LinearProgressIndicator(),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PriceRow extends StatelessWidget {
-  const _PriceRow(this.label, this.amount, {this.bold = false});
-
-  final String label;
-  final int amount;
-  final bool bold;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final style = bold
-        ? theme.textTheme.bodyMedium?.copyWith(
-            fontWeight: FontWeight.w700,
-            color: theme.colorScheme.primary,
-          )
-        : theme.textTheme.bodyMedium;
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Expanded(child: Text(label, style: style)),
-          Text(CurrencyFormatter.formatRupiah(amount), style: style),
-        ],
-      ),
-    );
-  }
-}
+// _LegacySubmitPaymentScreen, _PriceCard, _SubmitBar, _PriceRow removed.
+// Booking submission now handled in BookingSelectionScreen before navigating
+// here. PaymentScreen is QR-only post-Phase-6.

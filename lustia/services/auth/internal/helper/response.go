@@ -72,6 +72,10 @@ func RespondDomainError(c *gin.Context, err error) {
 		RespondError(c, http.StatusForbidden, constants.CodeForbidden, "membership not found or not active")
 	case errors.Is(err, constants.ErrDuplicateEmail):
 		RespondError(c, http.StatusConflict, constants.CodeDuplicateEmail, "email already exists")
+	case errors.Is(err, constants.ErrUsernameAlreadyTaken):
+		RespondError(c, http.StatusConflict, constants.CodeUsernameAlreadyTaken, "username already taken")
+	case errors.Is(err, constants.ErrUsernameInvalid):
+		RespondError(c, http.StatusBadRequest, constants.CodeUsernameInvalid, err.Error())
 	case errors.Is(err, constants.ErrConflict):
 		RespondError(c, http.StatusConflict, constants.CodeConflict, "resource conflict")
 	case errors.Is(err, constants.ErrRateLimited):
@@ -149,6 +153,8 @@ func RespondDomainError(c *gin.Context, err error) {
 		RespondError(c, http.StatusConflict, constants.CodeNoRoomAvailable, err.Error())
 	case errors.Is(err, constants.ErrTherapistNotForService):
 		RespondError(c, http.StatusConflict, constants.CodeTherapistNotForService, err.Error())
+	case errors.Is(err, constants.ErrBookingTherapistConflict):
+		RespondError(c, http.StatusConflict, constants.CodeBookingTherapistConflict, err.Error())
 
 	// ADR 0015 — Phase 6 Payment + Settlement.
 	case errors.Is(err, constants.ErrPaymentTransactionNotFound):

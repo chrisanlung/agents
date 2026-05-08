@@ -43,6 +43,14 @@ type PaymentServiceIface interface {
 	// Used by the polling endpoint (ADR 0015 §2.7).
 	GetStatus(ctx context.Context, bookingCode string) (PaymentStatusView, error)
 
+	// GetProviderRefByCode resolves a booking code to its
+	// payment_transaction.provider_reference and the expected amount. Used by
+	// the dev-only dummy-trigger endpoint to synthesise webhook payloads with
+	// the right reference + amount (HandleWebhook does FindByProviderReference
+	// and rejects amount mismatches, so the synthesised payload must carry the
+	// actual reference and the expected amount).
+	GetProviderRefByCode(ctx context.Context, bookingCode string) (DummyTriggerLookup, error)
+
 	// RetryQR generates a new QR code for a booking whose QR has expired but
 	// the booking is still in pending_payment status. Only allowed within the
 	// pending_payment window.
@@ -55,6 +63,18 @@ type PaymentServiceIface interface {
 	// past their qr_expires_at to status=expired. Called from BookingService.SweepExpired
 	// so both tables are swept together (deliverable §5).
 	SweepExpiredTransactions(ctx context.Context) (int, error)
+
+	// VoidTransactionForBooking marks the awaiting payment_transaction row for
+	// bookingID as voided. Called by BookingService.Cancel when the booking is
+	// still in pending_payment status — the customer never completed payment and
+	// the operator is force-cancelling. Safe no-op when no awaiting row exists.
+	VoidTransactionForBooking(ctx context.Context, bookingID string) error
+
+	// SyncStatus polls the payment provider for the current transaction state
+	// of a pending_payment booking and applies the appropriate transition.
+	// Idempotent: repeated calls are safe via WHERE status='awaiting' conditional UPDATEs.
+	// Returns the updated booking detail plus a human-readable sync result.
+	SyncStatus(ctx context.Context, in SyncPaymentInput) (SyncPaymentResult, error)
 }
 
 // NewPaymentService constructs a paymentServiceImpl and returns it as PaymentServiceIface.
@@ -158,6 +178,12 @@ func (s *paymentServiceImpl) InitiateForBooking(
 // Both booking.status and payment_transaction.status are updated in the same
 // DB transaction via the per-request tx started by the tenant middleware.
 func (s *paymentServiceImpl) HandleWebhook(ctx context.Context, rawPayload []byte, headers map[string]string) error {
+	// Pivot RLS to __public__ — webhook is hit by iPaymu (no JWT) so the
+	// default __platform__ context blocks every payment_transaction query.
+	if err := s.tx.SetTenantContext(ctx, constants.PublicTenantSentinel, ""); err != nil {
+		return fmt.Errorf("set public tenant context: %w", err)
+	}
+
 	// Adapter verifies signature + parses the notification.
 	notif, err := s.provider.VerifyWebhook(ctx, rawPayload, headers)
 	if err != nil {
@@ -179,6 +205,14 @@ func (s *paymentServiceImpl) HandleWebhook(ctx context.Context, rawPayload []byt
 			return nil
 		}
 		return fmt.Errorf("webhook find payment_transaction: %w", err)
+	}
+
+	// Pivot RLS to the row's tenant — public read policies allow the SELECT
+	// above, but UPDATE policies on payment_transaction and booking only match
+	// when app.current_tenant equals the row's tenant_id. Without this pivot,
+	// MarkPaid silently filters to zero rows.
+	if err := s.tx.SetTenantContext(ctx, ptxn.TenantID, ""); err != nil {
+		return fmt.Errorf("set tenant context for credit: %w", err)
 	}
 
 	// H-4: Amount-mismatch guard. If received < expected, audit log + no-op.
@@ -270,8 +304,15 @@ func (s *paymentServiceImpl) HandleWebhook(ctx context.Context, rawPayload []byt
 
 // GetStatus returns the payment status for a booking identified by its code.
 // Used by the polling endpoint (ADR 0015 §2.7).
-// RLS context must be set to __public__ by the caller before this returns.
+// Pivots RLS to the __public__ sentinel before lookup so unauthenticated
+// callers (the customer mobile app) can read the booking + payment_transaction
+// without holding a JWT. Same pattern as ListPublicBranches /
+// GetPublicBranchDetail / CreatePublic.
 func (s *paymentServiceImpl) GetStatus(ctx context.Context, bookingCode string) (PaymentStatusView, error) {
+	if err := s.tx.SetTenantContext(ctx, constants.PublicTenantSentinel, ""); err != nil {
+		return PaymentStatusView{}, fmt.Errorf("set public tenant context: %w", err)
+	}
+
 	b, err := s.bookings.FindByCodePublic(ctx, bookingCode)
 	if err != nil {
 		return PaymentStatusView{}, constants.ErrBookingNotFound
@@ -291,6 +332,36 @@ func (s *paymentServiceImpl) GetStatus(ctx context.Context, bookingCode string) 
 		Status:      ptxn.Status,
 		PaidAt:      ptxn.PaidAt,
 		QRExpiresAt: ptxn.QRExpiresAt,
+	}, nil
+}
+
+// DummyTriggerLookup carries the fields the dev-only dummy-trigger endpoint
+// needs to synthesise a webhook payload that survives HandleWebhook's
+// amount-mismatch guard.
+type DummyTriggerLookup struct {
+	ProviderReference string
+	ExpectedAmountIDR int64
+}
+
+// GetProviderRefByCode looks up the payment_transaction's provider_reference
+// and expected amount for a booking identified by its public code. Used by
+// the dev-only dummy-trigger endpoint to synthesise webhook payloads with the
+// correct reference + amount. Pivots RLS to __public__ for the lookup.
+func (s *paymentServiceImpl) GetProviderRefByCode(ctx context.Context, bookingCode string) (DummyTriggerLookup, error) {
+	if err := s.tx.SetTenantContext(ctx, constants.PublicTenantSentinel, ""); err != nil {
+		return DummyTriggerLookup{}, fmt.Errorf("set public tenant context: %w", err)
+	}
+	b, err := s.bookings.FindByCodePublic(ctx, bookingCode)
+	if err != nil {
+		return DummyTriggerLookup{}, constants.ErrBookingNotFound
+	}
+	ptxn, err := s.paymentTxns.FindByBookingID(ctx, b.ID)
+	if err != nil {
+		return DummyTriggerLookup{}, err
+	}
+	return DummyTriggerLookup{
+		ProviderReference: ptxn.ProviderReference,
+		ExpectedAmountIDR: ptxn.ExpectedAmountIDR,
 	}, nil
 }
 
@@ -350,6 +421,150 @@ func (s *paymentServiceImpl) RetryQR(ctx context.Context, bookingID string) (Ini
 		QRString:          qrResp.QRString,
 		QRImageURL:        qrResp.QRImageURL,
 		QRExpiresAt:       qrResp.ExpiresAt,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// VoidTransactionForBooking
+// ---------------------------------------------------------------------------
+
+// VoidTransactionForBooking marks the awaiting payment_transaction for bookingID
+// as voided. Safe no-op when no awaiting row exists (rowsAffected == 0).
+func (s *paymentServiceImpl) VoidTransactionForBooking(ctx context.Context, bookingID string) error {
+	_, err := s.paymentTxns.MarkVoided(ctx, bookingID)
+	if err != nil {
+		return fmt.Errorf("void transaction for booking %s: %w", bookingID, err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// SyncStatus
+// ---------------------------------------------------------------------------
+
+// SyncStatus polls the payment provider for the current transaction state
+// of a booking and applies the appropriate transition. Idempotent.
+//
+// Flow:
+//  1. Lookup booking; enforce cross-tenant + branch-scope guard.
+//  2. If booking.status != pending_payment → return no_op (already resolved).
+//  3. Lookup payment_transaction by booking_id.
+//  4. Call provider.GetStatus(providerReference).
+//  5. Apply transition:
+//     - Paid    → MarkPaid (H-5: WHERE status='awaiting') + booking → paid.
+//     - Expired / Failed → MarkVoided-style update to expired/failed + booking → expired.
+//     - Pending → no_op.
+//  6. Emit audit log entry payment.synced_manually.
+func (s *paymentServiceImpl) SyncStatus(ctx context.Context, in SyncPaymentInput) (SyncPaymentResult, error) {
+	b, err := s.bookings.FindByID(ctx, in.BookingID)
+	if err != nil {
+		return SyncPaymentResult{}, err
+	}
+
+	// Cross-tenant guard.
+	if b.TenantID != in.CallerTenantID {
+		return SyncPaymentResult{}, constants.ErrBookingNotFound
+	}
+
+	// Branch-scope guard (mirrors Cancel / CheckIn pattern).
+	if !in.IsAdmin && !containsBranch(in.CallerBranches, b.BranchID) {
+		return SyncPaymentResult{}, constants.ErrCrossBranchForbidden
+	}
+
+	// If the booking is not pending_payment there is nothing to sync.
+	if b.Status != model.BookingStatusPendingPayment {
+		return SyncPaymentResult{
+			ProviderStatus: ProviderStatusPending,
+			ActionTaken:    "no_op",
+			BookingID:      b.ID,
+		}, nil
+	}
+
+	// Lookup the payment_transaction.
+	ptxn, err := s.paymentTxns.FindByBookingID(ctx, b.ID)
+	if err != nil {
+		return SyncPaymentResult{}, fmt.Errorf("sync_status find payment_transaction: %w", err)
+	}
+
+	// Poll provider.
+	provStatus, err := s.provider.GetStatus(ctx, ptxn.ProviderReference)
+	if err != nil {
+		return SyncPaymentResult{}, fmt.Errorf("sync_status provider get_status: %w", err)
+	}
+
+	now := s.clock.Now()
+	action := "no_op"
+
+	switch provStatus {
+	case ProviderStatusPaid:
+		// Reuse the same MarkPaid + booking transition path as the webhook handler.
+		rows, markErr := s.paymentTxns.MarkPaid(ctx, ptxn.ProviderReference, ptxn.ExpectedAmountIDR, now, nil)
+		if markErr != nil {
+			return SyncPaymentResult{}, fmt.Errorf("sync_status mark_paid: %w", markErr)
+		}
+		if rows > 0 {
+			paidAtStr := now.Format(time.RFC3339)
+			ref := ptxn.ProviderReference
+			_, bookingErr := s.bookings.TransitionStatus(ctx, TransitionStatusInput{
+				BookingID:        b.ID,
+				ExpectedStatus:   model.BookingStatusPendingPayment,
+				NewStatus:        model.BookingStatusPaid,
+				PaidAt:           &paidAtStr,
+				PaymentReference: &ref,
+			})
+			if bookingErr != nil {
+				slog.ErrorContext(ctx, "sync_status: failed to transition booking to paid (payment_transaction already paid)",
+					"booking_id", b.ID, "error", bookingErr)
+			}
+		}
+		action = "paid"
+
+	case ProviderStatusExpired, ProviderStatusFailed:
+		// Mark payment_transaction expired or failed via dedicated repo methods.
+		// Both use WHERE status='awaiting' for idempotency.
+		var txnMarkErr error
+		if provStatus == ProviderStatusFailed {
+			_, txnMarkErr = s.paymentTxns.MarkFailed(ctx, b.ID)
+		} else {
+			_, txnMarkErr = s.paymentTxns.MarkExpired(ctx, b.ID)
+		}
+		if txnMarkErr != nil {
+			slog.WarnContext(ctx, "sync_status: mark payment_transaction terminal status",
+				"booking_id", b.ID, "provider_status", string(provStatus), "error", txnMarkErr)
+		}
+		_, bookingErr := s.bookings.TransitionStatus(ctx, TransitionStatusInput{
+			BookingID:      b.ID,
+			ExpectedStatus: model.BookingStatusPendingPayment,
+			NewStatus:      model.BookingStatusExpired,
+		})
+		if bookingErr != nil {
+			slog.ErrorContext(ctx, "sync_status: failed to transition booking to expired",
+				"booking_id", b.ID, "error", bookingErr)
+		}
+		action = string(provStatus) // "expired" or "failed"
+
+	default: // ProviderStatusPending
+		action = "no_op"
+	}
+
+	_ = s.audit.Append(ctx, AuditEntry{
+		TenantID:     &b.TenantID,
+		ActorUserID:  &in.CallerUserID,
+		Action:       "payment.synced_manually",
+		ResourceType: "payment_transaction",
+		ResourceID:   ptxn.ID,
+		Meta: map[string]interface{}{
+			"booking_id":         b.ID,
+			"provider_reference": ptxn.ProviderReference,
+			"provider_status":    string(provStatus),
+			"action_taken":       action,
+		},
+	})
+
+	return SyncPaymentResult{
+		ProviderStatus: provStatus,
+		ActionTaken:    action,
+		BookingID:      b.ID,
 	}, nil
 }
 

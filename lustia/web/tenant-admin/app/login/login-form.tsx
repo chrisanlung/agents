@@ -20,7 +20,16 @@ import {
 import { loginAction, type LoginFormState } from "./actions";
 
 const schema = z.object({
-  email: z.string().email("Masukkan alamat email yang valid"),
+  identifier: z
+    .string()
+    .min(3, "Masukkan email atau username yang valid")
+    .max(320, "Masukkan email atau username yang valid")
+    .refine(
+      (v) =>
+        /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ||
+        /^[a-zA-Z0-9._]{3,50}$/.test(v),
+      "Masukkan email atau username yang valid"
+    ),
   password: z.string().min(1, "Kata sandi wajib diisi"),
 });
 
@@ -36,17 +45,19 @@ export function LoginForm() {
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
-    defaultValues: { email: "", password: "" },
+    defaultValues: { identifier: "", password: "" },
   });
 
   useEffect(() => {
-    if (state.status === "error" && state.toast) {
+    // state can be undefined briefly when the server action calls redirect():
+    // useActionState returns nothing for that round-trip, so guard with ?.
+    if (state?.status === "error" && state.toast) {
       toast.error(state.toast);
     }
   }, [state]);
 
   useEffect(() => {
-    if (state.status === "error" && state.fieldErrors) {
+    if (state?.status === "error" && state.fieldErrors) {
       for (const [field, messages] of Object.entries(state.fieldErrors)) {
         form.setError(field as keyof FormValues, {
           message: messages[0],
@@ -60,15 +71,15 @@ export function LoginForm() {
       <form action={formAction} className="space-y-6">
         <FormField
           control={form.control}
-          name="email"
+          name="identifier"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Alamat Email</FormLabel>
+              <FormLabel>Email atau Username</FormLabel>
               <FormControl>
                 <Input
-                  type="email"
-                  autoComplete="email"
-                  placeholder="admin@tenant.example"
+                  type="text"
+                  autoComplete="username"
+                  placeholder="alice@spa.com atau alice"
                   {...field}
                 />
               </FormControl>
