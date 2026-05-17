@@ -1,0 +1,1108 @@
+{
+	"info": {
+		"_postman_id": "a1b2c3d4-uat-lustia-collection-001",
+		"name": "Lustia UAT — auth-service",
+		"description": "Full endpoint collection untuk testing UAT di http://43.129.55.236:8080.\n\n## Cara pakai\n1. Import file ini ke Postman.\n2. Set variabel `super_email` + `super_password` (super-admin), `tenant_email` + `tenant_password` (tenant-admin), dst.\n3. Jalankan request **Login** — token disimpan otomatis ke variable.\n4. Request lain memakai Bearer token via `{{super_token}}` atau `{{tenant_token}}`.\n\n## Catatan\n- Semua tenant-scoped endpoint memakai `{{tenant_token}}`.\n- Public booking/branch endpoints tidak butuh JWT.\n- Webhook iPaymu di-mock; untuk test pakai endpoint dummy-trigger.\n",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{ "key": "base_url", "value": "http://43.129.55.236:8080", "type": "string" },
+		{ "key": "api", "value": "{{base_url}}/api/v1", "type": "string" },
+		{ "key": "super_email", "value": "harisa.septenus@meditap.id", "type": "string" },
+		{ "key": "super_password", "value": "ChangeMe123!", "type": "string" },
+		{ "key": "tenant_email", "value": "", "type": "string" },
+		{ "key": "tenant_password", "value": "", "type": "string" },
+		{ "key": "super_token", "value": "", "type": "string" },
+		{ "key": "super_refresh_token", "value": "", "type": "string" },
+		{ "key": "tenant_token", "value": "", "type": "string" },
+		{ "key": "tenant_refresh_token", "value": "", "type": "string" },
+		{ "key": "tenant_id", "value": "", "type": "string" },
+		{ "key": "branch_id", "value": "", "type": "string" },
+		{ "key": "service_id", "value": "", "type": "string" },
+		{ "key": "therapist_id", "value": "", "type": "string" },
+		{ "key": "room_id", "value": "", "type": "string" },
+		{ "key": "addon_id", "value": "", "type": "string" },
+		{ "key": "booking_id", "value": "", "type": "string" },
+		{ "key": "booking_code", "value": "", "type": "string" },
+		{ "key": "user_id", "value": "", "type": "string" },
+		{ "key": "registration_id", "value": "", "type": "string" },
+		{ "key": "disbursement_id", "value": "", "type": "string" },
+		{ "key": "settlement_batch_id", "value": "", "type": "string" }
+	],
+	"item": [
+		{
+			"name": "0 · Health & Discovery",
+			"item": [
+				{
+					"name": "GET /healthz",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/healthz", "host": ["{{base_url}}"], "path": ["healthz"] }
+					}
+				},
+				{
+					"name": "GET /readyz",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/readyz", "host": ["{{base_url}}"], "path": ["readyz"] }
+					}
+				},
+				{
+					"name": "GET /.well-known/jwks.json",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{base_url}}/.well-known/jwks.json", "host": ["{{base_url}}"], "path": [".well-known", "jwks.json"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "1 · Auth (public)",
+			"item": [
+				{
+					"name": "POST /auth/login — super-admin",
+					"event": [{
+						"listen": "test",
+						"script": {
+							"type": "text/javascript",
+							"exec": [
+								"if (pm.response.code === 200) {",
+								"  const d = pm.response.json();",
+								"  pm.collectionVariables.set('super_token', d.access_token);",
+								"  pm.collectionVariables.set('super_refresh_token', d.refresh_token);",
+								"  console.log('saved super_token');",
+								"}"
+							]
+						}
+					}],
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\n  \"email\": \"{{super_email}}\",\n  \"password\": \"{{super_password}}\"\n}" },
+						"url": { "raw": "{{api}}/auth/login", "host": ["{{api}}"], "path": ["auth", "login"] }
+					}
+				},
+				{
+					"name": "POST /auth/login — tenant-admin",
+					"event": [{
+						"listen": "test",
+						"script": {
+							"type": "text/javascript",
+							"exec": [
+								"if (pm.response.code === 200) {",
+								"  const d = pm.response.json();",
+								"  pm.collectionVariables.set('tenant_token', d.access_token);",
+								"  pm.collectionVariables.set('tenant_refresh_token', d.refresh_token);",
+								"  if (d.tenant_id) pm.collectionVariables.set('tenant_id', d.tenant_id);",
+								"  console.log('saved tenant_token');",
+								"}"
+							]
+						}
+					}],
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\n  \"email\": \"{{tenant_email}}\",\n  \"password\": \"{{tenant_password}}\"\n}" },
+						"url": { "raw": "{{api}}/auth/login", "host": ["{{api}}"], "path": ["auth", "login"] }
+					}
+				},
+				{
+					"name": "POST /auth/refresh",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\n  \"refresh_token\": \"{{tenant_refresh_token}}\"\n}" },
+						"url": { "raw": "{{api}}/auth/refresh", "host": ["{{api}}"], "path": ["auth", "refresh"] }
+					}
+				},
+				{
+					"name": "POST /auth/password/forgot",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\n  \"email\": \"{{tenant_email}}\"\n}" },
+						"url": { "raw": "{{api}}/auth/password/forgot", "host": ["{{api}}"], "path": ["auth", "password", "forgot"] }
+					}
+				},
+				{
+					"name": "POST /auth/password/reset",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\n  \"token\": \"<reset-token-from-email>\",\n  \"new_password\": \"NewPass123!\"\n}" },
+						"url": { "raw": "{{api}}/auth/password/reset", "host": ["{{api}}"], "path": ["auth", "password", "reset"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "2 · Auth (secured)",
+			"item": [
+				{
+					"name": "GET /auth/me",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/auth/me", "host": ["{{api}}"], "path": ["auth", "me"] }
+					}
+				},
+				{
+					"name": "PATCH /auth/me",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"full_name\": \"Nama Baru\"\n}" },
+						"url": { "raw": "{{api}}/auth/me", "host": ["{{api}}"], "path": ["auth", "me"] }
+					}
+				},
+				{
+					"name": "POST /auth/me/password (change)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"current_password\": \"{{tenant_password}}\",\n  \"new_password\": \"NewPass123!\"\n}" },
+						"url": { "raw": "{{api}}/auth/me/password", "host": ["{{api}}"], "path": ["auth", "me", "password"] }
+					}
+				},
+				{
+					"name": "POST /auth/select-tenant",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\"\n}" },
+						"url": { "raw": "{{api}}/auth/select-tenant", "host": ["{{api}}"], "path": ["auth", "select-tenant"] }
+					}
+				},
+				{
+					"name": "POST /auth/logout",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"refresh_token\": \"{{tenant_refresh_token}}\"\n}" },
+						"url": { "raw": "{{api}}/auth/logout", "host": ["{{api}}"], "path": ["auth", "logout"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "3 · Tenant Registration",
+			"item": [
+				{
+					"name": "POST /register/company (public)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\n  \"company_name\": \"Spa UAT Demo\",\n  \"company_slug\": \"spa-uat-demo\",\n  \"company_email\": \"owner@spa-uat.demo\",\n  \"contact_name\": \"Owner UAT\",\n  \"contact_phone\": \"+628111111111\",\n  \"contact_email\": \"owner@spa-uat.demo\"\n}" },
+						"url": { "raw": "{{api}}/register/company", "host": ["{{api}}"], "path": ["register", "company"] }
+					}
+				},
+				{
+					"name": "GET /admin/tenant-registrations",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{super_token}}" }],
+						"url": { "raw": "{{api}}/admin/tenant-registrations?page=1&limit=20", "host": ["{{api}}"], "path": ["admin", "tenant-registrations"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }] }
+					}
+				},
+				{
+					"name": "GET /admin/tenant-registrations/:id",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{super_token}}" }],
+						"url": { "raw": "{{api}}/admin/tenant-registrations/{{registration_id}}", "host": ["{{api}}"], "path": ["admin", "tenant-registrations", "{{registration_id}}"] }
+					}
+				},
+				{
+					"name": "POST /admin/tenant-registrations/:id/approve",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{super_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{}" },
+						"url": { "raw": "{{api}}/admin/tenant-registrations/{{registration_id}}/approve", "host": ["{{api}}"], "path": ["admin", "tenant-registrations", "{{registration_id}}", "approve"] }
+					}
+				},
+				{
+					"name": "POST /admin/tenant-registrations/:id/reject",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{super_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"reason\": \"Tidak memenuhi syarat\"\n}" },
+						"url": { "raw": "{{api}}/admin/tenant-registrations/{{registration_id}}/reject", "host": ["{{api}}"], "path": ["admin", "tenant-registrations", "{{registration_id}}", "reject"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "4 · Admin · Users & Roles",
+			"item": [
+				{
+					"name": "GET /admin/users",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/admin/users?page=1&limit=20", "host": ["{{api}}"], "path": ["admin", "users"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }] }
+					}
+				},
+				{
+					"name": "POST /admin/users",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"email\": \"staff1@spa-uat.demo\",\n  \"full_name\": \"Staff Satu\",\n  \"role_ids\": [],\n  \"branch_ids\": [\"{{branch_id}}\"]\n}" },
+						"url": { "raw": "{{api}}/admin/users", "host": ["{{api}}"], "path": ["admin", "users"] }
+					}
+				},
+				{
+					"name": "GET /admin/users/:id",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/admin/users/{{user_id}}", "host": ["{{api}}"], "path": ["admin", "users", "{{user_id}}"] }
+					}
+				},
+				{
+					"name": "PATCH /admin/users/:id",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"full_name\": \"Staff Diperbarui\",\n  \"role_ids\": [],\n  \"branch_ids\": [\"{{branch_id}}\"]\n}" },
+						"url": { "raw": "{{api}}/admin/users/{{user_id}}", "host": ["{{api}}"], "path": ["admin", "users", "{{user_id}}"] }
+					}
+				},
+				{
+					"name": "POST /admin/users/:id/unlock",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/admin/users/{{user_id}}/unlock", "host": ["{{api}}"], "path": ["admin", "users", "{{user_id}}", "unlock"] }
+					}
+				},
+				{
+					"name": "GET /admin/roles",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/admin/roles", "host": ["{{api}}"], "path": ["admin", "roles"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "5 · Admin · Tenants",
+			"item": [
+				{
+					"name": "GET /admin/tenants/:id",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{super_token}}" }],
+						"url": { "raw": "{{api}}/admin/tenants/{{tenant_id}}", "host": ["{{api}}"], "path": ["admin", "tenants", "{{tenant_id}}"] }
+					}
+				},
+				{
+					"name": "PATCH /admin/tenants/:id/status",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{super_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"status\": \"active\"\n}" },
+						"url": { "raw": "{{api}}/admin/tenants/{{tenant_id}}/status", "host": ["{{api}}"], "path": ["admin", "tenants", "{{tenant_id}}", "status"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "6 · Tenant · Branches",
+			"item": [
+				{
+					"name": "GET /tenant/onboarding-state",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/onboarding-state", "host": ["{{api}}"], "path": ["tenant", "onboarding-state"] }
+					}
+				},
+				{
+					"name": "POST /tenant/branches",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"name\": \"Cabang Utama\",\n  \"code\": \"BR-001\",\n  \"address_line1\": \"Jl. Test 123\",\n  \"city\": \"Jakarta\",\n  \"province\": \"DKI Jakarta\",\n  \"postal_code\": \"12345\",\n  \"country\": \"ID\",\n  \"timezone\": \"Asia/Jakarta\",\n  \"contact_phone\": \"+62812345\",\n  \"contact_email\": \"branch@spa-uat.demo\"\n}" },
+						"url": { "raw": "{{api}}/tenant/branches", "host": ["{{api}}"], "path": ["tenant", "branches"] }
+					}
+				},
+				{
+					"name": "GET /tenant/branches",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/branches?page=1&limit=20", "host": ["{{api}}"], "path": ["tenant", "branches"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }] }
+					}
+				},
+				{
+					"name": "GET /tenant/branches/:id",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/branches/{{branch_id}}", "host": ["{{api}}"], "path": ["tenant", "branches", "{{branch_id}}"] }
+					}
+				},
+				{
+					"name": "PATCH /tenant/branches/:id",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"name\": \"Cabang Utama Diupdate\",\n  \"operational_hours\": {\n    \"mon\": \"09:00-22:00\", \"tue\": \"09:00-22:00\", \"wed\": \"09:00-22:00\",\n    \"thu\": \"09:00-22:00\", \"fri\": \"09:00-22:00\", \"sat\": \"09:00-22:00\", \"sun\": null\n  }\n}" },
+						"url": { "raw": "{{api}}/tenant/branches/{{branch_id}}", "host": ["{{api}}"], "path": ["tenant", "branches", "{{branch_id}}"] }
+					}
+				},
+				{
+					"name": "PATCH /tenant/branches/:id/status",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"status\": \"active\"\n}" },
+						"url": { "raw": "{{api}}/tenant/branches/{{branch_id}}/status", "host": ["{{api}}"], "path": ["tenant", "branches", "{{branch_id}}", "status"] }
+					}
+				},
+				{
+					"name": "DELETE /tenant/branches/:id",
+					"request": {
+						"method": "DELETE",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/branches/{{branch_id}}", "host": ["{{api}}"], "path": ["tenant", "branches", "{{branch_id}}"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "7 · Tenant · Services",
+			"item": [
+				{
+					"name": "GET /tenant/services",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/services?page=1&limit=20", "host": ["{{api}}"], "path": ["tenant", "services"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }] }
+					}
+				},
+				{
+					"name": "POST /tenant/services",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"name\": \"Pijat Relaksasi 60 menit\",\n  \"category\": \"Pijat\",\n  \"duration_minutes\": 60,\n  \"price_idr\": 350000\n}" },
+						"url": { "raw": "{{api}}/tenant/services", "host": ["{{api}}"], "path": ["tenant", "services"] }
+					}
+				},
+				{
+					"name": "GET /tenant/services/:id",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/services/{{service_id}}", "host": ["{{api}}"], "path": ["tenant", "services", "{{service_id}}"] }
+					}
+				},
+				{
+					"name": "PATCH /tenant/services/:id",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"price_idr\": 380000\n}" },
+						"url": { "raw": "{{api}}/tenant/services/{{service_id}}", "host": ["{{api}}"], "path": ["tenant", "services", "{{service_id}}"] }
+					}
+				},
+				{
+					"name": "PATCH /tenant/services/:id/status",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"is_active\": true\n}" },
+						"url": { "raw": "{{api}}/tenant/services/{{service_id}}/status", "host": ["{{api}}"], "path": ["tenant", "services", "{{service_id}}", "status"] }
+					}
+				},
+				{
+					"name": "DELETE /tenant/services/:id",
+					"request": {
+						"method": "DELETE",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/services/{{service_id}}", "host": ["{{api}}"], "path": ["tenant", "services", "{{service_id}}"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "8 · Tenant · Therapists & Mapping",
+			"item": [
+				{
+					"name": "GET /tenant/therapists",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/therapists?page=1&limit=20&branch_id={{branch_id}}", "host": ["{{api}}"], "path": ["tenant", "therapists"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }, { "key": "branch_id", "value": "{{branch_id}}" }] }
+					}
+				},
+				{
+					"name": "POST /tenant/therapists",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"branch_id\": \"{{branch_id}}\",\n  \"full_name\": \"Sirena UAT\",\n  \"gender\": \"female\",\n  \"phone\": \"+628100000001\",\n  \"height_cm\": 160,\n  \"weight_kg\": 55,\n  \"build\": \"langsing\",\n  \"prep_minutes\": 15\n}" },
+						"url": { "raw": "{{api}}/tenant/therapists", "host": ["{{api}}"], "path": ["tenant", "therapists"] }
+					}
+				},
+				{
+					"name": "GET /tenant/therapists/:id",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/therapists/{{therapist_id}}", "host": ["{{api}}"], "path": ["tenant", "therapists", "{{therapist_id}}"] }
+					}
+				},
+				{
+					"name": "PATCH /tenant/therapists/:id",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"prep_minutes\": 10\n}" },
+						"url": { "raw": "{{api}}/tenant/therapists/{{therapist_id}}", "host": ["{{api}}"], "path": ["tenant", "therapists", "{{therapist_id}}"] }
+					}
+				},
+				{
+					"name": "PATCH /tenant/therapists/:id/status",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"is_active\": true\n}" },
+						"url": { "raw": "{{api}}/tenant/therapists/{{therapist_id}}/status", "host": ["{{api}}"], "path": ["tenant", "therapists", "{{therapist_id}}", "status"] }
+					}
+				},
+				{
+					"name": "DELETE /tenant/therapists/:id",
+					"request": {
+						"method": "DELETE",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/therapists/{{therapist_id}}", "host": ["{{api}}"], "path": ["tenant", "therapists", "{{therapist_id}}"] }
+					}
+				},
+				{
+					"name": "POST /tenant/therapists/:id/photo (multipart)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"body": { "mode": "formdata", "formdata": [{ "key": "photo", "type": "file", "src": "" }] },
+						"url": { "raw": "{{api}}/tenant/therapists/{{therapist_id}}/photo", "host": ["{{api}}"], "path": ["tenant", "therapists", "{{therapist_id}}", "photo"] }
+					}
+				},
+				{
+					"name": "DELETE /tenant/therapists/:id/photo",
+					"request": {
+						"method": "DELETE",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/therapists/{{therapist_id}}/photo", "host": ["{{api}}"], "path": ["tenant", "therapists", "{{therapist_id}}", "photo"] }
+					}
+				},
+				{
+					"name": "GET /tenant/therapists/:id/services",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/therapists/{{therapist_id}}/services", "host": ["{{api}}"], "path": ["tenant", "therapists", "{{therapist_id}}", "services"] }
+					}
+				},
+				{
+					"name": "PUT /tenant/therapists/:id/services (set mapping)",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"service_ids\": [\"{{service_id}}\"]\n}" },
+						"url": { "raw": "{{api}}/tenant/therapists/{{therapist_id}}/services", "host": ["{{api}}"], "path": ["tenant", "therapists", "{{therapist_id}}", "services"] }
+					}
+				},
+				{
+					"name": "GET /tenant/therapists/:id/availability",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/therapists/{{therapist_id}}/availability", "host": ["{{api}}"], "path": ["tenant", "therapists", "{{therapist_id}}", "availability"] }
+					}
+				},
+				{
+					"name": "PUT /tenant/therapists/:id/availability (set weekly schedule)",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"availabilities\": [\n    { \"day_of_week\": 1, \"start_time\": \"09:00\", \"end_time\": \"22:00\" },\n    { \"day_of_week\": 2, \"start_time\": \"09:00\", \"end_time\": \"22:00\" },\n    { \"day_of_week\": 3, \"start_time\": \"09:00\", \"end_time\": \"22:00\" },\n    { \"day_of_week\": 4, \"start_time\": \"09:00\", \"end_time\": \"22:00\" },\n    { \"day_of_week\": 5, \"start_time\": \"09:00\", \"end_time\": \"22:00\" },\n    { \"day_of_week\": 6, \"start_time\": \"09:00\", \"end_time\": \"22:00\" }\n  ]\n}" },
+						"url": { "raw": "{{api}}/tenant/therapists/{{therapist_id}}/availability", "host": ["{{api}}"], "path": ["tenant", "therapists", "{{therapist_id}}", "availability"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "9 · Tenant · Addons",
+			"item": [
+				{
+					"name": "GET /tenant/addons",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/addons?page=1&limit=20", "host": ["{{api}}"], "path": ["tenant", "addons"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }] }
+					}
+				},
+				{
+					"name": "POST /tenant/addons",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"name\": \"Aromatherapy\",\n  \"description\": \"Tambahan aromaterapi\",\n  \"price_idr\": 15000\n}" },
+						"url": { "raw": "{{api}}/tenant/addons", "host": ["{{api}}"], "path": ["tenant", "addons"] }
+					}
+				},
+				{
+					"name": "GET /tenant/addons/:id",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/addons/{{addon_id}}", "host": ["{{api}}"], "path": ["tenant", "addons", "{{addon_id}}"] }
+					}
+				},
+				{
+					"name": "PATCH /tenant/addons/:id",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"price_idr\": 20000\n}" },
+						"url": { "raw": "{{api}}/tenant/addons/{{addon_id}}", "host": ["{{api}}"], "path": ["tenant", "addons", "{{addon_id}}"] }
+					}
+				},
+				{
+					"name": "PATCH /tenant/addons/:id/status",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"is_active\": true\n}" },
+						"url": { "raw": "{{api}}/tenant/addons/{{addon_id}}/status", "host": ["{{api}}"], "path": ["tenant", "addons", "{{addon_id}}", "status"] }
+					}
+				},
+				{
+					"name": "DELETE /tenant/addons/:id",
+					"request": {
+						"method": "DELETE",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/addons/{{addon_id}}", "host": ["{{api}}"], "path": ["tenant", "addons", "{{addon_id}}"] }
+					}
+				},
+				{
+					"name": "PUT /tenant/addons/reorder",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"addon_ids\": [\"{{addon_id}}\"]\n}" },
+						"url": { "raw": "{{api}}/tenant/addons/reorder", "host": ["{{api}}"], "path": ["tenant", "addons", "reorder"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "10 · Tenant · Rooms",
+			"item": [
+				{
+					"name": "GET /tenant/rooms",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/rooms?page=1&limit=20&branch_id={{branch_id}}", "host": ["{{api}}"], "path": ["tenant", "rooms"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }, { "key": "branch_id", "value": "{{branch_id}}" }] }
+					}
+				},
+				{
+					"name": "POST /tenant/rooms",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"branch_id\": \"{{branch_id}}\",\n  \"name\": \"Tera 1\",\n  \"room_type\": \"single\",\n  \"capacity\": 1,\n  \"amenities\": [\"aromaterapi\"]\n}" },
+						"url": { "raw": "{{api}}/tenant/rooms", "host": ["{{api}}"], "path": ["tenant", "rooms"] }
+					}
+				},
+				{
+					"name": "GET /tenant/rooms/:id",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/rooms/{{room_id}}", "host": ["{{api}}"], "path": ["tenant", "rooms", "{{room_id}}"] }
+					}
+				},
+				{
+					"name": "PATCH /tenant/rooms/:id",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"name\": \"Tera 1 Diupdate\"\n}" },
+						"url": { "raw": "{{api}}/tenant/rooms/{{room_id}}", "host": ["{{api}}"], "path": ["tenant", "rooms", "{{room_id}}"] }
+					}
+				},
+				{
+					"name": "PATCH /tenant/rooms/:id/status",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"is_active\": true\n}" },
+						"url": { "raw": "{{api}}/tenant/rooms/{{room_id}}/status", "host": ["{{api}}"], "path": ["tenant", "rooms", "{{room_id}}", "status"] }
+					}
+				},
+				{
+					"name": "DELETE /tenant/rooms/:id",
+					"request": {
+						"method": "DELETE",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/rooms/{{room_id}}", "host": ["{{api}}"], "path": ["tenant", "rooms", "{{room_id}}"] }
+					}
+				},
+				{
+					"name": "POST /tenant/rooms/:id/photo (multipart)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"body": { "mode": "formdata", "formdata": [{ "key": "photo", "type": "file", "src": "" }] },
+						"url": { "raw": "{{api}}/tenant/rooms/{{room_id}}/photo", "host": ["{{api}}"], "path": ["tenant", "rooms", "{{room_id}}", "photo"] }
+					}
+				},
+				{
+					"name": "DELETE /tenant/rooms/:id/photo",
+					"request": {
+						"method": "DELETE",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/rooms/{{room_id}}/photo", "host": ["{{api}}"], "path": ["tenant", "rooms", "{{room_id}}", "photo"] }
+					}
+				},
+				{
+					"name": "PUT /tenant/rooms/reorder",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"branch_id\": \"{{branch_id}}\",\n  \"room_ids\": [\"{{room_id}}\"]\n}" },
+						"url": { "raw": "{{api}}/tenant/rooms/reorder", "host": ["{{api}}"], "path": ["tenant", "rooms", "reorder"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "11 · Public · Branches & Booking",
+			"item": [
+				{
+					"name": "GET /public/branches",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{api}}/public/branches?page=1&limit=20", "host": ["{{api}}"], "path": ["public", "branches"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }] }
+					}
+				},
+				{
+					"name": "GET /public/branches/:id",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{api}}/public/branches/{{branch_id}}", "host": ["{{api}}"], "path": ["public", "branches", "{{branch_id}}"] }
+					}
+				},
+				{
+					"name": "GET /public/branches/:id/availability",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{api}}/public/branches/{{branch_id}}/availability?service_id={{service_id}}&date=2026-05-08", "host": ["{{api}}"], "path": ["public", "branches", "{{branch_id}}", "availability"], "query": [{ "key": "service_id", "value": "{{service_id}}" }, { "key": "date", "value": "2026-05-08" }, { "key": "therapist_id", "value": "{{therapist_id}}", "disabled": true }] }
+					}
+				},
+				{
+					"name": "POST /public/bookings (create)",
+					"event": [{
+						"listen": "test",
+						"script": {
+							"type": "text/javascript",
+							"exec": [
+								"if (pm.response.code === 201 || pm.response.code === 200) {",
+								"  const d = pm.response.json();",
+								"  if (d.code) pm.collectionVariables.set('booking_code', d.code);",
+								"  if (d.id) pm.collectionVariables.set('booking_id', d.id);",
+								"  console.log('saved booking_code', d.code);",
+								"}"
+							]
+						}
+					}],
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\n  \"branch_id\": \"{{branch_id}}\",\n  \"service_id\": \"{{service_id}}\",\n  \"therapist_id\": null,\n  \"room_id\": null,\n  \"scheduled_start\": \"2026-05-08T09:00:00+07:00\",\n  \"customer_name\": \"Customer UAT\",\n  \"customer_phone\": \"+62811112222\",\n  \"customer_email\": \"customer@uat.demo\",\n  \"addon_ids\": []\n}" },
+						"url": { "raw": "{{api}}/public/bookings", "host": ["{{api}}"], "path": ["public", "bookings"] }
+					}
+				},
+				{
+					"name": "GET /public/bookings/:code",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{api}}/public/bookings/{{booking_code}}", "host": ["{{api}}"], "path": ["public", "bookings", "{{booking_code}}"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "12 · Public · Payments",
+			"item": [
+				{
+					"name": "GET /public/bookings/:code/payment-status",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{api}}/public/bookings/{{booking_code}}/payment-status", "host": ["{{api}}"], "path": ["public", "bookings", "{{booking_code}}", "payment-status"] }
+					}
+				},
+				{
+					"name": "POST /public/payments/dummy-trigger (DEV BUILD ONLY)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\n  \"booking_code\": \"{{booking_code}}\"\n}" },
+						"url": { "raw": "{{api}}/public/payments/dummy-trigger", "host": ["{{api}}"], "path": ["public", "payments", "dummy-trigger"] }
+					}
+				},
+				{
+					"name": "POST /public/payments/webhook (iPaymu sandbox push)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\n  \"trx_id\": \"<provider-trx-id>\",\n  \"reference_id\": \"{{booking_code}}\",\n  \"status\": \"berhasil\",\n  \"status_code\": 1\n}" },
+						"url": { "raw": "{{api}}/public/payments/webhook", "host": ["{{api}}"], "path": ["public", "payments", "webhook"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "13 · Tenant · Bookings (operator)",
+			"item": [
+				{
+					"name": "GET /tenant/bookings",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/bookings?page=1&limit=20", "host": ["{{api}}"], "path": ["tenant", "bookings"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }, { "key": "from_date", "value": "2026-05-01", "disabled": true }, { "key": "to_date", "value": "2026-05-31", "disabled": true }, { "key": "status", "value": "paid", "disabled": true }] }
+					}
+				},
+				{
+					"name": "POST /tenant/bookings (concierge)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"branch_id\": \"{{branch_id}}\",\n  \"service_id\": \"{{service_id}}\",\n  \"therapist_id\": null,\n  \"room_id\": null,\n  \"scheduled_start\": \"2026-05-08T13:00:00+07:00\",\n  \"customer_name\": \"Walk-in\",\n  \"customer_phone\": \"+62811113333\",\n  \"addon_ids\": []\n}" },
+						"url": { "raw": "{{api}}/tenant/bookings", "host": ["{{api}}"], "path": ["tenant", "bookings"] }
+					}
+				},
+				{
+					"name": "GET /tenant/bookings/:id",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/bookings/{{booking_id}}", "host": ["{{api}}"], "path": ["tenant", "bookings", "{{booking_id}}"] }
+					}
+				},
+				{
+					"name": "GET /tenant/bookings/by-code/:code",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/bookings/by-code/{{booking_code}}", "host": ["{{api}}"], "path": ["tenant", "bookings", "by-code", "{{booking_code}}"] }
+					}
+				},
+				{
+					"name": "POST /tenant/bookings/:id/checkin",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/bookings/{{booking_id}}/checkin", "host": ["{{api}}"], "path": ["tenant", "bookings", "{{booking_id}}", "checkin"] }
+					}
+				},
+				{
+					"name": "POST /tenant/bookings/:id/complete",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/bookings/{{booking_id}}/complete", "host": ["{{api}}"], "path": ["tenant", "bookings", "{{booking_id}}", "complete"] }
+					}
+				},
+				{
+					"name": "POST /tenant/bookings/:id/no-show",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/bookings/{{booking_id}}/no-show", "host": ["{{api}}"], "path": ["tenant", "bookings", "{{booking_id}}", "no-show"] }
+					}
+				},
+				{
+					"name": "POST /tenant/bookings/:id/cancel",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{tenant_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"reason\": \"Customer batal\"\n}" },
+						"url": { "raw": "{{api}}/tenant/bookings/{{booking_id}}/cancel", "host": ["{{api}}"], "path": ["tenant", "bookings", "{{booking_id}}", "cancel"] }
+					}
+				},
+				{
+					"name": "POST /tenant/bookings/:id/sync-payment",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/bookings/{{booking_id}}/sync-payment", "host": ["{{api}}"], "path": ["tenant", "bookings", "{{booking_id}}", "sync-payment"] }
+					}
+				},
+				{
+					"name": "GET /tenant/reports/bookings/summary",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/reports/bookings/summary?from_date=2026-05-01&to_date=2026-05-31", "host": ["{{api}}"], "path": ["tenant", "reports", "bookings", "summary"], "query": [{ "key": "from_date", "value": "2026-05-01" }, { "key": "to_date", "value": "2026-05-31" }] }
+					}
+				}
+			]
+		},
+		{
+			"name": "14 · Tenant · Finance",
+			"item": [
+				{
+					"name": "GET /tenant/finance/balance",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/finance/balance", "host": ["{{api}}"], "path": ["tenant", "finance", "balance"] }
+					}
+				},
+				{
+					"name": "GET /tenant/finance/transactions",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/finance/transactions?page=1&limit=20", "host": ["{{api}}"], "path": ["tenant", "finance", "transactions"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }] }
+					}
+				},
+				{
+					"name": "GET /tenant/finance/disbursements",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/finance/disbursements?page=1&limit=20", "host": ["{{api}}"], "path": ["tenant", "finance", "disbursements"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }] }
+					}
+				},
+				{
+					"name": "GET /tenant/finance/disbursements/:id",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{tenant_token}}" }],
+						"url": { "raw": "{{api}}/tenant/finance/disbursements/{{disbursement_id}}", "host": ["{{api}}"], "path": ["tenant", "finance", "disbursements", "{{disbursement_id}}"] }
+					}
+				}
+			]
+		},
+		{
+			"name": "15 · Platform-admin · Payout",
+			"item": [
+				{
+					"name": "POST /admin/settlement/reconcile",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{super_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"week_starting\": \"2026-05-04\"\n}" },
+						"url": { "raw": "{{api}}/admin/settlement/reconcile", "host": ["{{api}}"], "path": ["admin", "settlement", "reconcile"] }
+					}
+				},
+				{
+					"name": "GET /admin/settlement-batches",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{super_token}}" }],
+						"url": { "raw": "{{api}}/admin/settlement-batches?page=1&limit=20", "host": ["{{api}}"], "path": ["admin", "settlement-batches"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }] }
+					}
+				},
+				{
+					"name": "GET /admin/settlement-batches/:id",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{super_token}}" }],
+						"url": { "raw": "{{api}}/admin/settlement-batches/{{settlement_batch_id}}", "host": ["{{api}}"], "path": ["admin", "settlement-batches", "{{settlement_batch_id}}"] }
+					}
+				},
+				{
+					"name": "GET /admin/settlement-batches/summary",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{super_token}}" }],
+						"url": { "raw": "{{api}}/admin/settlement-batches/summary", "host": ["{{api}}"], "path": ["admin", "settlement-batches", "summary"] }
+					}
+				},
+				{
+					"name": "GET /admin/payout/tenant-summary",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{super_token}}" }],
+						"url": { "raw": "{{api}}/admin/payout/tenant-summary", "host": ["{{api}}"], "path": ["admin", "payout", "tenant-summary"] }
+					}
+				},
+				{
+					"name": "GET /admin/disbursements",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{super_token}}" }],
+						"url": { "raw": "{{api}}/admin/disbursements?page=1&limit=20", "host": ["{{api}}"], "path": ["admin", "disbursements"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }] }
+					}
+				},
+				{
+					"name": "GET /admin/disbursements/:id",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "Authorization", "value": "Bearer {{super_token}}" }],
+						"url": { "raw": "{{api}}/admin/disbursements/{{disbursement_id}}", "host": ["{{api}}"], "path": ["admin", "disbursements", "{{disbursement_id}}"] }
+					}
+				},
+				{
+					"name": "POST /admin/disbursements (open)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{super_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"settlement_batch_id\": \"{{settlement_batch_id}}\",\n  \"tenant_id\": \"{{tenant_id}}\"\n}" },
+						"url": { "raw": "{{api}}/admin/disbursements", "host": ["{{api}}"], "path": ["admin", "disbursements"] }
+					}
+				},
+				{
+					"name": "POST /admin/disbursements/:id/processing",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Authorization", "value": "Bearer {{super_token}}" }],
+						"url": { "raw": "{{api}}/admin/disbursements/{{disbursement_id}}/processing", "host": ["{{api}}"], "path": ["admin", "disbursements", "{{disbursement_id}}", "processing"] }
+					}
+				},
+				{
+					"name": "POST /admin/disbursements/:id/transferred",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{super_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"bank_reference\": \"BANK-REF-001\",\n  \"transferred_at\": \"2026-05-08T10:00:00+07:00\"\n}" },
+						"url": { "raw": "{{api}}/admin/disbursements/{{disbursement_id}}/transferred", "host": ["{{api}}"], "path": ["admin", "disbursements", "{{disbursement_id}}", "transferred"] }
+					}
+				},
+				{
+					"name": "POST /admin/disbursements/:id/failed",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{super_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"failure_reason\": \"Bank rekening tidak valid\"\n}" },
+						"url": { "raw": "{{api}}/admin/disbursements/{{disbursement_id}}/failed", "host": ["{{api}}"], "path": ["admin", "disbursements", "{{disbursement_id}}", "failed"] }
+					}
+				},
+				{
+					"name": "POST /admin/disbursements/:id/cancel",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{super_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": { "mode": "raw", "raw": "{\n  \"reason\": \"Salah input\"\n}" },
+						"url": { "raw": "{{api}}/admin/disbursements/{{disbursement_id}}/cancel", "host": ["{{api}}"], "path": ["admin", "disbursements", "{{disbursement_id}}", "cancel"] }
+					}
+				}
+			]
+		}
+	]
+}

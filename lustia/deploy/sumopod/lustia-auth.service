@@ -1,0 +1,35 @@
+[Unit]
+Description=Lustia auth-service (UAT)
+Documentation=https://github.com/chrisanlung/agents
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=lustia
+Group=lustia
+WorkingDirectory=/opt/lustia
+EnvironmentFile=/opt/lustia/config/.env
+ExecStart=/opt/lustia/bin/auth
+Restart=on-failure
+RestartSec=5s
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/lustia/storage
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+
+# Logs go to journald — view with: journalctl -u lustia-auth -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
