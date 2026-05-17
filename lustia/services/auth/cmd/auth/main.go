@@ -82,6 +82,7 @@ func main() {
 		Password: os.Getenv("SMTP_PASSWORD"),
 		From:     envStr("SMTP_FROM", "Lustia <no-reply@lustia.local>"),
 		StartTLS: envBool("SMTP_STARTTLS", false),
+		UseTLS:   envBool("SMTP_USE_TLS", false),
 		Timeout:  envInt("SMTP_TIMEOUT_MS", 5000),
 	}
 	smtpSender := helper.NewSMTPSender(smtpCfg)

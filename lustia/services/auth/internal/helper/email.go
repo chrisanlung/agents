@@ -23,6 +23,7 @@ package helper
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -49,9 +50,13 @@ type SMTPConfig struct {
 	Port     int    `yaml:"port"`
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
-	From     string `yaml:"from"`      // "Lustia <no-reply@lustia.local>"
-	StartTLS bool   `yaml:"startTls"`  // upgrade plaintext connection to TLS via STARTTLS
-	Timeout  int    `yaml:"timeoutMs"` // dial timeout in ms; default 5000
+	From     string `yaml:"from"`     // "Lustia <no-reply@lustia.local>"
+	StartTLS bool   `yaml:"startTls"` // upgrade plaintext connection to TLS via STARTTLS (port 587)
+	// UseTLS = implicit TLS / SMTPS — connect with TLS from the start.
+	// Required for relays that listen on port 465 (e.g. Sumopod, Gmail SMTPS).
+	// Mutually exclusive with StartTLS in practice — providers offer either 587+STARTTLS or 465+TLS.
+	UseTLS  bool `yaml:"useTls"`
+	Timeout int  `yaml:"timeoutMs"` // dial timeout in ms; default 5000
 }
 
 // EmailSender is the interface services depend on for sending transactional
@@ -91,8 +96,19 @@ func (s *SMTPSender) Send(ctx context.Context, msg EmailMessage) error {
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
 
-	dialer := &net.Dialer{Timeout: time.Duration(s.cfg.Timeout) * time.Millisecond}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	timeout := time.Duration(s.cfg.Timeout) * time.Millisecond
+	dialer := &net.Dialer{Timeout: timeout}
+
+	var conn net.Conn
+	var err error
+	if s.cfg.UseTLS {
+		// Implicit TLS (SMTPS — typically port 465). The connection is wrapped
+		// in TLS from the first byte; STARTTLS is not used.
+		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: s.cfg.Host}}
+		conn, err = tlsDialer.DialContext(ctx, "tcp", addr)
+	} else {
+		conn, err = dialer.DialContext(ctx, "tcp", addr)
+	}
 	if err != nil {
 		return fmt.Errorf("smtp dial %s: %w", addr, err)
 	}
@@ -104,9 +120,11 @@ func (s *SMTPSender) Send(ctx context.Context, msg EmailMessage) error {
 	}
 	defer func() { _ = client.Close() }()
 
-	if s.cfg.StartTLS {
+	if s.cfg.StartTLS && !s.cfg.UseTLS {
+		// STARTTLS upgrade on a plaintext connection (port 587). Skip when
+		// already on implicit TLS — most servers reject STARTTLS over TLS.
 		if ok, _ := client.Extension("STARTTLS"); ok {
-			if err := client.StartTLS(nil); err != nil {
+			if err := client.StartTLS(&tls.Config{ServerName: s.cfg.Host}); err != nil {
 				return fmt.Errorf("smtp starttls: %w", err)
 			}
 		}
