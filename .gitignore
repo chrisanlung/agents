@@ -22,3 +22,12 @@ lustia/services/auth/storage-data/
 
 # Compiled Go binary (rebuilt via `go build`).
 lustia/services/auth/bin/
+
+# Claude Code runtime state (per-machine).
+.claude/scheduled_tasks.lock
+
+# One-off debug / investigation artifacts. If you need to reverse-engineer
+# something again, keep the script in your scratch folder, not committed.
+sig_probe*.py
+sandbox-webhook.dump
+*.webhook.dump
