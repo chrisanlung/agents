@@ -92,8 +92,8 @@ export async function createBranch(
       { auth: true }
     );
 
-    revalidateTag("branches");
-    revalidateTag("onboarding-state");
+    revalidateTag("branches", { expire: 0 });
+    revalidateTag("onboarding-state", { expire: 0 });
 
     // Redirect to the branches list after success
     redirect("/branches?created=1");
@@ -151,7 +151,7 @@ export async function updateBranch(
       { auth: true }
     );
 
-    revalidateTag("branches");
+    revalidateTag("branches", { expire: 0 });
 
     redirect("/branches?updated=1");
 
@@ -189,7 +189,7 @@ export async function toggleBranchStatus(
       { auth: true }
     );
 
-    revalidateTag("branches");
+    revalidateTag("branches", { expire: 0 });
 
     return { ok: true, newStatus };
   } catch (err) {
@@ -214,8 +214,8 @@ export async function deleteBranch(id: string): Promise<DeleteBranchResult> {
       { auth: true }
     );
 
-    revalidateTag("branches");
-    revalidateTag("onboarding-state");
+    revalidateTag("branches", { expire: 0 });
+    revalidateTag("onboarding-state", { expire: 0 });
 
     return { ok: true };
   } catch (err) {

@@ -64,7 +64,7 @@ export async function createService(
       { auth: true }
     );
 
-    revalidateTag("services");
+    revalidateTag("services", { expire: 0 });
     redirect(`/master/services/${data.id}`);
 
     return { ok: true, data };
@@ -115,8 +115,8 @@ export async function updateService(
       { auth: true }
     );
 
-    revalidateTag("services");
-    revalidateTag(`service-${id}`);
+    revalidateTag("services", { expire: 0 });
+    revalidateTag(`service-${id}`, { expire: 0 });
 
     return { ok: true, data };
   } catch (err) {
@@ -146,8 +146,8 @@ export async function toggleServiceStatus(
       { auth: true }
     );
 
-    revalidateTag("services");
-    revalidateTag(`service-${id}`);
+    revalidateTag("services", { expire: 0 });
+    revalidateTag(`service-${id}`, { expire: 0 });
 
     return { ok: true, is_active };
   } catch (err) {
@@ -174,7 +174,7 @@ export async function deleteService(
       { auth: true }
     );
 
-    revalidateTag("services");
+    revalidateTag("services", { expire: 0 });
 
     return { ok: true };
   } catch (err) {

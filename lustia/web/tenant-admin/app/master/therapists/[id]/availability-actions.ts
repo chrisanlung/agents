@@ -25,7 +25,7 @@ export async function saveAvailability(
       { auth: true }
     );
 
-    revalidateTag(`therapist-availability-${therapistId}`);
+    revalidateTag(`therapist-availability-${therapistId}`, { expire: 0 });
 
     return { ok: true, data };
   } catch (err) {

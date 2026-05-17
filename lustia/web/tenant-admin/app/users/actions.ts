@@ -130,7 +130,7 @@ export async function createUser(input: {
       { auth: true }
     );
 
-    revalidateTag("admin-users");
+    revalidateTag("admin-users", { expire: 0 });
 
     return {
       ok: true,
@@ -182,8 +182,8 @@ export async function updateUser(
       { auth: true }
     );
 
-    revalidateTag("admin-users");
-    revalidateTag(`admin-user-${id}`);
+    revalidateTag("admin-users", { expire: 0 });
+    revalidateTag(`admin-user-${id}`, { expire: 0 });
 
     return { ok: true, user };
   } catch (err) {
@@ -207,8 +207,8 @@ export async function toggleUserStatus(
       { auth: true }
     );
 
-    revalidateTag("admin-users");
-    revalidateTag(`admin-user-${id}`);
+    revalidateTag("admin-users", { expire: 0 });
+    revalidateTag(`admin-user-${id}`, { expire: 0 });
 
     return { ok: true };
   } catch (err) {
@@ -229,8 +229,8 @@ export async function unlockUser(id: string): Promise<UnlockUserResult> {
       { auth: true }
     );
 
-    revalidateTag("admin-users");
-    revalidateTag(`admin-user-${id}`);
+    revalidateTag("admin-users", { expire: 0 });
+    revalidateTag(`admin-user-${id}`, { expire: 0 });
 
     return { ok: true };
   } catch (err) {

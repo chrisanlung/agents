@@ -84,8 +84,8 @@ export async function uploadTherapistPhoto(
 
     const data = (await res.json()) as Therapist;
 
-    revalidateTag("therapists");
-    revalidateTag(`therapist-${therapistId}`);
+    revalidateTag("therapists", { expire: 0 });
+    revalidateTag(`therapist-${therapistId}`, { expire: 0 });
 
     return { ok: true, data };
   } catch (err) {
@@ -130,8 +130,8 @@ export async function deleteTherapistPhoto(
 
     const data = (await res.json()) as Therapist;
 
-    revalidateTag("therapists");
-    revalidateTag(`therapist-${therapistId}`);
+    revalidateTag("therapists", { expire: 0 });
+    revalidateTag(`therapist-${therapistId}`, { expire: 0 });
 
     return { ok: true, data };
   } catch (err) {

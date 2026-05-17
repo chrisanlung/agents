@@ -37,8 +37,8 @@ export async function updateTherapistPrep(
       { auth: true }
     );
 
-    revalidateTag(`therapist-${therapistId}`);
-    revalidateTag("therapists");
+    revalidateTag(`therapist-${therapistId}`, { expire: 0 });
+    revalidateTag("therapists", { expire: 0 });
 
     return { ok: true, prep_minutes: data.prep_minutes };
   } catch (err) {

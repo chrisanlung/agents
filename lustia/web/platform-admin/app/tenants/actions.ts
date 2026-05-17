@@ -43,7 +43,7 @@ export async function changeTenantStatus(
       { auth: true }
     );
 
-    revalidateTag("tenants");
+    revalidateTag("tenants", { expire: 0 });
 
     return { ok: true, data };
   } catch (err) {

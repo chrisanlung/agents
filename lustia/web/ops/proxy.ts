@@ -3,18 +3,14 @@ import { NextResponse, type NextRequest } from "next/server";
 /**
  * Middleware — cookie-presence guard, scope routing, and silent refresh.
  *
- * Three concerns:
- * 1. No cookie → redirect /login.
- * 2. Cookie present but JWT scope === "user" on protected pages → /select-tenant.
- * 3. Access-token about to expire (<60s) → proactively call /auth/refresh and
- *    rewrite the cookies on the response. The Server Component that runs after
- *    middleware then sees a fresh token, so the user never sees a spurious
- *    /login redirect mid-session while their refresh token is still valid.
+ * - No cookie on protected page → /login.
+ * - scope=user on /dashboard → /select-tenant (ADR 0007).
+ * - Access token near/past expiry (<60s) → call /auth/refresh and rewrite
+ *   cookies on the response so Server Components see a fresh token. Silent
+ *   refresh fails gracefully — user falls through to /login.
  *
- * We do NOT verify the JWT signature here — the Edge runtime has no Node.js
- * crypto. We only decode the middle segment to read `scope`, `exp`, and
- * `must_change_password`. The real auth check still happens server-side via
- * GET /auth/me (which rejects a forged or revoked token at the API boundary).
+ * We decode but never verify the JWT here (Edge runtime has no Node crypto).
+ * Real auth check is server-side via GET /auth/me on every page.
  */
 
 const ACCESS_TOKEN_COOKIE = "access_token";
@@ -23,34 +19,18 @@ const LAST_ACTIVITY_COOKIE = "lustia_last_activity";
 const ACCESS_TOKEN_MAX_AGE = 30 * 60;
 const REFRESH_TOKEN_MAX_AGE = 14 * 24 * 60 * 60;
 const REFRESH_LEAD_SECONDS = 60;
-// Idle timeout: if no client-side activity was recorded within this window,
-// the middleware stops silent-refreshing the access token so the session
-// expires naturally and the next protected request kicks the user to /login
-// with a "session expired" flash. 30 minutes matches the access token TTL.
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 const AUTH_API_URL = process.env.AUTH_API_URL ?? "";
 const isProduction = process.env.NODE_ENV === "production";
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const accessTokenCookie = request.cookies.get(ACCESS_TOKEN_COOKIE);
   const refreshTokenCookie = request.cookies.get(REFRESH_TOKEN_COOKIE);
   const hasSession = accessTokenCookie !== undefined;
 
-  const isProtected =
-    pathname.startsWith("/dashboard") ||
-    pathname.startsWith("/branches") ||
-    pathname.startsWith("/onboarding") ||
-    pathname.startsWith("/settings") ||
-    pathname.startsWith("/pengaturan") ||
-    pathname.startsWith("/master");
-
-  // Silent refresh — only when we have both cookies, the access token is
-  // expired or near-expiry, AND the user has been active within the idle
-  // window. If the user has been idle longer than IDLE_TIMEOUT_MS, we skip
-  // refresh so the session expires naturally (security: a laptop left open
-  // at a spa counter shouldn't keep renewing its own session forever).
+  // Silent refresh — gated by idle timeout (see tenant-admin middleware).
   let response: NextResponse | null = null;
   if (hasSession && refreshTokenCookie) {
     const claims = readJWTClaims(accessTokenCookie.value);
@@ -63,24 +43,20 @@ export async function middleware(request: NextRequest) {
       if (refreshed) {
         response = NextResponse.next();
         writeSessionCookies(response, refreshed.access_token, refreshed.refresh_token);
-        // Update the request's claim view so subsequent checks use the new token.
         accessTokenCookie.value = refreshed.access_token;
       }
     }
   }
 
-  if (isProtected) {
+  if (pathname.startsWith("/dashboard")) {
     if (!hasSession) {
       return NextResponse.redirect(new URL("/login", request.url));
     }
-
     const claims = readJWTClaims(accessTokenCookie.value);
 
-    // Wrong-portal guard: tenant-admin only serves scope=tenant / scope=user.
-    // Super-admin sessions (scope=platform) belong on platform-admin. Clear
-    // their cookies and punt them to /login with a flash so they don't
-    // silently run queries with tenant_id='__platform__' that blow up
-    // every downstream SQL call.
+    // Wrong-portal guard: ops portal is for tenant staff (scope=tenant or
+    // scope=user before tenant selection). Platform super-admins belong on
+    // platform-admin; reject them here rather than let SQL blow up.
     if (claims?.scope === "platform") {
       const url = new URL("/login", request.url);
       url.searchParams.set(
@@ -93,20 +69,8 @@ export async function middleware(request: NextRequest) {
       return r;
     }
 
-    // If the token is user-scoped (no active tenant), force tenant selection.
     if (claims?.scope === "user") {
       return NextResponse.redirect(new URL("/select-tenant", request.url));
-    }
-
-    // Forced password-change gate: until the flag is cleared, every protected
-    // route funnels to the change-password screen.
-    if (
-      claims?.must_change_password === true &&
-      !pathname.startsWith("/pengaturan/ubah-kata-sandi")
-    ) {
-      const url = new URL("/pengaturan/ubah-kata-sandi", request.url);
-      url.searchParams.set("reason", "required");
-      return NextResponse.redirect(url);
     }
   }
 
@@ -116,10 +80,10 @@ export async function middleware(request: NextRequest) {
 
   if (pathname.startsWith("/login") && hasSession) {
     const claims = readJWTClaims(accessTokenCookie.value);
-    if (claims?.scope === "user") {
-      return NextResponse.redirect(new URL("/select-tenant", request.url));
+    if (claims?.scope !== "user") {
+      return NextResponse.redirect(new URL("/dashboard", request.url));
     }
-    return NextResponse.redirect(new URL("/dashboard", request.url));
+    return NextResponse.redirect(new URL("/select-tenant", request.url));
   }
 
   return response ?? NextResponse.next();
@@ -127,7 +91,6 @@ export async function middleware(request: NextRequest) {
 
 interface JWTClaims {
   scope?: string;
-  must_change_password?: boolean;
   exp?: number;
 }
 
@@ -146,19 +109,12 @@ function readJWTClaims(token: string): JWTClaims | undefined {
       base64.length + ((4 - (base64.length % 4)) % 4),
       "="
     );
-    const json = atob(padded);
-    return JSON.parse(json) as JWTClaims;
+    return JSON.parse(atob(padded)) as JWTClaims;
   } catch {
     return undefined;
   }
 }
 
-/**
- * Returns true when the last-activity cookie is missing or older than
- * IDLE_TIMEOUT_MS. Missing cookie is treated as idle because it means the
- * ActivityTracker hasn't run yet OR the user started a new browser session —
- * both cases warrant re-authentication on expiry.
- */
 function isIdleTooLong(raw: string | undefined): boolean {
   if (!raw) return true;
   const last = parseInt(raw, 10);
@@ -206,19 +162,5 @@ function writeSessionCookies(
 }
 
 export const config = {
-  matcher: [
-    "/login",
-    "/dashboard/:path*",
-    "/branches/:path*",
-    "/branches",
-    "/onboarding/:path*",
-    "/select-tenant/:path*",
-    "/select-tenant",
-    "/settings/:path*",
-    "/settings",
-    "/pengaturan/:path*",
-    "/pengaturan",
-    "/master/:path*",
-    "/master",
-  ],
+  matcher: ["/login", "/dashboard/:path*", "/select-tenant/:path*", "/select-tenant"],
 };

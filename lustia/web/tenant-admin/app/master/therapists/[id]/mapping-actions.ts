@@ -25,8 +25,8 @@ export async function updateServiceMapping(
       { auth: true }
     );
 
-    revalidateTag(`therapist-${therapistId}`);
-    revalidateTag("therapists");
+    revalidateTag(`therapist-${therapistId}`, { expire: 0 });
+    revalidateTag("therapists", { expire: 0 });
 
     return { ok: true, data };
   } catch (err) {

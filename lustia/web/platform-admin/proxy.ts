@@ -23,7 +23,7 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const AUTH_API_URL = process.env.AUTH_API_URL ?? "";
 const isProduction = process.env.NODE_ENV === "production";
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const accessTokenCookie = request.cookies.get(ACCESS_TOKEN_COOKIE);
   const refreshTokenCookie = request.cookies.get(REFRESH_TOKEN_COOKIE);

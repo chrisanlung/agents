@@ -85,7 +85,7 @@ export async function createTherapist(
       { auth: true }
     );
 
-    revalidateTag("therapists");
+    revalidateTag("therapists", { expire: 0 });
     redirect(`/master/therapists/${data.id}?tab=layanan`);
 
     return { ok: true, data };
@@ -139,8 +139,8 @@ export async function updateTherapist(
       { auth: true }
     );
 
-    revalidateTag("therapists");
-    revalidateTag(`therapist-${id}`);
+    revalidateTag("therapists", { expire: 0 });
+    revalidateTag(`therapist-${id}`, { expire: 0 });
 
     return { ok: true, data };
   } catch (err) {
@@ -170,8 +170,8 @@ export async function toggleTherapistStatus(
       { auth: true }
     );
 
-    revalidateTag("therapists");
-    revalidateTag(`therapist-${id}`);
+    revalidateTag("therapists", { expire: 0 });
+    revalidateTag(`therapist-${id}`, { expire: 0 });
 
     return { ok: true, is_active };
   } catch (err) {
@@ -198,7 +198,7 @@ export async function deleteTherapist(
       { auth: true }
     );
 
-    revalidateTag("therapists");
+    revalidateTag("therapists", { expire: 0 });
 
     return { ok: true };
   } catch (err) {

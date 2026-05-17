@@ -51,8 +51,8 @@ export async function approveRegistration(
     );
 
     // Invalidate the registration list so the pending badge updates
-    revalidateTag("tenant-registrations");
-    revalidateTag("tenants");
+    revalidateTag("tenant-registrations", { expire: 0 });
+    revalidateTag("tenants", { expire: 0 });
 
     return { ok: true, data };
   } catch (err) {
@@ -104,7 +104,7 @@ export async function rejectRegistration(
       { auth: true }
     );
 
-    revalidateTag("tenant-registrations");
+    revalidateTag("tenant-registrations", { expire: 0 });
 
     // Redirect to the list after successful rejection
     redirect("/tenants/registrations");
