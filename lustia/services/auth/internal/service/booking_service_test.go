@@ -83,7 +83,7 @@ type stubPaymentSvc struct {
 	voidErr          error
 }
 
-func (p *stubPaymentSvc) InitiateForBooking(_ context.Context, _, _ string, _ int64, _, _, _, _, _ string) (InitiatePaymentOutput, error) {
+func (p *stubPaymentSvc) InitiateForBooking(_ context.Context, _, _ string, _ int64, _, _, _, _, _, _ string) (InitiatePaymentOutput, error) {
 	if p.initiateErr != nil {
 		return InitiatePaymentOutput{}, p.initiateErr
 	}

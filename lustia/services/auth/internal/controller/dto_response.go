@@ -564,9 +564,14 @@ type BookingResponse struct {
 // POST /tenant/bookings. Phase 6 (ADR 0015 §2.8): returns QRIS fields.
 type CreateBookingResponse struct {
 	BookingResponse
-	// Phase 6 QRIS payment fields (public bookings only).
+	// Phase 6 payment fields (public bookings only).
+	// payment_channel echoes the chosen channel; for "qris" the qr_* fields are
+	// set; for "va_<bank>" the va_* fields are set.
+	PaymentChannel   string `json:"payment_channel,omitempty"`
 	QRString         string `json:"qr_string,omitempty"`
 	QRImageURL       string `json:"qr_image_url,omitempty"`
+	VANumber         string `json:"va_number,omitempty"`
+	VABank           string `json:"va_bank,omitempty"`
 	QRExpiresAt      string `json:"qr_expires_at,omitempty"`
 	PaymentReference string `json:"payment_reference,omitempty"`
 	// Deprecated Phase 5 fields — kept for concierge path compatibility.

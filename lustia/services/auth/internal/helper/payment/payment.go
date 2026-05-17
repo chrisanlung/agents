@@ -14,7 +14,9 @@ import (
 // Shared transfer types
 // ---------------------------------------------------------------------------
 
-// CreateQRRequest carries data to create a QRIS payment transaction.
+// CreateQRRequest carries data to create a payment transaction.
+// Despite the legacy name, this request now supports both QRIS and VA channels
+// via the Channel field (migration 000037).
 type CreateQRRequest struct {
 	// ProviderReference is a caller-assigned unique ID (typically UUID).
 	// iPaymu uses this as the external_id / reference.
@@ -29,22 +31,41 @@ type CreateQRRequest struct {
 	CustomerPhone string
 	Description   string
 
-	// ExpiryMinutes is the QR validity window; ADR 0015 §2.7 hard caps at 15.
+	// ExpiryMinutes is the payment validity window; ADR 0015 §2.7 hard caps at 15.
 	ExpiryMinutes int
+
+	// Channel selects payment method: "qris" (default) or "va_bca", "va_mandiri",
+	// "va_bni", "va_bri", "va_permata", "va_cimb". The adapter maps the channel
+	// to the right provider paymentMethod/paymentChannel. Empty string is
+	// treated as "qris" for backwards compatibility with pre-037 callers.
+	Channel string
 }
 
 // CreateQRResponse is returned by CreateQR.
+// For QRIS, QRString/QRImageURL are populated; for VA, VANumber/VABank.
 type CreateQRResponse struct {
 	// ProviderReference is the provider-assigned transaction identifier.
 	ProviderReference string
 
+	// Channel echoes the request channel (or defaults to "qris" if unspecified).
+	Channel string
+
 	// QRString is the raw QRIS string rendered by qr_flutter on the client.
+	// Set when Channel = "qris"; empty for VA.
 	QRString string
 
 	// QRImageURL is an optional provider-hosted QR image URL. May be empty.
 	QRImageURL string
 
-	// ExpiresAt is the absolute expiry time for this QR code.
+	// VANumber is the Virtual Account number returned by the provider.
+	// Set when Channel starts with "va_"; empty for QRIS.
+	VANumber string
+
+	// VABank is the bank code (bca / mandiri / bni / bri / permata / cimb).
+	// Set when Channel starts with "va_"; empty for QRIS.
+	VABank string
+
+	// ExpiresAt is the absolute expiry time for this payment.
 	ExpiresAt time.Time
 }
 

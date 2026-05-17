@@ -202,7 +202,7 @@ func TestPaymentService_Initiate_Success(t *testing.T) {
 	svc := newTestPaymentSvc(txnRepo, bookingRepo, provider)
 	out, err := svc.InitiateForBooking(context.Background(),
 		"booking-id", "tenant-id", 150000,
-		"AB12-CD34", "Budi", "budi@example.com", "08123", "Booking layanan",
+		"AB12-CD34", "qris", "Budi", "budi@example.com", "08123", "Booking layanan",
 	)
 
 	require.NoError(t, err)
@@ -221,7 +221,7 @@ func TestPaymentService_Initiate_ProviderError_Propagates(t *testing.T) {
 
 	svc := newTestPaymentSvc(txnRepo, bookingRepo, provider)
 	_, err := svc.InitiateForBooking(context.Background(),
-		"booking-id", "tenant-id", 150000, "AB12-CD34", "Budi", "", "", "",
+		"booking-id", "tenant-id", 150000, "AB12-CD34", "qris", "Budi", "", "", "",
 	)
 	assert.Error(t, err)
 }

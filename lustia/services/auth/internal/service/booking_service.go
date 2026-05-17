@@ -279,15 +279,17 @@ func (s *BookingService) CreatePublic(ctx context.Context, in PublicCreateBookin
 		return CreateBookingOutput{}, fmt.Errorf("save booking addons: %w", err)
 	}
 
-	// Phase 6 (ADR 0015 §2.8): Initiate QRIS payment transaction.
-	// PaymentService creates the payment_transaction row + calls provider.CreateQR.
-	// BookingService stays HTTP-agnostic — no provider details leak here.
+	// Phase 6 (ADR 0015 §2.8): Initiate payment transaction.
+	// PaymentService creates the payment_transaction row + calls provider.CreateQR
+	// (despite the legacy name, it now handles both QRIS and VA — channel
+	// selects). BookingService stays HTTP-agnostic — no provider details leak here.
 	payOut, err := s.paymentSvc.InitiateForBooking(
 		ctx,
 		b.ID,
 		tenantID,
 		total,
 		code, // orderID = booking.code
+		in.PaymentChannel,
 		in.CustomerName,
 		in.CustomerEmail,
 		in.CustomerPhone,
@@ -317,9 +319,12 @@ func (s *BookingService) CreatePublic(ctx context.Context, in PublicCreateBookin
 	}
 
 	out := CreateBookingOutput{BookingDetail: detail}
-	if payOut.QRString != "" {
+	if payOut.ProviderReference != "" {
+		out.PaymentChannel = payOut.Channel
 		out.QRString = payOut.QRString
 		out.QRImageURL = payOut.QRImageURL
+		out.VANumber = payOut.VANumber
+		out.VABank = payOut.VABank
 		out.QRExpiresAt = payOut.QRExpiresAt.Format(time.RFC3339)
 		out.PaymentReference = payOut.ProviderReference
 	}

@@ -30,7 +30,9 @@ type PaymentServiceIface interface {
 	// InitiateForBooking creates a payment_transaction row and calls the
 	// payment provider to generate a QRIS payment. Called by BookingService
 	// after the booking row is saved.
-	InitiateForBooking(ctx context.Context, bookingID string, tenantID string, expectedAmountIDR int64, orderID string, customerName, customerEmail, customerPhone, description string) (InitiatePaymentOutput, error)
+	// channel = "qris" | "va_bca" | "va_mandiri" | "va_bni" | "va_bri" |
+	// "va_permata" | "va_cimb". Empty string defaults to "qris".
+	InitiateForBooking(ctx context.Context, bookingID string, tenantID string, expectedAmountIDR int64, orderID, channel string, customerName, customerEmail, customerPhone, description string) (InitiatePaymentOutput, error)
 
 	// HandleWebhook processes an inbound provider webhook notification.
 	// Signature verification is delegated to provider.VerifyWebhook before
@@ -106,9 +108,14 @@ func (s *paymentServiceImpl) InitiateForBooking(
 	ctx context.Context,
 	bookingID, tenantID string,
 	expectedAmountIDR int64,
-	orderID, customerName, customerEmail, customerPhone, description string,
+	orderID, channel string,
+	customerName, customerEmail, customerPhone, description string,
 ) (InitiatePaymentOutput, error) {
 	providerRef := uuid.New().String()
+
+	if channel == "" {
+		channel = "qris" // backwards-compat default
+	}
 
 	qrResp, err := s.provider.CreateQR(ctx, CreateQRRequest{
 		ProviderReference: providerRef,
@@ -119,9 +126,10 @@ func (s *paymentServiceImpl) InitiateForBooking(
 		CustomerPhone:     customerPhone,
 		Description:       description,
 		ExpiryMinutes:     15, // ADR 0015 §2.7 hard cap
+		Channel:           channel,
 	})
 	if err != nil {
-		return InitiatePaymentOutput{}, fmt.Errorf("create qr for booking %s: %w", bookingID, err)
+		return InitiatePaymentOutput{}, fmt.Errorf("create payment for booking %s (channel=%s): %w", bookingID, channel, err)
 	}
 
 	now := s.clock.Now()
@@ -131,13 +139,19 @@ func (s *paymentServiceImpl) InitiateForBooking(
 		BookingID:         bookingID,
 		Provider:          model.PaymentProviderIPaymu, // default; factory selects concrete impl
 		ProviderReference: qrResp.ProviderReference,
-		QRString:          &qrResp.QRString,
-		QRImageURL:        &qrResp.QRImageURL,
+		Channel:           channel,
 		QRExpiresAt:       qrResp.ExpiresAt,
 		ExpectedAmountIDR: expectedAmountIDR,
 		Status:            model.PaymentTxnStatusAwaiting,
 		CreatedAt:         now,
 		UpdatedAt:         now,
+	}
+	if channel == "qris" {
+		txn.QRString = &qrResp.QRString
+		txn.QRImageURL = &qrResp.QRImageURL
+	} else {
+		txn.VANumber = &qrResp.VANumber
+		txn.VABank = &qrResp.VABank
 	}
 
 	if err := s.paymentTxns.Save(ctx, txn); err != nil {
@@ -152,6 +166,7 @@ func (s *paymentServiceImpl) InitiateForBooking(
 		Meta: map[string]interface{}{
 			"booking_id":         bookingID,
 			"provider_reference": txn.ProviderReference,
+			"channel":            channel,
 			"expected_amount":    expectedAmountIDR,
 		},
 	})
@@ -159,8 +174,11 @@ func (s *paymentServiceImpl) InitiateForBooking(
 	return InitiatePaymentOutput{
 		TransactionID:     txn.ID,
 		ProviderReference: txn.ProviderReference,
+		Channel:           channel,
 		QRString:          qrResp.QRString,
 		QRImageURL:        qrResp.QRImageURL,
+		VANumber:          qrResp.VANumber,
+		VABank:            qrResp.VABank,
 		QRExpiresAt:       qrResp.ExpiresAt,
 	}, nil
 }

@@ -106,6 +106,7 @@ func (c *BookingController) CreatePublic(ctx *gin.Context) {
 		CustomerPhone:  req.CustomerPhone,
 		CustomerEmail:  req.CustomerEmail,
 		ClientIP:       ctx.ClientIP(),
+		PaymentChannel: req.PaymentChannel,
 	})
 	if err != nil {
 		helper.RespondDomainError(ctx, err)
@@ -114,8 +115,11 @@ func (c *BookingController) CreatePublic(ctx *gin.Context) {
 
 	resp := CreateBookingResponse{
 		BookingResponse:  toBookingResponse(out.BookingDetail),
+		PaymentChannel:   out.PaymentChannel,
 		QRString:         out.QRString,
 		QRImageURL:       out.QRImageURL,
+		VANumber:         out.VANumber,
+		VABank:           out.VABank,
 		QRExpiresAt:      out.QRExpiresAt,
 		PaymentReference: out.PaymentReference,
 		// Phase 5 compat fields — empty for Phase 6 QR bookings.

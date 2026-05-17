@@ -34,8 +34,11 @@ final class CreateBookingResponse {
     required this.totalPriceIdr,
     required this.scheduledStart,
     required this.scheduledEnd,
+    this.paymentChannel,
     this.qrString,
     this.qrImageUrl,
+    this.vaNumber,
+    this.vaBank,
     this.qrExpiresAt,
     this.paymentReference,
     this.addons = const [],
@@ -48,18 +51,31 @@ final class CreateBookingResponse {
   final String scheduledStart;
   final String scheduledEnd;
 
-  /// QRIS string untuk di-render via qr_flutter.
+  /// Payment channel: 'qris' | 'va_bca' | 'va_mandiri' | 'va_bni' | 'va_bri'
+  /// | 'va_permata' | 'va_cimb'. Null on legacy responses (assume 'qris').
+  final String? paymentChannel;
+
+  /// QRIS string untuk di-render via qr_flutter (set when channel = 'qris').
   final String? qrString;
 
   /// URL gambar QR dari provider (opsional — fallback ke qr_flutter).
   final String? qrImageUrl;
 
-  /// Batas waktu QR dalam ISO-8601; null jika provider tidak mengisi.
+  /// Nomor Virtual Account (set when channel starts with 'va_').
+  final String? vaNumber;
+
+  /// Kode bank VA: 'bca' | 'mandiri' | 'bni' | 'bri' | 'permata' | 'cimb'.
+  final String? vaBank;
+
+  /// Batas waktu pembayaran (QR/VA expiry) dalam ISO-8601.
   final String? qrExpiresAt;
 
   /// Referensi transaksi di sisi provider (misal: ipaymu_trx_xxx).
   final String? paymentReference;
   final List<BookingAddonItem> addons;
+
+  /// True ketika channel pembayaran adalah Virtual Account (bukan QRIS).
+  bool get isVA => (paymentChannel ?? 'qris').startsWith('va_');
 
   factory CreateBookingResponse.fromJson(Map<String, dynamic> json) {
     return CreateBookingResponse(
@@ -69,8 +85,11 @@ final class CreateBookingResponse {
       totalPriceIdr: (json['total_price_idr'] as num?)?.toInt() ?? 0,
       scheduledStart: json['scheduled_start'] as String,
       scheduledEnd: json['scheduled_end'] as String,
+      paymentChannel: json['payment_channel'] as String?,
       qrString: json['qr_string'] as String?,
       qrImageUrl: json['qr_image_url'] as String?,
+      vaNumber: json['va_number'] as String?,
+      vaBank: json['va_bank'] as String?,
       qrExpiresAt: json['qr_expires_at'] as String?,
       paymentReference: json['payment_reference'] as String?,
       addons:
@@ -163,6 +182,7 @@ final class CreateBookingRequest {
     this.addonIds = const [],
     this.roomId,
     this.therapistId,
+    this.paymentChannel,
   });
 
   final String branchId;
@@ -174,6 +194,11 @@ final class CreateBookingRequest {
   final List<String> addonIds;
   final String? roomId;
   final String? therapistId;
+
+  /// Channel pembayaran yang dipilih customer.
+  /// 'qris' (default) | 'va_bca' | 'va_mandiri' | 'va_bni' | 'va_bri'
+  /// | 'va_permata' | 'va_cimb'.
+  final String? paymentChannel;
 
   Map<String, dynamic> toJson() {
     final map = <String, dynamic>{
@@ -187,6 +212,7 @@ final class CreateBookingRequest {
     };
     if (roomId != null) map['room_id'] = roomId;
     if (therapistId != null) map['therapist_id'] = therapistId;
+    if (paymentChannel != null) map['payment_channel'] = paymentChannel;
     return map;
   }
 }
@@ -207,6 +233,7 @@ final class BookingWizardState {
     this.selectedTherapistId,
     this.therapistConfirmed = false,
     this.selectedRoomId,
+    this.paymentChannel = 'qris',
     this.customerName = '',
     this.customerPhone = '',
     this.customerEmail = '',
@@ -225,6 +252,12 @@ final class BookingWizardState {
   /// true once the user has explicitly tapped "Pilih Otomatis" or "Pilih [Name]".
   final bool therapistConfirmed;
   final String? selectedRoomId; // null = auto
+
+  /// Channel pembayaran yang dipilih. Default 'qris'.
+  /// Format: 'qris' | 'va_bca' | 'va_mandiri' | 'va_bni' | 'va_bri'
+  /// | 'va_permata' | 'va_cimb'.
+  final String paymentChannel;
+
   final String customerName;
   final String customerPhone;
   final String customerEmail;
@@ -239,6 +272,7 @@ final class BookingWizardState {
     bool? therapistConfirmed,
     String? selectedRoomId,
     bool clearRoom = false,
+    String? paymentChannel,
     String? customerName,
     String? customerPhone,
     String? customerEmail,
@@ -258,6 +292,7 @@ final class BookingWizardState {
       selectedRoomId: clearRoom
           ? null
           : (selectedRoomId ?? this.selectedRoomId),
+      paymentChannel: paymentChannel ?? this.paymentChannel,
       customerName: customerName ?? this.customerName,
       customerPhone: customerPhone ?? this.customerPhone,
       customerEmail: customerEmail ?? this.customerEmail,

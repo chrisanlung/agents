@@ -158,6 +158,15 @@ func (p *IPaymuProvider) CreateQR(ctx context.Context, req CreateQRRequest) (Cre
 		expiryMinutes = 15 // ADR 0015 §2.7 hard cap
 	}
 
+	channel := req.Channel
+	if channel == "" {
+		channel = "qris" // backwards-compat default
+	}
+	method, bankCode, err := resolveIPaymuChannel(channel)
+	if err != nil {
+		return CreateQRResponse{}, err
+	}
+
 	body := ipaymuDirectRequest{
 		Name:           req.CustomerName,
 		Phone:          sanitizePhone(req.CustomerPhone),
@@ -168,8 +177,8 @@ func (p *IPaymuProvider) CreateQR(ctx context.Context, req CreateQRRequest) (Cre
 		ExpiredType:    "minutes",
 		Comments:       req.Description,
 		ReferenceID:    req.ProviderReference,
-		PaymentMethod:  "qris",
-		PaymentChannel: "qris",
+		PaymentMethod:  method,
+		PaymentChannel: bankCode,
 		Product:        []string{fmt.Sprintf("Booking %s", req.OrderID)},
 		Qty:            []int{1},
 		Price:          []int64{req.AmountIDR},
@@ -218,13 +227,52 @@ func (p *IPaymuProvider) CreateQR(ctx context.Context, req CreateQRRequest) (Cre
 
 	expiresAt := parseIPaymuExpiry(ctx, apiResp.Data.Expired, expiryMinutes)
 
-	return CreateQRResponse{
+	resp := CreateQRResponse{
 		// Keep our own reference — see function doc above for rationale.
 		ProviderReference: req.ProviderReference,
-		QRString:          apiResp.Data.PaymentNo,
-		QRImageURL:        apiResp.Data.Url,
+		Channel:           channel,
 		ExpiresAt:         expiresAt,
-	}, nil
+	}
+	if method == "qris" {
+		resp.QRString = apiResp.Data.PaymentNo
+		resp.QRImageURL = apiResp.Data.Url
+	} else {
+		// VA: iPaymu returns the VA number in PaymentNo for the chosen bank.
+		resp.VANumber = apiResp.Data.PaymentNo
+		resp.VABank = bankCode
+	}
+	return resp, nil
+}
+
+// resolveIPaymuChannel maps our Channel string ("qris" | "va_<bank>") to the
+// iPaymu API pair (paymentMethod, paymentChannel).
+//
+// iPaymu accepts:
+//
+//	paymentMethod=qris  paymentChannel=qris
+//	paymentMethod=va    paymentChannel=bca|mandiri|bni|bri|permata|cimb
+//
+// Returns method, channel (bank code or "qris"), or an error for unsupported
+// channel strings.
+func resolveIPaymuChannel(channel string) (method string, bankCode string, err error) {
+	switch channel {
+	case "qris":
+		return "qris", "qris", nil
+	case "va_bca":
+		return "va", "bca", nil
+	case "va_mandiri":
+		return "va", "mandiri", nil
+	case "va_bni":
+		return "va", "bni", nil
+	case "va_bri":
+		return "va", "bri", nil
+	case "va_permata":
+		return "va", "permata", nil
+	case "va_cimb":
+		return "va", "cimb", nil
+	default:
+		return "", "", fmt.Errorf("ipaymu: unsupported channel %q (allowed: qris, va_bca, va_mandiri, va_bni, va_bri, va_permata, va_cimb)", channel)
+	}
 }
 
 // ---------------------------------------------------------------------------

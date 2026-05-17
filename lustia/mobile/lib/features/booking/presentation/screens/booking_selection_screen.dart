@@ -411,8 +411,29 @@ class _SelectionBodyState extends ConsumerState<_SelectionBody> {
                 ),
                 const SizedBox(height: 24),
 
-                // Section ⑦ — Data Anda (inline form; keyboard flow)
-                const _SectionHeader(number: 7, title: 'Data Anda'),
+                // Section ⑦ — Metode Pembayaran (QRIS / VA per bank)
+                const _SectionHeader(number: 7, title: 'Metode Pembayaran'),
+                const SizedBox(height: 8),
+                _roomExplicitlyChosen
+                    ? _PaymentChannelPicker(
+                        selected: state.paymentChannel,
+                        onChanged: (c) {
+                          ref
+                              .read(
+                                bookingWizardProvider(widget.branchId).notifier,
+                              )
+                              .selectPaymentChannel(c);
+                        },
+                      )
+                    : const _LockedSection(
+                        icon: Icons.payments_outlined,
+                        label: 'Pilih metode pembayaran...',
+                        hint: 'Pilih ruangan terlebih dahulu',
+                      ),
+                const SizedBox(height: 24),
+
+                // Section ⑧ — Data Anda (inline form; keyboard flow)
+                const _SectionHeader(number: 8, title: 'Data Anda'),
                 const SizedBox(height: 8),
                 KeyedSubtree(
                   key: _customerInfoSectionKey,
@@ -654,7 +675,7 @@ class _SelectionBodyState extends ConsumerState<_SelectionBody> {
   }
 
   // ---------------------------------------------------------------------------
-  // Progress bar (6 mandatory steps)
+  // Progress bar (7 mandatory steps; payment channel always has a default)
   // ---------------------------------------------------------------------------
 
   double _progress(BookingWizardState s) {
@@ -664,8 +685,9 @@ class _SelectionBodyState extends ConsumerState<_SelectionBody> {
     if (s.therapistConfirmed) done++;
     if (s.selectedSlot != null) done++;
     if (_roomExplicitlyChosen) done++;
+    if (_roomExplicitlyChosen) done++; // payment channel auto-selected (QRIS default)
     if (_customerInfoValid) done++;
-    return done / 6.0;
+    return done / 7.0;
   }
 
   Future<void> _submitAndNavigate(
@@ -726,7 +748,10 @@ class _SelectionBodyState extends ConsumerState<_SelectionBody> {
       scheduledEnd: response.scheduledEnd,
       branchName: branch.name,
       serviceName: service?.name ?? '',
+      paymentChannel: response.paymentChannel,
       qrString: response.qrString,
+      vaNumber: response.vaNumber,
+      vaBank: response.vaBank,
       qrExpiresAt: response.qrExpiresAt,
       paymentReference: response.paymentReference,
     );
@@ -3187,5 +3212,146 @@ extension _IterableIndexed<T> on Iterable<T> {
     for (final e in this) {
       yield f(i++, e);
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Section ⑦ — Payment channel picker
+// ---------------------------------------------------------------------------
+
+class _PaymentChannelOption {
+  const _PaymentChannelOption({
+    required this.id,
+    required this.label,
+    required this.subtitle,
+    required this.icon,
+  });
+
+  final String id;
+  final String label;
+  final String subtitle;
+  final IconData icon;
+}
+
+const _kPaymentChannelOptions = <_PaymentChannelOption>[
+  _PaymentChannelOption(
+    id: 'qris',
+    label: 'QRIS',
+    subtitle: 'GoPay, OVO, DANA, ShopeePay, BCA, m-banking',
+    icon: Icons.qr_code_2,
+  ),
+  _PaymentChannelOption(
+    id: 'va_bca',
+    label: 'Virtual Account BCA',
+    subtitle: 'Transfer via m-BCA / klikBCA / ATM BCA',
+    icon: Icons.account_balance,
+  ),
+  _PaymentChannelOption(
+    id: 'va_mandiri',
+    label: 'Virtual Account Mandiri',
+    subtitle: 'Livin\' / Mandiri Online / ATM Mandiri',
+    icon: Icons.account_balance,
+  ),
+  _PaymentChannelOption(
+    id: 'va_bni',
+    label: 'Virtual Account BNI',
+    subtitle: 'BNI Mobile / ATM BNI',
+    icon: Icons.account_balance,
+  ),
+  _PaymentChannelOption(
+    id: 'va_bri',
+    label: 'Virtual Account BRI',
+    subtitle: 'BRImo / ATM BRI',
+    icon: Icons.account_balance,
+  ),
+  _PaymentChannelOption(
+    id: 'va_permata',
+    label: 'Virtual Account Permata',
+    subtitle: 'PermataMobile X / ATM Permata',
+    icon: Icons.account_balance,
+  ),
+];
+
+class _PaymentChannelPicker extends StatelessWidget {
+  const _PaymentChannelPicker({
+    required this.selected,
+    required this.onChanged,
+  });
+
+  final String selected;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: Column(
+        children: _kPaymentChannelOptions.mapIndexed((i, opt) {
+          final isSelected = selected == opt.id;
+          final isLast = i == _kPaymentChannelOptions.length - 1;
+          return Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: () => onChanged(opt.id),
+              child: Container(
+                decoration: BoxDecoration(
+                  border: isLast
+                      ? null
+                      : Border(
+                          bottom: BorderSide(color: cs.outlineVariant),
+                        ),
+                ),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
+                child: Row(
+                  children: [
+                    Icon(opt.icon, size: 24, color: cs.primary),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            opt.label,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              fontWeight: FontWeight.w600,
+                              color: isSelected ? cs.primary : cs.onSurface,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            opt.subtitle,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: cs.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Icon(
+                      isSelected
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_unchecked,
+                      size: 22,
+                      color: isSelected ? cs.primary : cs.outlineVariant,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
   }
 }

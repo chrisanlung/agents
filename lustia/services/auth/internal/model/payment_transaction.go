@@ -40,10 +40,18 @@ type PaymentTransaction struct {
 	Provider          PaymentProvider `gorm:"column:provider;not null"`
 	ProviderReference string          `gorm:"column:provider_reference;not null;uniqueIndex:pt_provider_reference_uidx"`
 
-	// QR display data.
-	QRString    *string    `gorm:"column:qr_string"`
-	QRImageURL  *string    `gorm:"column:qr_image_url"`
-	QRExpiresAt time.Time  `gorm:"column:qr_expires_at;not null"`
+	// Payment channel (migration 000037). Values: "qris", "va_bca", "va_mandiri",
+	// "va_bni", "va_bri", "va_permata", "va_cimb". Existing rows default to "qris".
+	Channel string `gorm:"column:channel;not null;default:qris"`
+
+	// QR display data (used when Channel = "qris").
+	QRString    *string   `gorm:"column:qr_string"`
+	QRImageURL  *string   `gorm:"column:qr_image_url"`
+	QRExpiresAt time.Time `gorm:"column:qr_expires_at;not null"`
+
+	// Virtual Account display data (used when Channel starts with "va_").
+	VANumber *string `gorm:"column:va_number"`
+	VABank   *string `gorm:"column:va_bank"`
 
 	// Amounts (whole IDR).
 	ExpectedAmountIDR int64  `gorm:"column:expected_amount_idr;not null"`

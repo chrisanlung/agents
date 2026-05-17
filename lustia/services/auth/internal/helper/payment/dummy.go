@@ -59,12 +59,27 @@ func (d *DummyProvider) CreateQR(_ context.Context, req CreateQRRequest) (Create
 		expiresAt = time.Now().Add(15 * time.Minute)
 	}
 
-	return CreateQRResponse{
+	channel := req.Channel
+	if channel == "" {
+		channel = "qris"
+	}
+
+	resp := CreateQRResponse{
 		ProviderReference: req.ProviderReference,
-		QRString:          qrString,
-		QRImageURL:        qrImageURL,
+		Channel:           channel,
 		ExpiresAt:         expiresAt,
-	}, nil
+	}
+	if channel == "qris" {
+		resp.QRString = qrString
+		resp.QRImageURL = qrImageURL
+	} else {
+		// VA: emit a synthetic 16-digit number prefixed with the bank code suffix.
+		// Bank inferred from "va_<bank>" suffix.
+		bank := channel[len("va_"):]
+		resp.VANumber = fmt.Sprintf("8800%s%s", bank, req.ProviderReference[:8])
+		resp.VABank = bank
+	}
+	return resp, nil
 }
 
 // VerifyWebhook accepts any payload without signature verification.

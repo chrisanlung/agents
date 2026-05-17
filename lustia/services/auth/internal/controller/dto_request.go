@@ -431,6 +431,8 @@ type CreateBookingRequest struct {
 	CustomerName   string   `json:"customer_name"   binding:"required,min=1,max=200"`
 	CustomerPhone  string   `json:"customer_phone"  binding:"required,min=5,max=30"`
 	CustomerEmail  string   `json:"customer_email"  binding:"required,email,max=320"`
+	// Migration 000037: payment channel selected at checkout. Empty = qris (default).
+	PaymentChannel string `json:"payment_channel" binding:"omitempty,oneof=qris va_bca va_mandiri va_bni va_bri va_permata va_cimb"`
 }
 
 // ConciergeCreateBookingRequest is the JSON body for POST /api/v1/tenant/bookings.

@@ -492,14 +492,18 @@ func (b *paymentProviderBridge) CreateQR(ctx context.Context, req service.Create
 		CustomerPhone:     req.CustomerPhone,
 		Description:       req.Description,
 		ExpiryMinutes:     req.ExpiryMinutes,
+		Channel:           req.Channel,
 	})
 	if err != nil {
 		return service.CreateQRResponse{}, err
 	}
 	return service.CreateQRResponse{
 		ProviderReference: resp.ProviderReference,
+		Channel:           resp.Channel,
 		QRString:          resp.QRString,
 		QRImageURL:        resp.QRImageURL,
+		VANumber:          resp.VANumber,
+		VABank:            resp.VABank,
 		ExpiresAt:         resp.ExpiresAt,
 	}, nil
 }

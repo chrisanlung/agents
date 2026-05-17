@@ -58,13 +58,21 @@ type CreateQRRequest struct {
 	CustomerPhone     string
 	Description       string
 	ExpiryMinutes     int
+	// Channel selects payment method (migration 000037): "qris" (default) or
+	// "va_bca" | "va_mandiri" | "va_bni" | "va_bri" | "va_permata" | "va_cimb".
+	Channel string
 }
 
 // CreateQRResponse is returned by PaymentProvider.CreateQR.
+// For QRIS channel: QRString + QRImageURL are populated.
+// For VA channel: VANumber + VABank are populated.
 type CreateQRResponse struct {
 	ProviderReference string
+	Channel           string
 	QRString          string
 	QRImageURL        string
+	VANumber          string
+	VABank            string
 	ExpiresAt         time.Time
 }
 
@@ -919,11 +927,16 @@ type DisbursementFilter struct {
 // ---------------------------------------------------------------------------
 
 // InitiatePaymentOutput is returned by PaymentService.InitiateForBooking.
+// For QRIS channel: QRString + QRImageURL are populated.
+// For VA channel: VANumber + VABank are populated.
 type InitiatePaymentOutput struct {
 	TransactionID     string
 	ProviderReference string
+	Channel           string // "qris" or "va_<bank>"
 	QRString          string
 	QRImageURL        string
+	VANumber          string
+	VABank            string
 	QRExpiresAt       time.Time
 }
 

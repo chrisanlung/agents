@@ -1090,13 +1090,17 @@ type PublicCreateBookingInput struct {
 	BranchID       string
 	ServiceID      string
 	AddonIDs       []string
-	RoomID         *string  // nil = auto-assign
-	TherapistID    *string  // nil = auto-assign
-	ScheduledStart string   // RFC3339
+	RoomID         *string // nil = auto-assign
+	TherapistID    *string // nil = auto-assign
+	ScheduledStart string  // RFC3339
 	CustomerName   string
 	CustomerPhone  string
 	CustomerEmail  string
-	ClientIP       string   // for rate-limit audit
+	ClientIP       string // for rate-limit audit
+	// Migration 000037: payment channel selected by customer at checkout.
+	// "qris" (default) | "va_bca" | "va_mandiri" | "va_bni" | "va_bri" |
+	// "va_permata" | "va_cimb". Empty = qris.
+	PaymentChannel string
 }
 
 // ConciergeCreateBookingInput carries data for the ops-staff booking creation.
@@ -1257,11 +1261,16 @@ type WebhookHandleInput struct {
 // Phase 6 (ADR 0015 §2.8): returns QRIS fields instead of Midtrans snap token.
 type CreateBookingOutput struct {
 	BookingDetail
-	// Phase 6 QRIS fields — populated for public (non-concierge) bookings.
-	QRString          string
-	QRImageURL        string
-	QRExpiresAt       string // RFC3339
-	PaymentReference  string // provider_reference stored in payment_transaction
+	// Phase 6 payment fields — populated for public (non-concierge) bookings.
+	// Channel = "qris" populates QRString/QRImageURL.
+	// Channel = "va_<bank>" populates VANumber/VABank.
+	PaymentChannel   string
+	QRString         string
+	QRImageURL       string
+	VANumber         string
+	VABank           string
+	QRExpiresAt      string // RFC3339; same field for VA expiry too
+	PaymentReference string // provider_reference stored in payment_transaction
 	// Deprecated Phase 5 fields — kept to avoid breaking the concierge path
 	// which doesn't use QR. Will be removed in a future cleanup pass.
 	SnapToken   string

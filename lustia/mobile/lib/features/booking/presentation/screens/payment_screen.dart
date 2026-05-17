@@ -32,7 +32,10 @@ final class PaymentRouteData {
     required this.scheduledEnd,
     required this.branchName,
     required this.serviceName,
+    this.paymentChannel,
     this.qrString,
+    this.vaNumber,
+    this.vaBank,
     this.qrExpiresAt,
     this.paymentReference,
   });
@@ -44,12 +47,24 @@ final class PaymentRouteData {
   final String branchName;
   final String serviceName;
 
-  /// QRIS string — dirender oleh qr_flutter.
+  /// 'qris' | 'va_<bank>'. Null fallback → assume 'qris'.
+  final String? paymentChannel;
+
+  /// QRIS string — dirender oleh qr_flutter (set when channel = 'qris').
   final String? qrString;
 
-  /// ISO-8601 string batas waktu QR.
+  /// Nomor Virtual Account (set when channel starts with 'va_').
+  final String? vaNumber;
+
+  /// Kode bank VA: bca / mandiri / bni / bri / permata / cimb.
+  final String? vaBank;
+
+  /// ISO-8601 batas waktu pembayaran.
   final String? qrExpiresAt;
   final String? paymentReference;
+
+  /// True ketika channel = VA (bukan QRIS).
+  bool get isVA => (paymentChannel ?? 'qris').startsWith('va_');
 }
 
 // ---------------------------------------------------------------------------
@@ -355,27 +370,35 @@ class _QrPaymentBody extends StatelessWidget {
 
             const SizedBox(height: 24),
 
-            // -- QR code --
-            Card(
-              elevation: 2,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Semantics(
-                  label:
-                      'QR QRIS untuk pembayaran booking $formattedCode. '
-                      'Scan dengan aplikasi e-wallet atau m-banking.',
-                  child: QrDisplay(data: qrValue),
+            // -- Payment payload (QR or VA depending on channel) --
+            if (data.isVA)
+              _VaPaymentCard(
+                vaNumber: data.vaNumber ?? '',
+                vaBank: data.vaBank ?? '',
+              )
+            else
+              Card(
+                elevation: 2,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Semantics(
+                    label:
+                        'QR QRIS untuk pembayaran booking $formattedCode. '
+                        'Scan dengan aplikasi e-wallet atau m-banking.',
+                    child: QrDisplay(data: qrValue),
+                  ),
                 ),
               ),
-            ),
             const SizedBox(height: 16),
 
-            // -- Instruction --
+            // -- Instruction (channel-aware) --
             Text(
-              'Scan QR ini dengan Dana / GoPay / OVO / m-banking BCA / dll.',
+              data.isVA
+                  ? 'Buka m-banking ${_bankDisplayName(data.vaBank)}, pilih Transfer → Virtual Account, masukkan nomor di atas.'
+                  : 'Scan QR ini dengan Dana / GoPay / OVO / m-banking BCA / dll.',
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: cs.onSurfaceVariant,
               ),
@@ -692,3 +715,93 @@ class _ExpiredScreen extends StatelessWidget {
 // _LegacySubmitPaymentScreen, _PriceCard, _SubmitBar, _PriceRow removed.
 // Booking submission now handled in BookingSelectionScreen before navigating
 // here. PaymentScreen is QR-only post-Phase-6.
+
+// ---------------------------------------------------------------------------
+// Virtual Account card — shown when channel = "va_<bank>" (migration 000037).
+// ---------------------------------------------------------------------------
+
+String _bankDisplayName(String? code) {
+  switch (code) {
+    case 'bca':
+      return 'BCA';
+    case 'mandiri':
+      return 'Mandiri';
+    case 'bni':
+      return 'BNI';
+    case 'bri':
+      return 'BRI';
+    case 'permata':
+      return 'Permata';
+    case 'cimb':
+      return 'CIMB';
+    default:
+      return code?.toUpperCase() ?? '';
+  }
+}
+
+class _VaPaymentCard extends StatelessWidget {
+  const _VaPaymentCard({required this.vaNumber, required this.vaBank});
+
+  final String vaNumber;
+  final String vaBank;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final bankName = _bankDisplayName(vaBank);
+
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: cs.primaryContainer,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Text(
+                'Virtual Account $bankName',
+                style: theme.textTheme.labelLarge?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: cs.onPrimaryContainer,
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              vaNumber,
+              style: const TextStyle(
+                fontSize: 28,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 2,
+                fontFamily: 'monospace',
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.copy_outlined, size: 18),
+              label: const Text('Salin Nomor VA'),
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 44),
+              ),
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: vaNumber));
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Nomor VA disalin.')),
+                  );
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

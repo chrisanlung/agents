@@ -83,6 +83,11 @@ class BookingWizard extends _$BookingWizard {
     }
   }
 
+  /// Set payment channel: 'qris' (default) or 'va_<bank>'.
+  void selectPaymentChannel(String channel) {
+    state = state.copyWith(paymentChannel: channel);
+  }
+
   void updateCustomerInfo({
     required String name,
     required String phone,
@@ -134,6 +139,7 @@ class BookingSubmit extends _$BookingSubmit {
       addonIds: wizard.selectedAddonIds,
       roomId: wizard.selectedRoomId,
       therapistId: wizard.selectedTherapistId,
+      paymentChannel: wizard.paymentChannel,
     );
 
     final result = await AsyncValue.guard(() => repo.createBooking(request));
